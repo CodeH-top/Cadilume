@@ -34,7 +34,8 @@ const UNUSED_TICKET_TTL: Duration = Duration::from_secs(90);
 // albums and recordings; logout and the bounded registry still revoke it.
 const ACTIVE_TICKET_IDLE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const MAX_TICKET_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
-const MAX_TICKETS: usize = 128;
+const MAX_AUDIO_TICKETS: usize = 128;
+const MAX_ARTWORK_TICKETS: usize = 512;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(15);
 const TRANSCODE_PROFILE: &str = "add-transcode-target(replace=true&type=musicProfile&context=streaming&protocol=http&container=mp3&audioCodec=mp3)";
@@ -97,13 +98,13 @@ impl StreamTarget {
 }
 
 #[derive(Debug, Clone)]
-struct TicketRecord {
-    target: StreamTarget,
+struct TicketRecord<T> {
+    target: T,
     created_at: Instant,
     last_used_at: Option<Instant>,
 }
 
-impl TicketRecord {
+impl<T> TicketRecord<T> {
     fn is_expired(&self, now: Instant) -> bool {
         if now.saturating_duration_since(self.created_at) > MAX_TICKET_LIFETIME {
             return true;
@@ -117,19 +118,27 @@ impl TicketRecord {
     }
 }
 
-#[derive(Default)]
-struct TicketRegistry {
-    entries: HashMap<String, TicketRecord>,
+struct TicketRegistry<T> {
+    entries: HashMap<String, TicketRecord<T>>,
+    capacity: usize,
 }
 
-impl TicketRegistry {
-    fn issue(&mut self, target: StreamTarget) -> String {
+impl<T: Clone> TicketRegistry<T> {
+    fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "ticket registry capacity must be positive");
+        Self {
+            entries: HashMap::new(),
+            capacity,
+        }
+    }
+
+    fn issue(&mut self, target: T) -> String {
         self.issue_at(target, Instant::now())
     }
 
-    fn issue_at(&mut self, target: StreamTarget, now: Instant) -> String {
+    fn issue_at(&mut self, target: T, now: Instant) -> String {
         self.prune_at(now);
-        while self.entries.len() >= MAX_TICKETS {
+        while self.entries.len() >= self.capacity {
             let Some(oldest) = self
                 .entries
                 .iter()
@@ -158,11 +167,11 @@ impl TicketRegistry {
         }
     }
 
-    fn resolve(&mut self, ticket: &str) -> Option<StreamTarget> {
+    fn resolve(&mut self, ticket: &str) -> Option<T> {
         self.resolve_at(ticket, Instant::now())
     }
 
-    fn resolve_at(&mut self, ticket: &str, now: Instant) -> Option<StreamTarget> {
+    fn resolve_at(&mut self, ticket: &str, now: Instant) -> Option<T> {
         if !valid_ticket(ticket) {
             return None;
         }
@@ -191,34 +200,39 @@ impl TicketRegistry {
 struct ProxyRuntime {
     app: AppHandle,
     client: Client,
-    tickets: Arc<Mutex<TicketRegistry>>,
+    audio_tickets: Arc<Mutex<TicketRegistry<StreamTarget>>>,
+    artwork_tickets: Arc<Mutex<TicketRegistry<String>>>,
     expected_host: String,
 }
 
 pub struct StreamProxy {
     port: u16,
-    tickets: Arc<Mutex<TicketRegistry>>,
+    audio_tickets: Arc<Mutex<TicketRegistry<StreamTarget>>>,
+    artwork_tickets: Arc<Mutex<TicketRegistry<String>>>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 impl StreamProxy {
     pub fn start(app: AppHandle) -> Result<Self> {
         let listener = StdTcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-            .context("无法启动本机音频代理")?;
+            .context("无法启动本机媒体代理")?;
         listener
             .set_nonblocking(true)
-            .context("无法配置本机音频代理")?;
+            .context("无法配置本机媒体代理")?;
         let port = listener.local_addr()?.port();
-        let tickets = Arc::new(Mutex::new(TicketRegistry::default()));
+        let audio_tickets = Arc::new(Mutex::new(TicketRegistry::new(MAX_AUDIO_TICKETS)));
+        let artwork_tickets = Arc::new(Mutex::new(TicketRegistry::new(MAX_ARTWORK_TICKETS)));
         let client = build_stream_client()?;
         let runtime = Arc::new(ProxyRuntime {
             app,
             client,
-            tickets: Arc::clone(&tickets),
+            audio_tickets: Arc::clone(&audio_tickets),
+            artwork_tickets: Arc::clone(&artwork_tickets),
             expected_host: format!("127.0.0.1:{port}"),
         });
         let router = Router::new()
             .route("/stream/{ticket}", get(proxy_get).head(proxy_head))
+            .route("/artwork/{ticket}", get(artwork_get).head(artwork_head))
             .with_state(runtime);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -226,7 +240,7 @@ impl StreamProxy {
             let listener = match TcpListener::from_std(listener) {
                 Ok(listener) => listener,
                 Err(error) => {
-                    eprintln!("本机音频代理启动失败：{error}");
+                    eprintln!("本机媒体代理启动失败：{error}");
                     return;
                 }
             };
@@ -234,13 +248,14 @@ impl StreamProxy {
                 let _ = shutdown_rx.await;
             });
             if let Err(error) = server.await {
-                eprintln!("本机音频代理已停止：{error}");
+                eprintln!("本机媒体代理已停止：{error}");
             }
         });
 
         Ok(Self {
             port,
-            tickets,
+            audio_tickets,
+            artwork_tickets,
             shutdown: Mutex::new(Some(shutdown_tx)),
         })
     }
@@ -252,7 +267,7 @@ impl StreamProxy {
             ""
         };
         let ticket = self
-            .tickets
+            .audio_tickets
             .lock()
             .map_err(|_| anyhow!("音频代理票据状态读取失败"))?
             .issue(target);
@@ -262,10 +277,32 @@ impl StreamProxy {
         ))
     }
 
-    pub(crate) fn clear(&self) -> Result<()> {
-        self.tickets
+    pub(crate) fn issue_artwork(&self, cache_key: String) -> Result<String> {
+        if !valid_ticket(&cache_key) {
+            return Err(anyhow!("无效的封面缓存标识"));
+        }
+        let ticket = self
+            .artwork_tickets
             .lock()
-            .map_err(|_| anyhow!("音频代理票据状态读取失败"))?
+            .map_err(|_| anyhow!("封面代理票据状态读取失败"))?
+            .issue(cache_key);
+        Ok(format!("http://127.0.0.1:{}/artwork/{ticket}", self.port))
+    }
+
+    pub(crate) fn clear(&self) -> Result<()> {
+        {
+            self.audio_tickets
+                .lock()
+                .map_err(|_| anyhow!("音频代理票据状态读取失败"))?
+                .clear();
+        }
+        self.clear_artwork()
+    }
+
+    pub(crate) fn clear_artwork(&self) -> Result<()> {
+        self.artwork_tickets
+            .lock()
+            .map_err(|_| anyhow!("封面代理票据状态读取失败"))?
             .clear();
         Ok(())
     }
@@ -321,6 +358,24 @@ async fn proxy_head(
     proxy_request(runtime, ticket, Method::HEAD, headers, uri).await
 }
 
+async fn artwork_get(
+    State(runtime): State<Arc<ProxyRuntime>>,
+    Path(ticket): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    artwork_request(runtime, ticket, Method::GET, headers, uri).await
+}
+
+async fn artwork_head(
+    State(runtime): State<Arc<ProxyRuntime>>,
+    Path(ticket): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    artwork_request(runtime, ticket, Method::HEAD, headers, uri).await
+}
+
 async fn proxy_request(
     runtime: Arc<ProxyRuntime>,
     ticket: String,
@@ -333,7 +388,7 @@ async fn proxy_request(
     }
 
     let target = match runtime
-        .tickets
+        .audio_tickets
         .lock()
         .ok()
         .and_then(|mut tickets| tickets.resolve(&ticket))
@@ -355,6 +410,48 @@ async fn proxy_request(
     };
 
     forward_to_plex(&runtime, &target, method, range, if_range).await
+}
+
+async fn artwork_request(
+    runtime: Arc<ProxyRuntime>,
+    ticket: String,
+    method: Method,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if !valid_host(&headers, &runtime.expected_host) {
+        return artwork_error_response(&method, StatusCode::FORBIDDEN, "拒绝非本机封面代理请求");
+    }
+    if !valid_artwork_query(&uri) {
+        return artwork_error_response(&method, StatusCode::BAD_REQUEST, "封面代理不接受查询参数");
+    }
+
+    let cache_key = match runtime
+        .artwork_tickets
+        .lock()
+        .ok()
+        .and_then(|mut tickets| tickets.resolve(&ticket))
+    {
+        Some(cache_key) => cache_key,
+        None => {
+            return artwork_error_response(&method, StatusCode::NOT_FOUND, "封面地址已失效");
+        }
+    };
+    let Some(plex) = runtime.app.try_state::<PlexState>() else {
+        return artwork_error_response(
+            &method,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "播放器服务尚未就绪",
+        );
+    };
+    let artwork = match plex.cached_artwork(&cache_key) {
+        Ok(artwork) => artwork,
+        Err(_) => {
+            return artwork_error_response(&method, StatusCode::NOT_FOUND, "封面地址已失效");
+        }
+    };
+
+    artwork_response(artwork.mime, artwork.bytes, &method)
 }
 
 async fn forward_to_plex(
@@ -440,6 +537,52 @@ fn downstream_response(upstream: reqwest::Response, method: &Method) -> Response
     response
 }
 
+fn artwork_response(mime: String, bytes: Vec<u8>, method: &Method) -> Response {
+    let content_type = match HeaderValue::from_str(&mime) {
+        Ok(content_type) => content_type,
+        Err(_) => {
+            return artwork_error_response(
+                method,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "封面缓存类型无效",
+            );
+        }
+    };
+    let content_length = bytes.len() as u64;
+    let body = if method == Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(bytes)
+    };
+    let mut response = Response::new(body);
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(CONTENT_TYPE, content_type);
+    response
+        .headers_mut()
+        .insert(CONTENT_LENGTH, HeaderValue::from(content_length));
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store, max-age=0"),
+    );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+fn artwork_error_response(
+    method: &Method,
+    status: StatusCode,
+    message: impl Into<String>,
+) -> Response {
+    let mut response = error_response(status, message);
+    if method == Method::HEAD {
+        *response.body_mut() = Body::empty();
+    }
+    response
+}
+
 fn copy_stream_headers(upstream: &HeaderMap, downstream: &mut HeaderMap) {
     for header in [
         CONTENT_TYPE,
@@ -465,6 +608,10 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
     response.headers_mut().insert(
         CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
     );
     response
 }
@@ -612,10 +759,12 @@ fn valid_ticket(ticket: &str) -> bool {
 }
 
 fn valid_host(headers: &HeaderMap, expected_host: &str) -> bool {
-    headers
-        .get(HOST)
+    let mut hosts = headers.get_all(HOST).iter();
+    hosts
+        .next()
         .and_then(|value| value.to_str().ok())
         .is_some_and(|host| host == expected_host)
+        && hosts.next().is_none()
 }
 
 fn valid_proxy_query(uri: &Uri, target: &StreamTarget) -> bool {
@@ -624,6 +773,10 @@ fn valid_proxy_query(uri: &Uri, target: &StreamTarget) -> bool {
         Some("maxAudioBitrate=320") => target.public_bitrate_marker == Some(320),
         Some(_) => false,
     }
+}
+
+fn valid_artwork_query(uri: &Uri) -> bool {
+    uri.query().is_none()
 }
 
 fn parse_range_header(
@@ -701,10 +854,28 @@ mod tests {
         }
     }
 
+    fn test_proxy() -> StreamProxy {
+        StreamProxy {
+            port: 49_152,
+            audio_tickets: Arc::new(Mutex::new(TicketRegistry::new(MAX_AUDIO_TICKETS))),
+            artwork_tickets: Arc::new(Mutex::new(TicketRegistry::new(MAX_ARTWORK_TICKETS))),
+            shutdown: Mutex::new(None),
+        }
+    }
+
+    fn url_ticket(url: &str, prefix: &str) -> String {
+        Url::parse(url)
+            .expect("proxy URL should be valid")
+            .path()
+            .strip_prefix(prefix)
+            .expect("proxy URL should use the expected path")
+            .to_string()
+    }
+
     #[test]
     fn tickets_are_unpredictable_and_expire() {
         let now = Instant::now();
-        let mut registry = TicketRegistry::default();
+        let mut registry = TicketRegistry::new(MAX_AUDIO_TICKETS);
         let ticket = registry.issue_at(target("original"), now);
         assert!(valid_ticket(&ticket));
         assert_eq!(ticket.len(), 64);
@@ -731,7 +902,7 @@ mod tests {
     #[test]
     fn active_ticket_has_idle_and_absolute_expiry() {
         let now = Instant::now();
-        let mut registry = TicketRegistry::default();
+        let mut registry = TicketRegistry::new(MAX_AUDIO_TICKETS);
         let idle = registry.issue_at(target("original"), now);
         assert!(registry.resolve_at(&idle, now).is_some());
         assert!(registry
@@ -751,7 +922,7 @@ mod tests {
     #[test]
     fn clearing_registry_revokes_all_tickets() {
         let now = Instant::now();
-        let mut registry = TicketRegistry::default();
+        let mut registry = TicketRegistry::new(MAX_AUDIO_TICKETS);
         let first = registry.issue_at(target("original"), now);
         let second = registry.issue_at(target("320"), now);
         registry.clear();
@@ -762,11 +933,7 @@ mod tests {
 
     #[test]
     fn issued_url_only_exposes_loopback_ticket_and_public_quality_marker() {
-        let proxy = StreamProxy {
-            port: 49_152,
-            tickets: Arc::new(Mutex::new(TicketRegistry::default())),
-            shutdown: Mutex::new(None),
-        };
+        let proxy = test_proxy();
         let url = proxy.issue(target("320")).unwrap();
         assert!(url.starts_with("http://127.0.0.1:49152/stream/"));
         assert!(url.ends_with("?maxAudioBitrate=320"));
@@ -779,17 +946,99 @@ mod tests {
     }
 
     #[test]
+    fn issued_artwork_url_only_exposes_loopback_ticket() {
+        let proxy = test_proxy();
+        assert!(proxy.issue_artwork("too-short".to_string()).is_err());
+        assert!(proxy.issue_artwork("A".repeat(64)).is_err());
+        let cache_key = "a".repeat(64);
+        let url = proxy.issue_artwork(cache_key.clone()).unwrap();
+        let parsed = Url::parse(&url).unwrap();
+        assert_eq!(parsed.scheme(), "http");
+        assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+        assert_eq!(parsed.port(), Some(49_152));
+        assert!(parsed.query().is_none());
+        assert!(!url.contains(&cache_key));
+
+        let ticket = url_ticket(&url, "/artwork/");
+        assert!(valid_ticket(&ticket));
+        assert_eq!(
+            proxy
+                .artwork_tickets
+                .lock()
+                .unwrap()
+                .resolve(&ticket)
+                .as_deref(),
+            Some(cache_key.as_str())
+        );
+    }
+
+    #[test]
+    fn audio_and_artwork_capacities_are_independent() {
+        let proxy = test_proxy();
+        let audio_ticket = url_ticket(&proxy.issue(target("original")).unwrap(), "/stream/");
+        for index in 0..=MAX_ARTWORK_TICKETS {
+            proxy.issue_artwork(format!("{index:064x}")).unwrap();
+        }
+        assert!(proxy
+            .audio_tickets
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&audio_ticket));
+        assert_eq!(
+            proxy.artwork_tickets.lock().unwrap().entries.len(),
+            MAX_ARTWORK_TICKETS
+        );
+
+        let artwork_ticket = url_ticket(&proxy.issue_artwork("f".repeat(64)).unwrap(), "/artwork/");
+        for _ in 0..=MAX_AUDIO_TICKETS {
+            proxy.issue(target("original")).unwrap();
+        }
+        assert!(proxy
+            .artwork_tickets
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&artwork_ticket));
+        assert_eq!(
+            proxy.audio_tickets.lock().unwrap().entries.len(),
+            MAX_AUDIO_TICKETS
+        );
+    }
+
+    #[test]
+    fn clear_artwork_leaves_audio_tickets_and_clear_revokes_both() {
+        let proxy = test_proxy();
+        let audio_ticket = url_ticket(&proxy.issue(target("original")).unwrap(), "/stream/");
+        proxy.issue_artwork("b".repeat(64)).unwrap();
+
+        proxy.clear_artwork().unwrap();
+        assert!(proxy.artwork_tickets.lock().unwrap().entries.is_empty());
+        assert!(proxy
+            .audio_tickets
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&audio_ticket));
+
+        proxy.issue_artwork("c".repeat(64)).unwrap();
+        proxy.clear().unwrap();
+        assert!(proxy.audio_tickets.lock().unwrap().entries.is_empty());
+        assert!(proxy.artwork_tickets.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
     fn registry_evicts_oldest_ticket_at_capacity() {
         let now = Instant::now();
-        let mut registry = TicketRegistry::default();
+        let mut registry = TicketRegistry::new(MAX_AUDIO_TICKETS);
         let oldest = registry.issue_at(target("original"), now);
-        for offset in 1..=MAX_TICKETS {
+        for offset in 1..=MAX_AUDIO_TICKETS {
             registry.issue_at(
                 target("original"),
                 now + Duration::from_millis(offset as u64),
             );
         }
-        assert_eq!(registry.entries.len(), MAX_TICKETS);
+        assert_eq!(registry.entries.len(), MAX_AUDIO_TICKETS);
         assert!(!registry.entries.contains_key(&oldest));
     }
 
@@ -954,11 +1203,51 @@ mod tests {
     }
 
     #[test]
+    fn artwork_responses_set_safe_headers_and_head_has_no_body() {
+        use axum::body::HttpBody as _;
+
+        let get = artwork_response(
+            "image/png".to_string(),
+            vec![0x89, b'P', b'N', b'G'],
+            &Method::GET,
+        );
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_eq!(get.headers().get(CONTENT_TYPE).unwrap(), "image/png");
+        assert_eq!(get.headers().get(CONTENT_LENGTH).unwrap(), "4");
+        assert_eq!(
+            get.headers().get(CACHE_CONTROL).unwrap(),
+            "private, no-store, max-age=0"
+        );
+        assert_eq!(
+            get.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        assert_eq!(get.body().size_hint().exact(), Some(4));
+
+        let head = artwork_response(
+            "image/jpeg".to_string(),
+            vec![0xff, 0xd8, 0xff],
+            &Method::HEAD,
+        );
+        assert_eq!(head.headers().get(CONTENT_TYPE).unwrap(), "image/jpeg");
+        assert_eq!(head.headers().get(CONTENT_LENGTH).unwrap(), "3");
+        assert_eq!(head.body().size_hint().exact(), Some(0));
+
+        let head_error =
+            artwork_error_response(&Method::HEAD, StatusCode::NOT_FOUND, "封面地址已失效");
+        assert_eq!(head_error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(head_error.body().size_hint().exact(), Some(0));
+    }
+
+    #[test]
     fn host_and_public_quality_marker_are_strict() {
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("127.0.0.1:49152"));
         assert!(valid_host(&headers, "127.0.0.1:49152"));
         assert!(!valid_host(&headers, "localhost:49152"));
+        headers.append(HOST, HeaderValue::from_static("localhost:49152"));
+        assert!(!valid_host(&headers, "127.0.0.1:49152"));
+        assert!(!valid_host(&HeaderMap::new(), "127.0.0.1:49152"));
 
         let original = target("original");
         let fallback = target("320");
@@ -970,6 +1259,11 @@ mod tests {
         assert!(valid_proxy_query(
             &"/stream/x?maxAudioBitrate=320".parse().unwrap(),
             &fallback
+        ));
+        assert!(valid_artwork_query(&"/artwork/x".parse().unwrap()));
+        assert!(!valid_artwork_query(&"/artwork/x?".parse().unwrap()));
+        assert!(!valid_artwork_query(
+            &"/artwork/x?next=https://evil.test".parse().unwrap()
         ));
     }
 }

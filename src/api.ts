@@ -227,11 +227,11 @@ export async function getLyrics(serverId: string, ratingKey: string): Promise<Pl
   return invoke("lyrics", { serverId, ratingKey });
 }
 
-export async function artworkDataUrl(serverId: string, path: string, width: number, height = width): Promise<string> {
+export async function artworkUrl(serverId: string, path: string, width: number, height = width): Promise<string> {
   if (!isDesktopRuntime()) return path;
   return new Promise<string>((resolve, reject) => {
     artworkQueue.push(() => {
-      void invoke<string>("image_data_url", { serverId, path, width, height })
+      void invoke<string>("artwork_url", { serverId, path, width, height })
         .then(resolve, reject)
         .finally(() => {
           activeArtworkRequests -= 1;

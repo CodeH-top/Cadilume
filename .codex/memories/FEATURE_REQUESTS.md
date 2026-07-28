@@ -15,4 +15,3 @@
 - Drive browsing and capabilities from `/media/providers` instead of fixed legacy paths.
 - Add server-backed playQueues and universal playback decision.
 - Add an isolated experimental Managed User home-switch adapter.
-- Proxy media/images through Rust tickets so server tokens never appear in WebView URLs.

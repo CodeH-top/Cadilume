@@ -61,7 +61,7 @@ Cadilume 的首要原则：
 - 跟随系统、浅色、深色三种主题模式。
 - 播放器底栏固定提供歌词、队列、播放设备和独立音量入口。
 - 封面在接近可视区域时预取；前端限制并发并复用请求，Rust 使用服务器 token Header 拉取图片，而不是把 token 放进图片 URL。
-- Rust 将封面写入应用缓存目录下的 `cadilume/artwork` 磁盘缓存。缓存键同时包含当前授权 token 的哈希输入、服务器、图片路径和尺寸，账号之间不会复用旧授权缓存且不会把 token 本身写入磁盘；单张图片限制 12 MiB，总量限制 512 MiB，并按最近命中时间近似 LRU 淘汰。命中后返回 Data URL 给 WebView，设置页可查看大小并清理缓存。
+- Rust 将封面写入应用缓存目录下的 `cadilume/artwork` 磁盘缓存。缓存键同时包含当前授权 token 的哈希输入、服务器、图片路径和尺寸，账号之间不会复用旧授权缓存且不会把 token 本身写入磁盘；单张图片限制 12 MiB，总量限制 512 MiB，并按最近命中时间近似 LRU 淘汰。命中后只向 WebView 返回独立的本机高熵封面票据 URL，设置页可查看大小并清理缓存。
 
 ## 开发
 
@@ -119,7 +119,7 @@ docs/                 Plex 互操作研究与演进架构
 - v0.1 仍使用 WebView 音频元素。双 Audio 能减少确定性切歌前的等待，但不等于严格 gapless、crossfade、完整后台队列权威或音频离线缓存。
 - AirPlay 依赖 macOS WKWebView 暴露的 WebKit 播放目标能力；Windows 输出设备依赖 WebView2 的 Audio Output Devices API。真实 AirPlay 接收器、USB/蓝牙/HDMI 声卡、设备热插拔和休眠恢复仍需对应平台真机验收。
 - Windows 当前提供 Web Media Session 能力，但不宣称完整原生 SMTC；更稳定的后台播放、严格 gapless 和平台媒体集成仍需要 Rust 原生播放核心。
-- 账号 token 保存在系统凭据存储，服务器专属 token 只保留在 Rust 状态中；PIN IPC 仅返回 `authenticated`。PMS 数据、封面和音频上游请求都由 Rust 用 Header 鉴权。WebView 播放的是 `127.0.0.1` 随机端口上的短期高熵 ticket URL，其中不含 PMS 地址、媒体路径或 `X-Plex-Token`；本地代理支持 GET/HEAD、单段 HTTP Range，并在已发现的本地、远程与 Relay 连接间回退。
+- 账号 token 保存在系统凭据存储，服务器专属 token 只保留在 Rust 状态中；PIN IPC 仅返回 `authenticated`。PMS 数据、封面和音频上游请求都由 Rust 用 Header 鉴权。WebView 的音频与封面地址都是 `127.0.0.1` 随机端口上的短期高熵 ticket URL，其中不含 PMS 地址、媒体路径、缓存键或 `X-Plex-Token`；音频代理支持 GET/HEAD、单段 HTTP Range，并在已发现的本地、远程与 Relay 连接间回退，封面代理只读取已经校验的本地磁盘缓存。
 - 原生退出入口会先发送退出前事件，让播放器立即保存队列与进度，再在收到确认或短超时后结束进程；关闭到托盘只隐藏窗口，不会误结束播放。
 - 客户端只播放服务器已经授权给当前账号的内容。支持免费账号访问已共享的 Music 库，不代表绕过 Plex ACL、服务端限制或特定功能的订阅要求。
 

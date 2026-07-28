@@ -32,7 +32,7 @@ pub fn run() {
             plex::discover_servers,
             plex::server_get,
             plex::add_to_playlist,
-            plex::image_data_url,
+            plex::artwork_url,
             stream_proxy::stream_url,
             plex::lyrics,
             plex::cache_status,

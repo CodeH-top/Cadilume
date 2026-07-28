@@ -11,7 +11,6 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use quick_xml::de::from_str as from_xml_str;
 use reqwest::{
     header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE},
@@ -336,6 +335,14 @@ impl PlexState {
     pub(crate) fn client_identifier(&self) -> &str {
         &self.client_identifier
     }
+
+    pub(crate) fn cached_artwork(&self, cache_key: &str) -> Result<CachedArtwork> {
+        let _cache_guard = self
+            .cache_lock
+            .read()
+            .map_err(|_| anyhow!("图片缓存读取锁定失败"))?;
+        read_artwork_cache(&self.cache_dir, cache_key)?.ok_or_else(|| anyhow!("封面缓存已失效"))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -509,9 +516,9 @@ pub struct CacheStatus {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct CachedArtwork {
-    mime: String,
-    bytes: Vec<u8>,
+pub(crate) struct CachedArtwork {
+    pub(crate) mime: String,
+    pub(crate) bytes: Vec<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -859,12 +866,24 @@ pub async fn lyrics(
 }
 
 #[tauri::command]
-pub async fn image_data_url(
+pub async fn artwork_url(
     server_id: String,
     path: String,
     width: Option<u32>,
     height: Option<u32>,
     state: State<'_, PlexState>,
+    stream_proxy: State<'_, StreamProxy>,
+) -> Result<String, String> {
+    let cache_key = ensure_artwork_cached(server_id, path, width, height, &state).await?;
+    stream_proxy.issue_artwork(cache_key).map_err(display_error)
+}
+
+async fn ensure_artwork_cached(
+    server_id: String,
+    path: String,
+    width: Option<u32>,
+    height: Option<u32>,
+    state: &PlexState,
 ) -> Result<String, String> {
     if !valid_internal_image_path(&path) {
         return Err("无效的 Plex 图片路径".to_string());
@@ -878,7 +897,7 @@ pub async fn image_data_url(
     let cache_key = artwork_cache_key(&server_id, &path, width, height, &server.token);
     if let Ok(_cache_guard) = state.cache_lock.read() {
         match read_artwork_cache(&state.cache_dir, &cache_key) {
-            Ok(Some(artwork)) => return Ok(artwork_data_url(&artwork.mime, &artwork.bytes)),
+            Ok(Some(_)) => return Ok(cache_key),
             Ok(None) => {}
             Err(_) => discard_artwork_cache_entry(&state.cache_dir, &cache_key),
         }
@@ -964,10 +983,12 @@ pub async fn image_data_url(
         if index > 0 {
             state.promote_connection(&server_id, &connection.uri);
         }
-        if let Ok(_cache_guard) = state.cache_lock.write() {
-            let _ = write_artwork_cache(&state.cache_dir, &cache_key, &mime, &bytes);
-        }
-        return Ok(artwork_data_url(&mime, &bytes));
+        let _cache_guard = state
+            .cache_lock
+            .write()
+            .map_err(|_| "图片缓存写入锁定失败".to_string())?;
+        write_artwork_cache(&state.cache_dir, &cache_key, &mime, &bytes).map_err(display_error)?;
+        return Ok(cache_key);
     }
 
     Err(format!(
@@ -986,7 +1007,11 @@ pub fn cache_status(state: State<'_, PlexState>) -> Result<CacheStatus, String> 
 }
 
 #[tauri::command]
-pub fn clear_cache(state: State<'_, PlexState>) -> Result<CacheStatus, String> {
+pub fn clear_cache(
+    state: State<'_, PlexState>,
+    stream_proxy: State<'_, StreamProxy>,
+) -> Result<CacheStatus, String> {
+    stream_proxy.clear_artwork().map_err(display_error)?;
     let _cache_guard = state
         .cache_lock
         .write()
@@ -1788,10 +1813,6 @@ fn clear_artwork_cache(cache_dir: &Path) -> Result<CacheStatus> {
     artwork_cache_status(cache_dir)
 }
 
-fn artwork_data_url(mime: &str, bytes: &[u8]) -> String {
-    format!("data:{mime};base64,{}", BASE64_STANDARD.encode(bytes))
-}
-
 fn valid_internal_image_path(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     path.len() <= 4096
@@ -2251,10 +2272,6 @@ mod tests {
             .expect("cache should hit");
         assert_eq!(cached.mime, "image/png");
         assert_eq!(cached.bytes, bytes);
-        assert_eq!(
-            artwork_data_url(&cached.mime, &cached.bytes),
-            format!("data:image/png;base64,{}", BASE64_STANDARD.encode(bytes))
-        );
 
         let cache_file_size = fs::metadata(
             artwork_cache_path(&cache.artwork, &key).expect("cache key should be safe"),

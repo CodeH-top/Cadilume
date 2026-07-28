@@ -109,15 +109,17 @@ HTMLAudioElement
   → 校验 MIME、内容长度和 12 MiB 上限
   → SHA-256(authorization token + serverId + path + width + height)
   → app_cache_dir/cadilume/artwork 原子写入
-  → Data URL 返回 WebView
+  → 签发独立的 /artwork/<64hex> 本机票据
+  → Rust 代理从已校验磁盘条目返回图片
 ```
 
-- 前端复用进行中的封面请求，并保留一个有界的进程内请求映射；浏览器自身仍使用图片 lazy loading。
+- 前端复用进行中的封面请求，并保留一个有界的进程内请求映射；浏览器自身仍使用图片 lazy loading。票据因过期或磁盘淘汰加载失败时，每张封面最多重新申请一次。
 - 授权 token 仅作为 SHA-256 输入，不会出现在文件名或文件内容；同一 PMS 在不同授权下使用不同缓存键，登录账号变更或登出时还会清理封面缓存。
 - 磁盘条目包含版本标记、MIME 与内容，自校验失败时丢弃后重新拉取；缓存目录拒绝符号链接越界。
 - 单图原始内容限制 12 MiB，缓存总量限制 512 MiB。命中会刷新文件修改时间，写入新条目前按该时间从旧到新近似 LRU 淘汰。
+- 音频和封面使用独立的有界票据注册表；大量专辑封面不会淘汰正在播放或预缓冲的音频地址。登录切换、登出会撤销全部票据，`clear_cache` 只撤销封面票据并清空封面缓存。
 - 设置页通过 `cache_status` 显示文件数和大小，通过 `clear_cache` 清空封面缓存。
-- 当前 React 封面渲染链路把图片 token 留在 Rust 请求 Header，不放入 `<img src>`；WebView 收到的是 Data URL。
+- 当前 React 封面渲染链路把图片 token、PMS 地址、图片路径和磁盘缓存键都留在 Rust 边界内；WebView 只收到本机端口和随机票据。
 
 ## 窗口、托盘与主题
 

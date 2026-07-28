@@ -11,7 +11,7 @@ export interface DesktopLyricsPayload {
   artist: string;
   /** Optional album label used by the floating karaoke window. */
   album?: string;
-  /** A Rust-served/data URL. Never put a PMS token in this field. */
+  /** A validated Rust artwork-ticket or data-image URL. */
   artworkUrl?: string;
   currentText: string;
   nextText: string;
@@ -43,6 +43,19 @@ export function desktopLyricProgress(payload: Pick<DesktopLyricsPayload, "linePr
   const end = payload.currentEndMs;
   if (typeof start !== "number" || typeof end !== "number" || end <= start) return 0;
   return clamp01((payload.positionMs - start) / (end - start));
+}
+
+const DATA_IMAGE_URL_PATTERN = /^data:image\/[a-z0-9][a-z0-9.+-]*(?:;[a-z0-9!#$&^_.+-]+(?:=[^;,\r\n]*)?)*,[^\r\n]*$/u;
+const LOOPBACK_ARTWORK_URL_PATTERN = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/artwork\/[0-9a-f]{64}$/u;
+
+/** Only render local Rust artwork tickets or explicit image data URLs. */
+export function safeArtworkUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (DATA_IMAGE_URL_PATTERN.test(value)) return value;
+  const ticket = LOOPBACK_ARTWORK_URL_PATTERN.exec(value);
+  if (!ticket) return undefined;
+  const port = Number(ticket[1]);
+  return port <= 65_535 ? value : undefined;
 }
 
 export async function publishDesktopLyrics(payload: DesktopLyricsPayload): Promise<void> {

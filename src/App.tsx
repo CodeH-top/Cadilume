@@ -46,7 +46,7 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
-  artworkDataUrl,
+  artworkUrl,
   addTrackToPlaylist,
   bootstrap,
   clearArtworkCache,
@@ -200,7 +200,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
       setDesktopArtworkUrl(player.current?.imageUrl || path);
       return () => { cancelled = true; };
     }
-    void artworkDataUrl(serverId, path, 192)
+    void artworkUrl(serverId, path, 192)
       .then((url) => { if (!cancelled) setDesktopArtworkUrl(url); })
       .catch(() => { if (!cancelled) setDesktopArtworkUrl(undefined); });
     return () => { cancelled = true; };
@@ -1164,6 +1164,7 @@ function Artwork({ item, size, className = "", preferArt = false }: {
   const [visible, setVisible] = useState(!isDesktopRuntime());
   const [source, setSource] = useState(item?.imageUrl);
   const [failed, setFailed] = useState(false);
+  const [ticketRetryCount, setTicketRetryCount] = useState(0);
   const path = preferArt ? item?.art || item?.thumb : item?.thumb || item?.art;
   const dimensions = size === "small" || size === "player"
     ? { width: 96, height: 96 }
@@ -1174,11 +1175,15 @@ function Artwork({ item, size, className = "", preferArt = false }: {
         : size === "immersive"
           ? { width: 640, height: 640 }
           : { width: 420, height: 420 };
+  const artworkRequestKey = serverId && path
+    ? `${serverId}:${dimensions.width}x${dimensions.height}:${path}`
+    : undefined;
 
   useEffect(() => {
     setSource(item?.imageUrl);
     setFailed(false);
-  }, [item?.imageUrl, item?.ratingKey]);
+    setTicketRetryCount(0);
+  }, [item?.imageUrl, item?.ratingKey, path, serverId]);
 
   useEffect(() => {
     if (!isDesktopRuntime() || item?.imageUrl || !path || !serverId) {
@@ -1202,29 +1207,41 @@ function Artwork({ item, size, className = "", preferArt = false }: {
   }, [item?.imageUrl, path, serverId]);
 
   useEffect(() => {
-    if (!visible || source || failed || !path || !serverId || !isDesktopRuntime()) return;
-    const cacheKey = `${serverId}:${dimensions.width}x${dimensions.height}:${path}`;
-    let request = artworkCache.get(cacheKey);
+    if (!visible || source || failed || !path || !serverId || !artworkRequestKey || !isDesktopRuntime()) return;
+    let request = artworkCache.get(artworkRequestKey);
     if (!request) {
-      request = artworkDataUrl(serverId, path, dimensions.width, dimensions.height);
-      artworkCache.set(cacheKey, request);
+      request = artworkUrl(serverId, path, dimensions.width, dimensions.height);
+      artworkCache.set(artworkRequestKey, request);
       if (artworkCache.size > 200) artworkCache.delete(artworkCache.keys().next().value as string);
     }
     let cancelled = false;
     void request
       .then((url) => { if (!cancelled) setSource(url); })
       .catch(() => {
-        artworkCache.delete(cacheKey);
+        artworkCache.delete(artworkRequestKey);
         if (!cancelled) setFailed(true);
       });
     return () => { cancelled = true; };
-  }, [dimensions.height, dimensions.width, failed, path, serverId, source, visible]);
+  }, [artworkRequestKey, dimensions.height, dimensions.width, failed, path, serverId, source, visible]);
+
+  const handleImageError = () => {
+    if (!item?.imageUrl && artworkRequestKey && isDesktopRuntime()) {
+      artworkCache.delete(artworkRequestKey);
+      if (ticketRetryCount < 1) {
+        setTicketRetryCount(1);
+        setSource(undefined);
+        return;
+      }
+    }
+    setFailed(true);
+  };
+  const awaitingTicketRetry = ticketRetryCount > 0 && !failed && !source && Boolean(path);
 
   return (
     <span ref={hostRef} className={`artwork artwork-${size} ${className}`}>
       {source && !failed
-        ? <img src={source} alt={`${item?.title || "音乐"} 封面`} loading="lazy" onError={() => setFailed(true)} />
-        : <Music2 aria-hidden="true" />}
+        ? <img src={source} alt={`${item?.title || "音乐"} 封面`} loading="lazy" onError={handleImageError} />
+        : awaitingTicketRetry ? null : <Music2 aria-hidden="true" />}
     </span>
   );
 }

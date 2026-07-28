@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent } from "react";
 import { isDesktopRuntime } from "./api";
 import { BrandIcon } from "./BrandIcon";
-import { DESKTOP_LYRICS_EVENT, desktopLyricProgress, hideDesktopLyrics, type DesktopLyricsPayload } from "./desktopLyrics";
+import { DESKTOP_LYRICS_EVENT, desktopLyricProgress, hideDesktopLyrics, safeArtworkUrl, type DesktopLyricsPayload } from "./desktopLyrics";
 import "./DesktopLyricsWindow.css";
 
 const LOCK_STORAGE_KEY = "cadilume-desktop-lyrics-locked";
@@ -159,14 +159,6 @@ function writeLockedPreference(value: boolean): void {
     // Private browsing / restricted WebViews can deny storage. The in-memory
     // preference still works for the current window in that case.
   }
-}
-
-function safeArtworkUrl(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  // The overlay should only receive a Rust-served/data URL. Avoid rendering a
-  // caller-supplied PMS token if an integration accidentally passes a raw URL.
-  if (/[?&](?:X-Plex-Token|token)=/i.test(value)) return undefined;
-  return value;
 }
 
 export default DesktopLyricsWindow;

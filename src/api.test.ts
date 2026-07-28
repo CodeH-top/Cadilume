@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkDataUrl, createPin, getPlaylists, pollPin } from "./api";
+import { addTrackToPlaylist, artworkUrl, createPin, getPlaylists, pollPin } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -133,24 +133,36 @@ describe("Plex PIN authentication boundary", () => {
   });
 });
 
-describe("artworkDataUrl dimensions", () => {
-  it("keeps square calls compatible and supports a separate background height", async () => {
-    invokeMock.mockResolvedValue("data:image/png;base64,fixture");
+describe("artworkUrl dimensions and runtime boundary", () => {
+  it("uses the artwork ticket command with square or explicit dimensions", async () => {
+    const ticketUrl = `http://127.0.0.1:49152/artwork/${"a".repeat(64)}`;
+    invokeMock.mockResolvedValue(ticketUrl);
 
-    await expect(artworkDataUrl("server-a", "/library/metadata/1/thumb", 320)).resolves.toContain("data:image");
-    expect(invokeMock).toHaveBeenLastCalledWith("image_data_url", {
+    await expect(artworkUrl("server-a", "/library/metadata/1/thumb", 320)).resolves.toBe(ticketUrl);
+    expect(invokeMock).toHaveBeenLastCalledWith("artwork_url", {
       serverId: "server-a",
       path: "/library/metadata/1/thumb",
       width: 320,
       height: 320,
     });
 
-    await artworkDataUrl("server-a", "/library/metadata/1/art", 1440, 900);
-    expect(invokeMock).toHaveBeenLastCalledWith("image_data_url", {
+    await artworkUrl("server-a", "/library/metadata/1/art", 1440, 900);
+    expect(invokeMock).toHaveBeenLastCalledWith("artwork_url", {
       serverId: "server-a",
       path: "/library/metadata/1/art",
       width: 1440,
       height: 900,
     });
+  });
+
+  it("returns the original path without invoking Tauri in the browser demo", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {},
+    });
+    const path = "/library/metadata/1/thumb";
+
+    await expect(artworkUrl("demo-server", path, 320)).resolves.toBe(path);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
