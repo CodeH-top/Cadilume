@@ -1,0 +1,2354 @@
+use std::{
+    collections::HashMap,
+    fs::{self, FileTimes, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        RwLock,
+    },
+    time::{Duration, SystemTime},
+};
+
+use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use quick_xml::de::from_str as from_xml_str;
+use reqwest::{
+    header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE},
+    redirect::Policy,
+    Client, Method, Response, StatusCode,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tauri::State;
+use url::Url;
+use uuid::Uuid;
+
+use crate::stream_proxy::StreamProxy;
+
+const PRODUCT_NAME: &str = "Cadilume";
+const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const PLEX_TV: &str = "https://plex.tv";
+const KEYRING_SERVICE: &str = "top.codeh.cadilume";
+const KEYRING_ACCOUNT: &str = "cadilume-account-token";
+const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+const MAX_ARTWORK_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const CACHE_NAMESPACE_DIR: &str = "cadilume";
+const ARTWORK_CACHE_DIR: &str = "artwork";
+const ARTWORK_CACHE_EXTENSION: &str = "cadart";
+const ARTWORK_CACHE_MAGIC: &[u8; 8] = b"CADART01";
+const MAX_CACHE_MIME_BYTES: usize = 127;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedConfig {
+    client_identifier: String,
+    close_behavior: CloseBehavior,
+}
+
+impl Default for PersistedConfig {
+    fn default() -> Self {
+        Self {
+            client_identifier: Uuid::new_v4().to_string(),
+            close_behavior: CloseBehavior::Tray,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloseBehavior {
+    Tray,
+    Quit,
+}
+
+#[derive(Debug, Clone)]
+struct CachedConnection {
+    uri: String,
+    local: bool,
+    relay: bool,
+    secure: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CachedServer {
+    token: String,
+    connections: Vec<CachedConnection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerAttemptFailure {
+    HttpResponse,
+    Connect,
+    OtherTransport,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StreamConnectionSnapshot {
+    pub(crate) uri: String,
+    pub(crate) local: bool,
+    pub(crate) relay: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StreamServerSnapshot {
+    pub(crate) token: String,
+    pub(crate) connections: Vec<StreamConnectionSnapshot>,
+}
+
+pub struct PlexState {
+    protected_client: Client,
+    config_path: PathBuf,
+    cache_dir: PathBuf,
+    cache_lock: RwLock<()>,
+    client_identifier: String,
+    close_to_tray: AtomicBool,
+    token: RwLock<Option<String>>,
+    servers: RwLock<HashMap<String, CachedServer>>,
+}
+
+impl PlexState {
+    pub fn load(config_dir: PathBuf, app_cache_dir: PathBuf) -> Result<Self> {
+        let config_path = config_dir.join("config.json");
+        let cache_dir = initialize_artwork_cache_dir(&app_cache_dir)?;
+        let config = match fs::read_to_string(&config_path) {
+            Ok(raw) => {
+                serde_json::from_str::<PersistedConfig>(&raw).context("无法解析 Cadilume 配置")?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let config = PersistedConfig::default();
+                fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
+                config
+            }
+            Err(error) => return Err(error).context("无法读取 Cadilume 配置"),
+        };
+
+        let token = keyring_entry()
+            .ok()
+            .and_then(|entry| entry.get_password().ok());
+        let protected_client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(20))
+            .redirect(Policy::none())
+            .user_agent(format!("{PRODUCT_NAME}/{PRODUCT_VERSION}"))
+            .build()?;
+
+        Ok(Self {
+            protected_client,
+            config_path,
+            cache_dir,
+            cache_lock: RwLock::new(()),
+            client_identifier: config.client_identifier,
+            close_to_tray: AtomicBool::new(config.close_behavior == CloseBehavior::Tray),
+            token: RwLock::new(token),
+            servers: RwLock::new(HashMap::new()),
+        })
+    }
+
+    pub fn close_to_tray(&self) -> bool {
+        self.close_to_tray.load(Ordering::SeqCst)
+    }
+
+    fn token(&self) -> Result<String> {
+        self.token
+            .read()
+            .map_err(|_| anyhow!("登录状态读取失败"))?
+            .clone()
+            .ok_or_else(|| anyhow!("尚未登录 Plex"))
+    }
+
+    fn save_close_behavior(&self, behavior: CloseBehavior) -> Result<()> {
+        let config = PersistedConfig {
+            client_identifier: self.client_identifier.clone(),
+            close_behavior: behavior,
+        };
+        fs::write(&self.config_path, serde_json::to_vec_pretty(&config)?)?;
+        self.close_to_tray
+            .store(behavior == CloseBehavior::Tray, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub(crate) fn plex_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        self.plex_identity_headers(request)
+            .header(ACCEPT, "application/json")
+    }
+
+    pub(crate) fn plex_identity_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        request
+            .header("X-Plex-Product", PRODUCT_NAME)
+            .header("X-Plex-Version", PRODUCT_VERSION)
+            .header("X-Plex-Client-Identifier", &self.client_identifier)
+            .header("X-Plex-Platform", std::env::consts::OS)
+            .header("X-Plex-Device", "Desktop")
+            .header("X-Plex-Provides", "player,controller")
+    }
+
+    async fn account(&self, token: &str) -> Result<Account> {
+        let response = self
+            .plex_headers(self.protected_client.get(format!("{PLEX_TV}/api/v2/user")))
+            .header("X-Plex-Token", token)
+            .send()
+            .await?;
+        let response = ensure_success(response, "读取 Plex 账号失败").await?;
+        let value = response.json::<Value>().await?;
+        Ok(Account::from_json(&value))
+    }
+
+    async fn server_response(
+        &self,
+        server_id: &str,
+        path: &str,
+        query: &HashMap<String, String>,
+    ) -> Result<Response> {
+        self.server_request_response(server_id, Method::GET, path, query)
+            .await
+    }
+
+    async fn server_request_response(
+        &self,
+        server_id: &str,
+        method: Method,
+        path: &str,
+        query: &HashMap<String, String>,
+    ) -> Result<Response> {
+        let server = self
+            .servers
+            .read()
+            .map_err(|_| anyhow!("服务器缓存读取失败"))?
+            .get(server_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("找不到服务器，请重新刷新服务器列表"))?;
+
+        let mut last_error = None;
+        for (index, connection) in server.connections.iter().enumerate() {
+            let endpoint = match server_endpoint(&connection.uri, path) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    continue;
+                }
+            };
+            match self
+                .plex_headers(self.protected_client.request(method.clone(), endpoint))
+                .header("X-Plex-Token", &server.token)
+                .query(query)
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    if index > 0 {
+                        self.promote_connection(server_id, &connection.uri);
+                    }
+                    return Ok(response);
+                }
+                Ok(response)
+                    if !should_retry_server_connection(
+                        &method,
+                        ServerAttemptFailure::HttpResponse,
+                    ) =>
+                {
+                    return ensure_success(response, "Plex 服务器写入失败").await;
+                }
+                Ok(response) => {
+                    last_error = Some(format!("HTTP {}", response.status()));
+                }
+                Err(error)
+                    if !should_retry_server_connection(
+                        &method,
+                        if error.is_connect() {
+                            ServerAttemptFailure::Connect
+                        } else {
+                            ServerAttemptFailure::OtherTransport
+                        },
+                    ) =>
+                {
+                    return Err(error.into());
+                }
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+
+        Err(anyhow!(
+            "无法连接 Plex 服务器：{}",
+            last_error.unwrap_or_else(|| "没有可用连接".to_string())
+        ))
+    }
+
+    async fn prioritize_reachable_connections(
+        &self,
+        token: &str,
+        mut connections: Vec<CachedConnection>,
+    ) -> Vec<CachedConnection> {
+        for index in 0..connections.len() {
+            let Ok(endpoint) = server_endpoint(&connections[index].uri, "/identity") else {
+                continue;
+            };
+            let reachable = self
+                .plex_headers(self.protected_client.get(endpoint))
+                .header("X-Plex-Token", token)
+                .timeout(Duration::from_secs(3))
+                .send()
+                .await
+                .map(|response| response.status().is_success())
+                .unwrap_or(false);
+            if reachable {
+                connections.rotate_left(index);
+                break;
+            }
+        }
+
+        connections
+    }
+
+    pub(crate) fn promote_connection(&self, server_id: &str, uri: &str) {
+        let Ok(mut servers) = self.servers.write() else {
+            return;
+        };
+        let Some(server) = servers.get_mut(server_id) else {
+            return;
+        };
+        let Some(index) = server.connections.iter().position(|item| item.uri == uri) else {
+            return;
+        };
+        server.connections.rotate_left(index);
+    }
+
+    pub(crate) fn stream_server(&self, server_id: &str) -> Result<StreamServerSnapshot> {
+        let server = cached_server(self, server_id)?;
+        Ok(StreamServerSnapshot {
+            token: server.token,
+            connections: server
+                .connections
+                .into_iter()
+                .map(|connection| StreamConnectionSnapshot {
+                    uri: connection.uri,
+                    local: connection.local,
+                    relay: connection.relay,
+                })
+                .collect(),
+        })
+    }
+
+    pub(crate) fn client_identifier(&self) -> &str {
+        &self.client_identifier
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapResponse {
+    client_identifier: String,
+    authenticated: bool,
+    account: Option<Account>,
+    close_behavior: CloseBehavior,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    id: Option<i64>,
+    username: String,
+    title: String,
+    email: String,
+    thumb: Option<String>,
+    home: bool,
+    restricted: bool,
+    subscription_active: bool,
+}
+
+impl Account {
+    fn from_json(value: &Value) -> Self {
+        Self {
+            id: value.get("id").and_then(Value::as_i64),
+            username: string_field(value, "username"),
+            title: string_field(value, "title"),
+            email: string_field(value, "email"),
+            thumb: value
+                .get("thumb")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            home: value.get("home").and_then(Value::as_bool).unwrap_or(false),
+            restricted: value
+                .get("restricted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            subscription_active: value
+                .get("subscription")
+                .and_then(|item| item.get("active"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Pin {
+    id: i64,
+    code: String,
+    #[serde(default)]
+    expires_in: i64,
+    #[serde(default)]
+    auth_token: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PinResponse {
+    id: i64,
+    code: String,
+    expires_in: i64,
+    authenticated: bool,
+}
+
+impl PinResponse {
+    fn from_pin(pin: Pin, authenticated: bool) -> Self {
+        Self {
+            id: pin.id,
+            code: pin.code,
+            expires_in: pin.expires_in,
+            authenticated,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Resource {
+    name: String,
+    provides: String,
+    client_identifier: String,
+    #[serde(default)]
+    access_token: Option<String>,
+    #[serde(default)]
+    owned: bool,
+    #[serde(default)]
+    home: bool,
+    #[serde(default)]
+    source_title: Option<String>,
+    #[serde(default)]
+    connections: Vec<ResourceConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceConnection {
+    uri: String,
+    protocol: String,
+    #[serde(default)]
+    local: bool,
+    #[serde(default)]
+    relay: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerSummary {
+    id: String,
+    name: String,
+    owned: bool,
+    home: bool,
+    source_title: Option<String>,
+    connection_uri: String,
+    local: bool,
+    relay: bool,
+    secure: bool,
+}
+
+#[derive(Debug, Clone)]
+struct LyricStream {
+    key: String,
+    provider: Option<String>,
+    timed: bool,
+}
+
+impl LyricStream {
+    fn is_local(&self) -> bool {
+        self.provider
+            .as_deref()
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("com.plexapp.agents.localmedia"))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlexLyricLine {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_ms: Option<u64>,
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlexLyricsPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    timed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_text: Option<String>,
+    lines: Vec<PlexLyricLine>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheStatus {
+    size_bytes: u64,
+    file_count: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CachedArtwork {
+    mime: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "MediaContainer")]
+struct XmlMediaContainer {
+    #[serde(rename = "Lyrics", default)]
+    lyrics: Vec<XmlLyrics>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "Lyrics")]
+struct XmlLyrics {
+    #[serde(rename = "@provider", default)]
+    provider: Option<String>,
+    #[serde(rename = "@timed", default)]
+    timed: Option<String>,
+    #[serde(rename = "@author", default)]
+    author: Option<String>,
+    #[serde(rename = "@by", default)]
+    by: Option<String>,
+    #[serde(rename = "Line", default)]
+    lines: Vec<XmlLyricLine>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XmlLyricLine {
+    #[serde(rename = "@startOffset", default)]
+    start_offset: Option<String>,
+    #[serde(rename = "@endOffset", default)]
+    end_offset: Option<String>,
+    #[serde(rename = "@text", default)]
+    text_attribute: Option<String>,
+    #[serde(rename = "Span", default)]
+    spans: Vec<XmlLyricSpan>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XmlLyricSpan {
+    #[serde(rename = "@text", default)]
+    text_attribute: Option<String>,
+    #[serde(rename = "$text", default)]
+    text: Option<String>,
+}
+
+#[tauri::command]
+pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse, String> {
+    let token = state.token().ok();
+    let account = match token.as_deref() {
+        Some(token) => state.account(token).await.ok(),
+        None => None,
+    };
+    Ok(BootstrapResponse {
+        client_identifier: state.client_identifier.clone(),
+        authenticated: token.is_some(),
+        account,
+        close_behavior: if state.close_to_tray() {
+            CloseBehavior::Tray
+        } else {
+            CloseBehavior::Quit
+        },
+    })
+}
+
+#[tauri::command]
+pub async fn create_pin(state: State<'_, PlexState>) -> Result<PinResponse, String> {
+    let response = state
+        .plex_headers(
+            state
+                .protected_client
+                .post(format!("{PLEX_TV}/api/v2/pins")),
+        )
+        .query(&[("strong", "true")])
+        .send()
+        .await
+        .map_err(display_error)?;
+    let pin = ensure_success(response, "创建 Plex 登录码失败")
+        .await
+        .map_err(display_error)?
+        .json::<Pin>()
+        .await
+        .map_err(display_error)?;
+    Ok(PinResponse::from_pin(pin, false))
+}
+
+#[tauri::command]
+pub async fn poll_pin(
+    pin_id: i64,
+    state: State<'_, PlexState>,
+    stream_proxy: State<'_, StreamProxy>,
+) -> Result<PinResponse, String> {
+    let response = state
+        .plex_headers(
+            state
+                .protected_client
+                .get(format!("{PLEX_TV}/api/v2/pins/{pin_id}")),
+        )
+        .send()
+        .await
+        .map_err(display_error)?;
+    let pin = ensure_success(response, "检查 Plex 登录状态失败")
+        .await
+        .map_err(display_error)?
+        .json::<Pin>()
+        .await
+        .map_err(display_error)?;
+
+    let authenticated = if let Some(token) = pin.auth_token.as_deref() {
+        stream_proxy.clear().map_err(display_error)?;
+        state
+            .servers
+            .write()
+            .map_err(|_| "服务器缓存写入失败".to_string())?
+            .clear();
+        let _ = clear_artwork_for_account_change(&state);
+        keyring_entry()
+            .map_err(display_error)?
+            .set_password(token)
+            .map_err(display_error)?;
+        *state
+            .token
+            .write()
+            .map_err(|_| "登录状态写入失败".to_string())? = Some(token.to_string());
+        true
+    } else {
+        false
+    };
+    Ok(PinResponse::from_pin(pin, authenticated))
+}
+
+#[tauri::command]
+pub fn logout(
+    state: State<'_, PlexState>,
+    stream_proxy: State<'_, StreamProxy>,
+) -> Result<(), String> {
+    stream_proxy.clear().map_err(display_error)?;
+    if let Ok(entry) = keyring_entry() {
+        let _ = entry.delete_credential();
+    }
+    *state
+        .token
+        .write()
+        .map_err(|_| "登录状态写入失败".to_string())? = None;
+    state
+        .servers
+        .write()
+        .map_err(|_| "服务器缓存写入失败".to_string())?
+        .clear();
+    let _ = clear_artwork_for_account_change(&state);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn discover_servers(state: State<'_, PlexState>) -> Result<Vec<ServerSummary>, String> {
+    let account_token = state.token().map_err(display_error)?;
+    let response = state
+        .plex_headers(
+            state
+                .protected_client
+                .get(format!("{PLEX_TV}/api/v2/resources")),
+        )
+        .header("X-Plex-Token", account_token)
+        .query(&[
+            ("includeHttps", "1"),
+            ("includeRelay", "1"),
+            ("includeIPv6", "1"),
+        ])
+        .send()
+        .await
+        .map_err(display_error)?;
+    let resources = ensure_success(response, "读取 Plex 服务器失败")
+        .await
+        .map_err(display_error)?
+        .json::<Vec<Resource>>()
+        .await
+        .map_err(display_error)?;
+
+    let mut summaries = Vec::new();
+    let mut cache = HashMap::new();
+    for resource in resources {
+        if !resource.provides.split(',').any(|item| item == "server") {
+            continue;
+        }
+        let Some(token) = resource.access_token else {
+            continue;
+        };
+        let mut connections: Vec<CachedConnection> = resource
+            .connections
+            .into_iter()
+            .filter_map(|connection| {
+                let base = validated_connection_base(&connection.uri).ok()?;
+                if !connection.protocol.eq_ignore_ascii_case(base.scheme()) {
+                    return None;
+                }
+                Some(CachedConnection {
+                    secure: base.scheme() == "https",
+                    uri: base.to_string(),
+                    local: connection.local,
+                    relay: connection.relay,
+                })
+            })
+            .collect();
+        connections.sort_by_key(|connection| {
+            let mut score = 0;
+            if connection.local {
+                score -= 8;
+            }
+            if connection.secure {
+                score -= 4;
+            }
+            if connection.relay {
+                score += 3;
+            }
+            score
+        });
+        let connections = state
+            .prioritize_reachable_connections(&token, connections)
+            .await;
+        let Some(preferred) = connections.first() else {
+            continue;
+        };
+        summaries.push(ServerSummary {
+            id: resource.client_identifier.clone(),
+            name: resource.name,
+            owned: resource.owned,
+            home: resource.home,
+            source_title: resource.source_title,
+            connection_uri: preferred.uri.clone(),
+            local: preferred.local,
+            relay: preferred.relay,
+            secure: preferred.secure,
+        });
+        cache.insert(
+            resource.client_identifier,
+            CachedServer { token, connections },
+        );
+    }
+    summaries.sort_by_key(|server| (!server.owned, server.name.to_lowercase()));
+    *state
+        .servers
+        .write()
+        .map_err(|_| "服务器缓存写入失败".to_string())? = cache;
+    Ok(summaries)
+}
+
+#[tauri::command]
+pub async fn server_get(
+    server_id: String,
+    path: String,
+    query: HashMap<String, String>,
+    state: State<'_, PlexState>,
+) -> Result<Value, String> {
+    if !allowed_server_path(&path) {
+        return Err("拒绝访问不在允许列表中的服务器路径".to_string());
+    }
+    state
+        .server_response(&server_id, &path, &query)
+        .await
+        .map_err(display_error)?
+        .json::<Value>()
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
+pub async fn add_to_playlist(
+    server_id: String,
+    playlist_id: String,
+    rating_key: String,
+    state: State<'_, PlexState>,
+) -> Result<(), String> {
+    if !valid_plex_identifier(&playlist_id) {
+        return Err("无效的 Plex 歌单标识".to_string());
+    }
+    let uri = playlist_item_uri(&server_id, &rating_key).map_err(display_error)?;
+    let path = format!("/playlists/{playlist_id}/items");
+    let query = HashMap::from([("uri".to_string(), uri)]);
+    state
+        .server_request_response(&server_id, Method::PUT, &path, &query)
+        .await
+        .map_err(display_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn lyrics(
+    server_id: String,
+    rating_key: String,
+    state: State<'_, PlexState>,
+) -> Result<Option<PlexLyricsPayload>, String> {
+    if rating_key.is_empty()
+        || rating_key
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '?' | '#'))
+    {
+        return Err("无效的歌曲 ratingKey".to_string());
+    }
+
+    let metadata_path = format!("/library/metadata/{rating_key}");
+    let metadata = state
+        .server_response(&server_id, &metadata_path, &HashMap::new())
+        .await
+        .map_err(display_error)?
+        .json::<Value>()
+        .await
+        .map_err(display_error)?;
+    let streams = prioritize_lyric_streams(lyric_streams_from_metadata(&metadata));
+    if streams.is_empty() {
+        return Ok(None);
+    }
+
+    let server = cached_server(&state, &server_id).map_err(display_error)?;
+    let mut last_error = None;
+    for stream in streams {
+        let response = match request_lyric_stream(&state, &server_id, &server, &stream.key).await {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+        };
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+        };
+
+        match parse_lyrics_body(&body, content_type.as_deref(), &stream) {
+            Ok(Some(payload)) => return Ok(Some(payload)),
+            Ok(None) => last_error = Some("歌词响应中没有可识别的内容".to_string()),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+
+    Err(format!(
+        "读取歌词失败：{}",
+        last_error.unwrap_or_else(|| "没有可用歌词流".to_string())
+    ))
+}
+
+#[tauri::command]
+pub async fn image_data_url(
+    server_id: String,
+    path: String,
+    width: Option<u32>,
+    height: Option<u32>,
+    state: State<'_, PlexState>,
+) -> Result<String, String> {
+    if !valid_internal_image_path(&path) {
+        return Err("无效的 Plex 图片路径".to_string());
+    }
+    if !valid_artwork_dimension(width) || !valid_artwork_dimension(height) {
+        return Err("图片尺寸必须在 1 到 4096 像素之间".to_string());
+    }
+    // Resolve the current account's authorized server before consulting disk.
+    // A cache hit must never bypass the active PMS ACL boundary.
+    let server = cached_server(&state, &server_id).map_err(display_error)?;
+    let cache_key = artwork_cache_key(&server_id, &path, width, height, &server.token);
+    if let Ok(_cache_guard) = state.cache_lock.read() {
+        match read_artwork_cache(&state.cache_dir, &cache_key) {
+            Ok(Some(artwork)) => return Ok(artwork_data_url(&artwork.mime, &artwork.bytes)),
+            Ok(None) => {}
+            Err(_) => discard_artwork_cache_entry(&state.cache_dir, &cache_key),
+        }
+    }
+
+    let mut last_error = None;
+
+    'connections: for (index, connection) in server.connections.iter().enumerate() {
+        let mut endpoint = match server_endpoint(&connection.uri, "/photo/:/transcode") {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+        };
+        {
+            let mut query = endpoint.query_pairs_mut();
+            query
+                .append_pair("url", &path)
+                .append_pair("minSize", "1")
+                .append_pair("upscale", "1");
+            if let Some(width) = width {
+                query.append_pair("width", &width.to_string());
+            }
+            if let Some(height) = height {
+                query.append_pair("height", &height.to_string());
+            }
+        }
+
+        let mut response = match state
+            .plex_identity_headers(state.protected_client.get(endpoint))
+            .header(ACCEPT, "image/*")
+            .header("X-Plex-Token", &server.token)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                last_error = Some(format!("图片接口返回 HTTP {}", response.status()));
+                continue;
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+        };
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        let content_length = response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        let mime = match validate_image_metadata(content_type, content_length) {
+            Ok(mime) => mime,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+        };
+        let initial_capacity = content_length
+            .unwrap_or_default()
+            .min(MAX_IMAGE_BYTES as u64) as usize;
+        let mut bytes = Vec::with_capacity(initial_capacity);
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if bytes.len().saturating_add(chunk.len()) > MAX_IMAGE_BYTES {
+                        last_error = Some("Plex 图片超过 12 MiB 限制".to_string());
+                        continue 'connections;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    continue 'connections;
+                }
+            }
+        }
+        if index > 0 {
+            state.promote_connection(&server_id, &connection.uri);
+        }
+        if let Ok(_cache_guard) = state.cache_lock.write() {
+            let _ = write_artwork_cache(&state.cache_dir, &cache_key, &mime, &bytes);
+        }
+        return Ok(artwork_data_url(&mime, &bytes));
+    }
+
+    Err(format!(
+        "读取 Plex 图片失败：{}",
+        last_error.unwrap_or_else(|| "服务器没有可用连接".to_string())
+    ))
+}
+
+#[tauri::command]
+pub fn cache_status(state: State<'_, PlexState>) -> Result<CacheStatus, String> {
+    let _cache_guard = state
+        .cache_lock
+        .read()
+        .map_err(|_| "图片缓存状态读取失败".to_string())?;
+    artwork_cache_status(&state.cache_dir).map_err(display_error)
+}
+
+#[tauri::command]
+pub fn clear_cache(state: State<'_, PlexState>) -> Result<CacheStatus, String> {
+    let _cache_guard = state
+        .cache_lock
+        .write()
+        .map_err(|_| "图片缓存清理锁定失败".to_string())?;
+    clear_artwork_cache(&state.cache_dir).map_err(display_error)
+}
+
+#[tauri::command]
+pub async fn report_timeline(
+    server_id: String,
+    rating_key: String,
+    metadata_key: String,
+    playback_state: String,
+    time: u64,
+    duration: u64,
+    state: State<'_, PlexState>,
+) -> Result<(), String> {
+    let query = HashMap::from([
+        ("ratingKey".to_string(), rating_key),
+        ("key".to_string(), metadata_key),
+        ("state".to_string(), playback_state),
+        ("time".to_string(), time.to_string()),
+        ("duration".to_string(), duration.to_string()),
+    ]);
+    state
+        .server_response(&server_id, "/:/timeline", &query)
+        .await
+        .map_err(display_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn scrobble(
+    server_id: String,
+    rating_key: String,
+    state: State<'_, PlexState>,
+) -> Result<(), String> {
+    let query = HashMap::from([
+        ("key".to_string(), rating_key),
+        (
+            "identifier".to_string(),
+            "com.plexapp.plugins.library".to_string(),
+        ),
+    ]);
+    state
+        .server_response(&server_id, "/:/scrobble", &query)
+        .await
+        .map_err(display_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_close_behavior(
+    behavior: CloseBehavior,
+    state: State<'_, PlexState>,
+) -> Result<(), String> {
+    state.save_close_behavior(behavior).map_err(display_error)
+}
+
+async fn request_lyric_stream(
+    state: &PlexState,
+    server_id: &str,
+    server: &CachedServer,
+    key: &str,
+) -> Result<Response> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(anyhow!("歌词流缺少地址"));
+    }
+
+    match Url::parse(key) {
+        Ok(url) => {
+            if !matches!(url.scheme(), "http" | "https")
+                || !url.username().is_empty()
+                || url.password().is_some()
+            {
+                return Err(anyhow!("歌词绝对地址不安全"));
+            }
+            let Some((index, _)) = server
+                .connections
+                .iter()
+                .enumerate()
+                .find(|(_, connection)| connection_matches_origin(connection, &url))
+            else {
+                return Err(anyhow!("歌词地址不属于当前 Plex 服务器"));
+            };
+            let response = send_lyric_request(state, prepare_lyric_url(url), &server.token).await?;
+            if index > 0 {
+                state.promote_connection(server_id, &server.connections[index].uri);
+            }
+            Ok(response)
+        }
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            if key.starts_with("//") || key.starts_with('\\') || key.contains('\0') {
+                return Err(anyhow!("歌词相对地址不安全"));
+            }
+
+            let relative_path = if key.starts_with('/') {
+                key.to_string()
+            } else {
+                format!("/{key}")
+            };
+            let mut last_error = None;
+            for (index, connection) in server.connections.iter().enumerate() {
+                let base = match validated_connection_base(&connection.uri) {
+                    Ok(base) => base,
+                    Err(error) => {
+                        last_error = Some(error.to_string());
+                        continue;
+                    }
+                };
+                let url = match base.join(&relative_path) {
+                    Ok(url) if same_origin(&base, &url) => prepare_lyric_url(url),
+                    Ok(_) => {
+                        last_error = Some("歌词地址越过了 Plex 服务器边界".to_string());
+                        continue;
+                    }
+                    Err(error) => {
+                        last_error = Some(error.to_string());
+                        continue;
+                    }
+                };
+                match send_lyric_request(state, url, &server.token).await {
+                    Ok(response) => {
+                        if index > 0 {
+                            state.promote_connection(server_id, &connection.uri);
+                        }
+                        return Ok(response);
+                    }
+                    Err(error) => last_error = Some(error.to_string()),
+                }
+            }
+            Err(anyhow!(
+                "无法读取歌词流：{}",
+                last_error.unwrap_or_else(|| "服务器没有可用连接".to_string())
+            ))
+        }
+        Err(_) => Err(anyhow!("无法解析歌词地址")),
+    }
+}
+
+async fn send_lyric_request(state: &PlexState, url: Url, token: &str) -> Result<Response> {
+    let response = state
+        .plex_identity_headers(state.protected_client.get(url))
+        .header(
+            ACCEPT,
+            "application/xml, text/plain;q=0.9, application/json;q=0.8",
+        )
+        .header("X-Plex-Token", token)
+        .send()
+        .await?;
+    if response.status().is_success() {
+        Ok(response)
+    } else {
+        Err(anyhow!("歌词接口返回 HTTP {}", response.status()))
+    }
+}
+
+fn prepare_lyric_url(mut url: Url) -> Url {
+    let retained_query: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("X-Plex-Token")
+                && !name.eq_ignore_ascii_case("format")
+                && !name.eq_ignore_ascii_case("includeInlineAttribution")
+        })
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    url.set_fragment(None);
+    url.set_query(None);
+    {
+        let mut query = url.query_pairs_mut();
+        for (name, value) in retained_query {
+            query.append_pair(&name, &value);
+        }
+        query
+            .append_pair("format", "xml")
+            .append_pair("includeInlineAttribution", "1");
+    }
+    url
+}
+
+fn connection_matches_origin(connection: &CachedConnection, url: &Url) -> bool {
+    validated_connection_base(&connection.uri)
+        .map(|connection_url| same_origin(&connection_url, url))
+        .unwrap_or(false)
+}
+
+fn validated_connection_base(uri: &str) -> Result<Url> {
+    let base = Url::parse(uri).context("无法解析 Plex 连接地址")?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(anyhow!("Plex 连接地址不安全"));
+    }
+    Ok(base)
+}
+
+fn server_endpoint(connection_uri: &str, path: &str) -> Result<Url> {
+    let lowercase_path = path.to_ascii_lowercase();
+    if path.len() > 4096
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains(['\\', '?', '#'])
+        || path.chars().any(char::is_control)
+        || lowercase_path.contains("%2e")
+        || lowercase_path.contains("%2f")
+        || lowercase_path.contains("%5c")
+        || path.split('/').any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(anyhow!("无效的 Plex 服务器路径"));
+    }
+    let base = validated_connection_base(connection_uri)?;
+    let endpoint = base.join(path).context("无法构造 Plex 服务器地址")?;
+    if !same_origin(&base, &endpoint) {
+        return Err(anyhow!("Plex 请求地址越过了服务器边界"));
+    }
+    Ok(endpoint)
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn should_retry_server_connection(method: &Method, failure: ServerAttemptFailure) -> bool {
+    method == Method::GET || failure == ServerAttemptFailure::Connect
+}
+
+fn lyric_streams_from_metadata(value: &Value) -> Vec<LyricStream> {
+    let root = value.get("MediaContainer").unwrap_or(value);
+    let mut streams = Vec::new();
+    for metadata in json_children(root, "Metadata") {
+        for media in json_children(metadata, "Media") {
+            for part in json_children(media, "Part") {
+                for stream in json_children(part, "Stream") {
+                    if json_u64(stream.get("streamType")) != Some(4) {
+                        continue;
+                    }
+                    let Some(key) = json_string(stream.get("key")) else {
+                        continue;
+                    };
+                    streams.push(LyricStream {
+                        key,
+                        provider: json_string(stream.get("provider")),
+                        timed: json_bool(stream.get("timed")).unwrap_or(false),
+                    });
+                }
+            }
+        }
+    }
+    streams
+}
+
+fn prioritize_lyric_streams(streams: Vec<LyricStream>) -> Vec<LyricStream> {
+    let mut indexed: Vec<(usize, LyricStream)> = streams.into_iter().enumerate().collect();
+    indexed.sort_by_key(|(index, stream)| {
+        let priority = if stream.is_local() {
+            0
+        } else if stream.timed {
+            1
+        } else {
+            2
+        };
+        (priority, *index)
+    });
+    indexed.into_iter().map(|(_, stream)| stream).collect()
+}
+
+fn parse_lyrics_body(
+    body: &str,
+    content_type: Option<&str>,
+    stream: &LyricStream,
+) -> Result<Option<PlexLyricsPayload>> {
+    let source = body.trim_start_matches('\u{feff}');
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let media_type = content_type.unwrap_or_default().to_ascii_lowercase();
+    if media_type.contains("json") || trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return parse_plex_json(source, stream);
+    }
+    if media_type.contains("xml")
+        || trimmed.starts_with("<?xml")
+        || trimmed.starts_with("<MediaContainer")
+        || trimmed.starts_with("<Lyrics")
+    {
+        return parse_plex_xml(source, stream).map(Some);
+    }
+    if media_type.contains("html")
+        || trimmed.starts_with("<!DOCTYPE html")
+        || trimmed.starts_with("<html")
+    {
+        return Err(anyhow!("歌词接口返回了网页内容"));
+    }
+
+    Ok(Some(PlexLyricsPayload {
+        provider: stream.provider.clone(),
+        timed: stream.timed,
+        author: None,
+        by: None,
+        format_hint: Some(raw_lyrics_format_hint(&stream.key, &media_type, source)),
+        raw_text: Some(source.to_string()),
+        lines: Vec::new(),
+    }))
+}
+
+fn parse_plex_xml(source: &str, stream: &LyricStream) -> Result<PlexLyricsPayload> {
+    if let Ok(container) = from_xml_str::<XmlMediaContainer>(source) {
+        if let Some(lyrics) = container.lyrics.into_iter().next() {
+            return Ok(payload_from_xml(lyrics, stream));
+        }
+    }
+    let lyrics = from_xml_str::<XmlLyrics>(source).context("无法解析 Plex XML 歌词")?;
+    Ok(payload_from_xml(lyrics, stream))
+}
+
+fn payload_from_xml(lyrics: XmlLyrics, stream: &LyricStream) -> PlexLyricsPayload {
+    let lines = lyrics
+        .lines
+        .into_iter()
+        .map(|line| {
+            let span_text = line
+                .spans
+                .into_iter()
+                .filter_map(|span| nonempty_string(span.text_attribute.or(span.text)))
+                .collect::<Vec<_>>()
+                .join("");
+            let text = if span_text.trim().is_empty() {
+                nonempty_string(line.text_attribute).unwrap_or_default()
+            } else {
+                span_text
+            };
+            PlexLyricLine {
+                start_ms: parse_milliseconds(line.start_offset.as_deref()),
+                end_ms: parse_milliseconds(line.end_offset.as_deref()),
+                text,
+            }
+        })
+        .collect::<Vec<_>>();
+    PlexLyricsPayload {
+        provider: nonempty_string(lyrics.provider).or_else(|| stream.provider.clone()),
+        timed: lyrics
+            .timed
+            .as_deref()
+            .and_then(parse_bool_text)
+            .unwrap_or(stream.timed),
+        author: nonempty_string(lyrics.author),
+        by: nonempty_string(lyrics.by),
+        format_hint: None,
+        raw_text: None,
+        lines,
+    }
+}
+
+fn parse_plex_json(source: &str, stream: &LyricStream) -> Result<Option<PlexLyricsPayload>> {
+    let value = serde_json::from_str::<Value>(source).context("无法解析 Plex JSON 歌词")?;
+    let root = value.get("MediaContainer").unwrap_or(&value);
+    let candidates = if root.get("Lyrics").is_some() {
+        json_children(root, "Lyrics")
+    } else if root.get("Line").is_some() {
+        vec![root]
+    } else {
+        Vec::new()
+    };
+
+    for lyrics in candidates {
+        let lines = json_children(lyrics, "Line")
+            .into_iter()
+            .map(|line| PlexLyricLine {
+                start_ms: json_u64(line.get("startOffset").or_else(|| line.get("startMs"))),
+                end_ms: json_u64(line.get("endOffset").or_else(|| line.get("endMs"))),
+                text: json_lyric_line_text(line),
+            })
+            .collect::<Vec<_>>();
+        let raw_text = json_string(lyrics.get("rawText").or_else(|| lyrics.get("text")));
+        if lines.is_empty() && raw_text.is_none() {
+            continue;
+        }
+        return Ok(Some(PlexLyricsPayload {
+            provider: json_string(lyrics.get("provider")).or_else(|| stream.provider.clone()),
+            timed: json_bool(lyrics.get("timed")).unwrap_or(stream.timed),
+            author: json_string(lyrics.get("author")),
+            by: json_string(lyrics.get("by")),
+            format_hint: json_string(lyrics.get("formatHint").or_else(|| lyrics.get("format")))
+                .or_else(|| raw_text.as_ref().map(|_| "txt".to_string())),
+            raw_text,
+            lines,
+        }));
+    }
+    Ok(None)
+}
+
+fn json_lyric_line_text(line: &Value) -> String {
+    if let Some(text) = line.as_str() {
+        return text.to_string();
+    }
+    let span_text = json_children(line, "Span")
+        .into_iter()
+        .filter_map(|span| {
+            span.as_str()
+                .map(str::to_owned)
+                .or_else(|| json_string(span.get("text")))
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    if span_text.trim().is_empty() {
+        json_string(line.get("text")).unwrap_or_default()
+    } else {
+        span_text
+    }
+}
+
+fn json_children<'a>(value: &'a Value, key: &str) -> Vec<&'a Value> {
+    match value.get(key) {
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(Value::Null) | None => Vec::new(),
+        Some(item) => vec![item],
+    }
+}
+
+fn json_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn json_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value.as_u64().or_else(|| {
+            value
+                .as_str()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+        })
+    })
+}
+
+fn json_bool(value: Option<&Value>) -> Option<bool> {
+    value.and_then(|value| {
+        value
+            .as_bool()
+            .or_else(|| value.as_i64().map(|value| value != 0))
+            .or_else(|| value.as_str().and_then(parse_bool_text))
+    })
+}
+
+fn parse_bool_text(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Some(true),
+        "0" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_milliseconds(value: Option<&str>) -> Option<u64> {
+    value.and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn nonempty_string(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn raw_lyrics_format_hint(key: &str, content_type: &str, source: &str) -> String {
+    let path = Url::parse(key)
+        .ok()
+        .map(|url| url.path().to_ascii_lowercase())
+        .unwrap_or_else(|| {
+            key.split(['?', '#'])
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        });
+    for format in ["lrc", "txt", "srt", "vtt"] {
+        if path.ends_with(&format!(".{format}")) || content_type.contains(format) {
+            return format.to_string();
+        }
+    }
+    if source.trim_start().starts_with("WEBVTT") {
+        return "vtt".to_string();
+    }
+    if source.lines().any(|line| line.contains("-->")) {
+        return "srt".to_string();
+    }
+    if looks_like_lrc(source) {
+        return "lrc".to_string();
+    }
+    "txt".to_string()
+}
+
+fn looks_like_lrc(source: &str) -> bool {
+    source.lines().take(50).any(|line| {
+        let line = line.trim_start();
+        let Some(end) = line.find(']') else {
+            return false;
+        };
+        let Some(tag) = line.get(1..end) else {
+            return false;
+        };
+        let mut parts = tag.splitn(2, ':');
+        let minutes = parts.next().unwrap_or_default();
+        let seconds = parts.next().unwrap_or_default();
+        !minutes.is_empty()
+            && minutes.chars().all(|character| character.is_ascii_digit())
+            && seconds.split(['.', ':']).next().is_some_and(|seconds| {
+                seconds.len() == 2 && seconds.chars().all(|character| character.is_ascii_digit())
+            })
+    })
+}
+
+fn initialize_artwork_cache_dir(app_cache_dir: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(app_cache_dir).context("无法创建应用缓存目录")?;
+    let namespace_dir = app_cache_dir.join(CACHE_NAMESPACE_DIR);
+    ensure_plain_cache_directory(&namespace_dir)?;
+    let artwork_dir = namespace_dir.join(ARTWORK_CACHE_DIR);
+    ensure_plain_cache_directory(&artwork_dir)?;
+    Ok(artwork_dir)
+}
+
+fn ensure_plain_cache_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(anyhow!("拒绝使用符号链接作为图片缓存目录"))
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(anyhow!("图片缓存路径不是目录")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match fs::create_dir(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                ensure_plain_cache_directory(path)
+            }
+            Err(error) => Err(error).context("无法创建图片缓存目录"),
+        },
+        Err(error) => Err(error).context("无法检查图片缓存目录"),
+    }
+}
+
+fn ensure_artwork_cache_boundary(cache_dir: &Path) -> Result<()> {
+    if cache_dir.file_name().and_then(|value| value.to_str()) != Some(ARTWORK_CACHE_DIR) {
+        return Err(anyhow!("图片缓存目录不在允许的 artwork 边界内"));
+    }
+    let namespace_dir = cache_dir
+        .parent()
+        .ok_or_else(|| anyhow!("图片缓存目录缺少命名空间"))?;
+    if namespace_dir.file_name().and_then(|value| value.to_str()) != Some(CACHE_NAMESPACE_DIR) {
+        return Err(anyhow!("图片缓存目录不在 Cadilume 命名空间内"));
+    }
+    ensure_plain_cache_directory(namespace_dir)?;
+    ensure_plain_cache_directory(cache_dir)
+}
+
+fn artwork_cache_key(
+    server_id: &str,
+    path: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    authorization_token: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"cadilume-artwork-cache\0v1");
+    // Keep cached artwork isolated by the current per-server authorization
+    // without ever writing the credential itself to disk.
+    update_hash_string(&mut hasher, authorization_token);
+    update_hash_string(&mut hasher, server_id);
+    update_hash_string(&mut hasher, path);
+    update_hash_dimension(&mut hasher, width);
+    update_hash_dimension(&mut hasher, height);
+    format!("{:x}", hasher.finalize())
+}
+
+fn update_hash_string(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn update_hash_dimension(hasher: &mut Sha256, value: Option<u32>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hasher.update(value.to_be_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn artwork_cache_path(cache_dir: &Path, key: &str) -> Result<PathBuf> {
+    if key.len() != 64
+        || !key
+            .bytes()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+    {
+        return Err(anyhow!("无效的图片缓存键"));
+    }
+    Ok(cache_dir.join(format!("{key}.{ARTWORK_CACHE_EXTENSION}")))
+}
+
+fn encode_artwork_cache(mime: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+    if bytes.is_empty() {
+        return Err(anyhow!("拒绝缓存空图片"));
+    }
+    let mime = validate_image_metadata(Some(mime), Some(bytes.len() as u64))?;
+    if mime.len() > MAX_CACHE_MIME_BYTES {
+        return Err(anyhow!("图片 MIME 类型过长"));
+    }
+
+    let mut encoded = Vec::with_capacity(ARTWORK_CACHE_MAGIC.len() + 2 + mime.len() + bytes.len());
+    encoded.extend_from_slice(ARTWORK_CACHE_MAGIC);
+    encoded.extend_from_slice(&(mime.len() as u16).to_be_bytes());
+    encoded.extend_from_slice(mime.as_bytes());
+    encoded.extend_from_slice(bytes);
+    Ok(encoded)
+}
+
+fn decode_artwork_cache(encoded: &[u8]) -> Result<CachedArtwork> {
+    let header_length = ARTWORK_CACHE_MAGIC.len() + 2;
+    if encoded.len() < header_length || &encoded[..ARTWORK_CACHE_MAGIC.len()] != ARTWORK_CACHE_MAGIC
+    {
+        return Err(anyhow!("图片缓存格式无效"));
+    }
+    let mime_length = u16::from_be_bytes([
+        encoded[ARTWORK_CACHE_MAGIC.len()],
+        encoded[ARTWORK_CACHE_MAGIC.len() + 1],
+    ]) as usize;
+    if mime_length == 0 || mime_length > MAX_CACHE_MIME_BYTES {
+        return Err(anyhow!("图片缓存 MIME 长度无效"));
+    }
+    let data_offset = header_length
+        .checked_add(mime_length)
+        .filter(|offset| *offset < encoded.len())
+        .ok_or_else(|| anyhow!("图片缓存内容不完整"))?;
+    let mime = std::str::from_utf8(&encoded[header_length..data_offset])
+        .context("图片缓存 MIME 编码无效")?;
+    let bytes = &encoded[data_offset..];
+    let mime = validate_image_metadata(Some(mime), Some(bytes.len() as u64))?;
+    Ok(CachedArtwork {
+        mime,
+        bytes: bytes.to_vec(),
+    })
+}
+
+fn read_artwork_cache(cache_dir: &Path, key: &str) -> Result<Option<CachedArtwork>> {
+    ensure_artwork_cache_boundary(cache_dir)?;
+    let path = artwork_cache_path(cache_dir, key)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("无法检查图片缓存"),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(anyhow!("图片缓存条目不是普通文件"));
+    }
+    let maximum_file_size = (ARTWORK_CACHE_MAGIC.len() + 2 + MAX_CACHE_MIME_BYTES)
+        .saturating_add(MAX_IMAGE_BYTES) as u64;
+    if metadata.len() > maximum_file_size {
+        return Err(anyhow!("图片缓存条目超过大小限制"));
+    }
+    let artwork = decode_artwork_cache(&fs::read(&path).context("无法读取图片缓存")?)?;
+    if let Ok(file) = OpenOptions::new().write(true).open(path) {
+        let _ = file.set_times(FileTimes::new().set_modified(SystemTime::now()));
+    }
+    Ok(Some(artwork))
+}
+
+fn write_artwork_cache(cache_dir: &Path, key: &str, mime: &str, bytes: &[u8]) -> Result<()> {
+    ensure_artwork_cache_boundary(cache_dir)?;
+    match read_artwork_cache(cache_dir, key) {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(_) => discard_artwork_cache_entry(cache_dir, key),
+    }
+
+    let encoded = encode_artwork_cache(mime, bytes)?;
+    prune_artwork_cache_to_fit(cache_dir, encoded.len() as u64, MAX_ARTWORK_CACHE_BYTES)?;
+    let destination = artwork_cache_path(cache_dir, key)?;
+    let temporary = cache_dir.join(format!(".{key}.{}.tmp", Uuid::new_v4()));
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .context("无法创建图片缓存临时文件")?;
+        file.write_all(&encoded).context("无法写入图片缓存")?;
+        file.sync_all().context("无法同步图片缓存")?;
+        drop(file);
+        match fs::rename(&temporary, &destination) {
+            Ok(()) => Ok(()),
+            Err(_) if destination.is_file() => Ok(()),
+            Err(error) => Err(error).context("无法原子替换图片缓存"),
+        }
+    })();
+    if temporary.exists() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+fn prune_artwork_cache_to_fit(
+    cache_dir: &Path,
+    incoming_size: u64,
+    maximum_size: u64,
+) -> Result<()> {
+    ensure_artwork_cache_boundary(cache_dir)?;
+    if incoming_size > maximum_size {
+        return Err(anyhow!("单个图片缓存条目超过总缓存限制"));
+    }
+
+    let mut total_size = 0_u64;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(cache_dir).context("无法读取图片缓存配额")? {
+        let entry = entry.context("无法读取图片缓存配额条目")?;
+        if entry.path().extension().and_then(|value| value.to_str())
+            != Some(ARTWORK_CACHE_EXTENSION)
+        {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path()).context("无法检查图片缓存配额条目")?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        total_size = total_size
+            .checked_add(metadata.len())
+            .ok_or_else(|| anyhow!("图片缓存大小统计溢出"))?;
+        entries.push((
+            metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            entry.path(),
+            metadata.len(),
+        ));
+    }
+
+    entries.sort_by_key(|(modified, _, _)| *modified);
+    for (_, path, size) in entries {
+        if total_size.saturating_add(incoming_size) <= maximum_size {
+            break;
+        }
+        fs::remove_file(path).context("无法淘汰过期图片缓存")?;
+        total_size = total_size.saturating_sub(size);
+    }
+    if total_size.saturating_add(incoming_size) > maximum_size {
+        return Err(anyhow!("无法为图片缓存释放足够空间"));
+    }
+    Ok(())
+}
+
+fn discard_artwork_cache_entry(cache_dir: &Path, key: &str) {
+    let Ok(path) = artwork_cache_path(cache_dir, key) else {
+        return;
+    };
+    let _ = fs::remove_file(path);
+}
+
+fn artwork_cache_status(cache_dir: &Path) -> Result<CacheStatus> {
+    ensure_artwork_cache_boundary(cache_dir)?;
+    let mut status = CacheStatus {
+        size_bytes: 0,
+        file_count: 0,
+    };
+    for entry in fs::read_dir(cache_dir).context("无法读取图片缓存目录")? {
+        let entry = entry.context("无法读取图片缓存条目")?;
+        if entry.path().extension().and_then(|value| value.to_str())
+            != Some(ARTWORK_CACHE_EXTENSION)
+        {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path()).context("无法检查图片缓存条目")?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        status.size_bytes = status
+            .size_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| anyhow!("图片缓存大小统计溢出"))?;
+        status.file_count = status
+            .file_count
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("图片缓存文件数量统计溢出"))?;
+    }
+    Ok(status)
+}
+
+fn clear_artwork_cache(cache_dir: &Path) -> Result<CacheStatus> {
+    ensure_artwork_cache_boundary(cache_dir)?;
+    for entry in fs::read_dir(cache_dir).context("无法读取待清理的图片缓存目录")? {
+        let entry = entry.context("无法读取待清理的图片缓存条目")?;
+        let file_type = entry.file_type().context("无法检查待清理的图片缓存条目")?;
+        let path = entry.path();
+        if file_type.is_dir() && !file_type.is_symlink() {
+            fs::remove_dir_all(path).context("无法清理图片缓存子目录")?;
+        } else {
+            fs::remove_file(path).context("无法清理图片缓存文件")?;
+        }
+    }
+    artwork_cache_status(cache_dir)
+}
+
+fn artwork_data_url(mime: &str, bytes: &[u8]) -> String {
+    format!("data:{mime};base64,{}", BASE64_STANDARD.encode(bytes))
+}
+
+fn valid_internal_image_path(path: &str) -> bool {
+    let lowercase = path.to_ascii_lowercase();
+    path.len() <= 4096
+        && (path.starts_with("/library/") || path.starts_with("/playlists/"))
+        && !path.starts_with("//")
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && !path.contains(['?', '#'])
+        && !lowercase.contains("%2e")
+        && !lowercase.contains("%2f")
+        && !lowercase.contains("%5c")
+        && !path.split('/').any(|segment| matches!(segment, "." | ".."))
+}
+
+fn valid_artwork_dimension(value: Option<u32>) -> bool {
+    value.is_none_or(|value| (1..=4096).contains(&value))
+}
+
+fn validate_image_metadata(
+    content_type: Option<&str>,
+    content_length: Option<u64>,
+) -> Result<String> {
+    if content_length.is_some_and(|length| length > MAX_IMAGE_BYTES as u64) {
+        return Err(anyhow!("Plex 图片超过 12 MiB 限制"));
+    }
+    let mime = content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .filter(|value| {
+            let Some(subtype) = value.strip_prefix("image/") else {
+                return false;
+            };
+            !subtype.is_empty()
+                && subtype.chars().all(|character| {
+                    character.is_ascii_alphanumeric()
+                        || matches!(
+                            character,
+                            '!' | '#' | '$' | '&' | '-' | '^' | '_' | '.' | '+'
+                        )
+                })
+        })
+        .ok_or_else(|| anyhow!("Plex 图片响应缺少有效的 image Content-Type"))?;
+    Ok(mime)
+}
+
+fn cached_server(state: &PlexState, server_id: &str) -> Result<CachedServer> {
+    state
+        .servers
+        .read()
+        .map_err(|_| anyhow!("服务器缓存读取失败"))?
+        .get(server_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("找不到服务器，请重新刷新服务器列表"))
+}
+
+fn clear_artwork_for_account_change(state: &PlexState) -> Result<()> {
+    let _cache_guard = state
+        .cache_lock
+        .write()
+        .map_err(|_| anyhow!("图片缓存清理锁定失败"))?;
+    clear_artwork_cache(&state.cache_dir).map(|_| ())
+}
+
+fn allowed_server_path(path: &str) -> bool {
+    server_endpoint("https://cadilume.invalid", path).is_ok()
+        && (path.starts_with("/library/")
+            || path.starts_with("/hubs/")
+            || path == "/playlists"
+            || path.starts_with("/playlists/")
+            || path.starts_with("/:/"))
+}
+
+fn playlist_item_uri(server_id: &str, rating_key: &str) -> Result<String> {
+    if !valid_plex_identifier(server_id) || !valid_plex_identifier(rating_key) {
+        return Err(anyhow!("无效的 Plex 歌单项目标识"));
+    }
+    Ok(format!(
+        "server://{server_id}/com.plexapp.plugins.library/library/metadata/{rating_key}"
+    ))
+}
+
+fn valid_plex_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, b'-' | b'_'))
+}
+
+fn string_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn keyring_entry() -> Result<keyring::Entry> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(Into::into)
+}
+
+async fn ensure_success(response: Response, context: &str) -> Result<Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let detail = response.text().await.unwrap_or_default();
+    if status == StatusCode::UNAUTHORIZED {
+        return Err(anyhow!("{context}：登录已失效"));
+    }
+    Err(anyhow!("{context}：HTTP {status} {detail}"))
+}
+
+fn display_error(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestCache {
+        root: PathBuf,
+        artwork: PathBuf,
+    }
+
+    impl TestCache {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("cadilume-cache-test-{}", Uuid::new_v4()));
+            fs::create_dir(&root).expect("test cache root should be created");
+            let artwork = initialize_artwork_cache_dir(&root)
+                .expect("artwork cache directory should be initialized");
+            Self { root, artwork }
+        }
+    }
+
+    impl Drop for TestCache {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn only_expected_server_paths_are_allowed() {
+        assert!(allowed_server_path("/library/sections"));
+        assert!(allowed_server_path("/hubs/search"));
+        assert!(allowed_server_path("/:/timeline"));
+        assert!(!allowed_server_path("https://example.com"));
+        assert!(!allowed_server_path("/identity"));
+    }
+
+    #[test]
+    fn playlist_item_uri_is_server_scoped_and_rejects_path_injection() {
+        assert_eq!(
+            playlist_item_uri("server_A-1", "track-42").unwrap(),
+            "server://server_A-1/com.plexapp.plugins.library/library/metadata/track-42"
+        );
+        for invalid in [
+            "",
+            "../server",
+            "server/id",
+            "server?id",
+            "server#id",
+            "server id",
+        ] {
+            assert!(playlist_item_uri(invalid, "track-42").is_err());
+            assert!(playlist_item_uri("server-1", invalid).is_err());
+        }
+        assert!(playlist_item_uri("a".repeat(257).as_str(), "track-42").is_err());
+    }
+
+    #[test]
+    fn config_defaults_to_close_to_tray() {
+        assert_eq!(
+            PersistedConfig::default().close_behavior,
+            CloseBehavior::Tray
+        );
+    }
+
+    #[test]
+    fn pin_response_never_serializes_the_private_token() {
+        let private_pin = Pin {
+            id: 42,
+            code: "ABCD".to_string(),
+            expires_in: 300,
+            auth_token: Some("account-secret".to_string()),
+        };
+        let response = PinResponse::from_pin(private_pin, true);
+        let serialized = serde_json::to_value(response).expect("PIN response should serialize");
+
+        assert_eq!(serialized["id"], 42);
+        assert_eq!(serialized["code"], "ABCD");
+        assert_eq!(serialized["expiresIn"], 300);
+        assert_eq!(serialized["authenticated"], true);
+        assert!(serialized.get("authToken").is_none());
+        assert!(!serialized.to_string().contains("account-secret"));
+    }
+
+    #[test]
+    fn server_endpoints_stay_on_valid_http_origins() {
+        let endpoint = server_endpoint("https://music.example.test:32400", "/library/metadata/42")
+            .expect("valid Plex endpoint should be accepted");
+        assert_eq!(
+            endpoint.as_str(),
+            "https://music.example.test:32400/library/metadata/42"
+        );
+
+        for connection in [
+            "ftp://music.example.test",
+            "https://user@music.example.test",
+            "https://music.example.test?redirect=https://evil.test",
+            "https://music.example.test#fragment",
+            "not a url",
+        ] {
+            assert!(server_endpoint(connection, "/library/metadata/42").is_err());
+        }
+        for path in [
+            "//evil.test/library/metadata/42",
+            "/library/../identity",
+            "/library/%2e%2e/identity",
+            "/library/metadata/42?redirect=https://evil.test",
+            "/library/metadata/42\\evil",
+        ] {
+            assert!(server_endpoint("https://music.example.test", path).is_err());
+        }
+    }
+
+    #[test]
+    fn non_idempotent_writes_retry_only_before_a_connection_is_established() {
+        assert!(should_retry_server_connection(
+            &Method::GET,
+            ServerAttemptFailure::HttpResponse
+        ));
+        assert!(should_retry_server_connection(
+            &Method::PUT,
+            ServerAttemptFailure::Connect
+        ));
+        assert!(!should_retry_server_connection(
+            &Method::PUT,
+            ServerAttemptFailure::HttpResponse
+        ));
+        assert!(!should_retry_server_connection(
+            &Method::PUT,
+            ServerAttemptFailure::OtherTransport
+        ));
+    }
+
+    #[test]
+    fn lyric_stream_priority_prefers_local_then_timed_then_original_order() {
+        let streams = vec![
+            LyricStream {
+                key: "/first.txt".to_string(),
+                provider: Some("other".to_string()),
+                timed: false,
+            },
+            LyricStream {
+                key: "/remote-timed.lrc".to_string(),
+                provider: Some("other".to_string()),
+                timed: true,
+            },
+            LyricStream {
+                key: "/local-plain.txt".to_string(),
+                provider: Some("com.plexapp.agents.localmedia".to_string()),
+                timed: false,
+            },
+            LyricStream {
+                key: "/local-timed.lrc".to_string(),
+                provider: Some("com.plexapp.agents.localmedia".to_string()),
+                timed: true,
+            },
+        ];
+
+        let keys = prioritize_lyric_streams(streams)
+            .into_iter()
+            .map(|stream| stream.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                "/local-plain.txt".to_string(),
+                "/local-timed.lrc".to_string(),
+                "/remote-timed.lrc".to_string(),
+                "/first.txt".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_plex_xml_lyrics_and_inline_attribution() {
+        let stream = LyricStream {
+            key: "/library/streams/42".to_string(),
+            provider: Some("fallback-provider".to_string()),
+            timed: false,
+        };
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="1">
+  <Lyrics provider="com.plexapp.agents.localmedia" timed="1" author="作者" by="来源">
+    <Line startOffset="1234" endOffset="5678"><Span text="Hello "/><Span text="&amp; world"/></Line>
+    <Line startOffset="5678"><Span text="第二行"/></Line>
+  </Lyrics>
+</MediaContainer>"#;
+
+        let payload = parse_plex_xml(xml, &stream).expect("XML lyrics should parse");
+        assert_eq!(
+            payload.provider.as_deref(),
+            Some("com.plexapp.agents.localmedia")
+        );
+        assert!(payload.timed);
+        assert_eq!(payload.author.as_deref(), Some("作者"));
+        assert_eq!(payload.by.as_deref(), Some("来源"));
+        assert_eq!(
+            payload.lines,
+            vec![
+                PlexLyricLine {
+                    start_ms: Some(1234),
+                    end_ms: Some(5678),
+                    text: "Hello & world".to_string(),
+                },
+                PlexLyricLine {
+                    start_ms: Some(5678),
+                    end_ms: None,
+                    text: "第二行".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn image_metadata_requires_image_mime_and_enforces_size_limit() {
+        assert_eq!(
+            validate_image_metadata(Some("image/jpeg; charset=binary"), Some(1024)).unwrap(),
+            "image/jpeg"
+        );
+        assert!(validate_image_metadata(Some("text/html"), Some(1024)).is_err());
+        assert!(
+            validate_image_metadata(Some("image/png"), Some(MAX_IMAGE_BYTES as u64 + 1)).is_err()
+        );
+    }
+
+    #[test]
+    fn artwork_inputs_are_internal_and_resource_bounded() {
+        assert!(valid_internal_image_path(
+            "/library/metadata/42/thumb/12345"
+        ));
+        assert!(valid_internal_image_path("/playlists/42/composite/12345"));
+        for path in [
+            "https://evil.test/image.jpg",
+            "//evil.test/image.jpg",
+            "/library/../identity",
+            "/library/%2e%2e/identity",
+            "/library/metadata/42/thumb?url=https://evil.test",
+            "/:/resources/photo",
+        ] {
+            assert!(!valid_internal_image_path(path));
+        }
+        assert!(valid_artwork_dimension(None));
+        assert!(valid_artwork_dimension(Some(1)));
+        assert!(valid_artwork_dimension(Some(4096)));
+        assert!(!valid_artwork_dimension(Some(0)));
+        assert!(!valid_artwork_dimension(Some(4097)));
+    }
+
+    #[test]
+    fn artwork_cache_key_is_stable_and_uses_all_request_fields() {
+        let key = artwork_cache_key(
+            "server-a",
+            "/library/metadata/42/thumb/7",
+            Some(512),
+            None,
+            "token-a",
+        );
+        assert_eq!(
+            key,
+            artwork_cache_key(
+                "server-a",
+                "/library/metadata/42/thumb/7",
+                Some(512),
+                None,
+                "token-a"
+            )
+        );
+        assert_eq!(
+            key,
+            "e9f2a62e10de143a1c4facaeec3bd471e35e66ee602fe6b210ec2360e40b59ad"
+        );
+        assert_eq!(key.len(), 64);
+        assert!(key.bytes().all(|character| character.is_ascii_hexdigit()));
+        assert_ne!(
+            key,
+            artwork_cache_key(
+                "server-b",
+                "/library/metadata/42/thumb/7",
+                Some(512),
+                None,
+                "token-a"
+            )
+        );
+        assert_ne!(
+            key,
+            artwork_cache_key(
+                "server-a",
+                "/library/metadata/43/thumb/7",
+                Some(512),
+                None,
+                "token-a"
+            )
+        );
+        assert_ne!(
+            key,
+            artwork_cache_key(
+                "server-a",
+                "/library/metadata/42/thumb/7",
+                None,
+                None,
+                "token-a"
+            )
+        );
+        assert_ne!(
+            key,
+            artwork_cache_key(
+                "server-a",
+                "/library/metadata/42/thumb/7",
+                Some(512),
+                Some(512),
+                "token-a"
+            )
+        );
+        assert_ne!(
+            key,
+            artwork_cache_key(
+                "server-a",
+                "/library/metadata/42/thumb/7",
+                Some(512),
+                None,
+                "token-b"
+            )
+        );
+    }
+
+    #[test]
+    fn artwork_cache_round_trip_hits_and_reports_disk_size() {
+        let cache = TestCache::new();
+        let key = artwork_cache_key(
+            "server-a",
+            "/library/metadata/42/thumb/7",
+            Some(256),
+            Some(256),
+            "token-a",
+        );
+        let bytes = b"fake-image-payload";
+
+        write_artwork_cache(&cache.artwork, &key, "image/png", bytes)
+            .expect("artwork should be cached");
+        let cached = read_artwork_cache(&cache.artwork, &key)
+            .expect("cache read should succeed")
+            .expect("cache should hit");
+        assert_eq!(cached.mime, "image/png");
+        assert_eq!(cached.bytes, bytes);
+        assert_eq!(
+            artwork_data_url(&cached.mime, &cached.bytes),
+            format!("data:image/png;base64,{}", BASE64_STANDARD.encode(bytes))
+        );
+
+        let cache_file_size = fs::metadata(
+            artwork_cache_path(&cache.artwork, &key).expect("cache key should be safe"),
+        )
+        .expect("cache file should exist")
+        .len();
+        assert_eq!(
+            artwork_cache_status(&cache.artwork).expect("cache status should be available"),
+            CacheStatus {
+                size_bytes: cache_file_size,
+                file_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn artwork_cache_prunes_the_oldest_entries_to_its_disk_budget() {
+        let cache = TestCache::new();
+        let oldest_key = artwork_cache_key(
+            "server-a",
+            "/library/metadata/1/thumb",
+            Some(256),
+            Some(256),
+            "token-a",
+        );
+        let newest_key = artwork_cache_key(
+            "server-a",
+            "/library/metadata/2/thumb",
+            Some(256),
+            Some(256),
+            "token-a",
+        );
+        write_artwork_cache(&cache.artwork, &oldest_key, "image/png", b"oldest")
+            .expect("oldest artwork should be cached");
+        write_artwork_cache(&cache.artwork, &newest_key, "image/png", b"newest")
+            .expect("newest artwork should be cached");
+        let oldest_path = artwork_cache_path(&cache.artwork, &oldest_key).unwrap();
+        let newest_path = artwork_cache_path(&cache.artwork, &newest_key).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&oldest_path)
+            .unwrap()
+            .set_times(
+                FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+            )
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&newest_path)
+            .unwrap()
+            .set_times(
+                FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2)),
+            )
+            .unwrap();
+        let incoming_size = fs::metadata(&oldest_path).unwrap().len();
+        let maximum_size = fs::metadata(&newest_path).unwrap().len() + incoming_size;
+
+        prune_artwork_cache_to_fit(&cache.artwork, incoming_size, maximum_size)
+            .expect("quota pruning should succeed");
+
+        assert!(!oldest_path.exists());
+        assert!(newest_path.exists());
+    }
+
+    #[test]
+    fn clear_artwork_cache_stays_inside_artwork_directory() {
+        let cache = TestCache::new();
+        let key = artwork_cache_key(
+            "server-a",
+            "/library/metadata/42/thumb/7",
+            None,
+            None,
+            "token-a",
+        );
+        write_artwork_cache(&cache.artwork, &key, "image/jpeg", b"cached-image")
+            .expect("artwork should be cached");
+        fs::write(cache.artwork.join("stale.tmp"), b"temporary")
+            .expect("stale cache file should be created");
+        let nested = cache.artwork.join("stale");
+        fs::create_dir(&nested).expect("stale cache directory should be created");
+        fs::write(nested.join("entry"), b"temporary")
+            .expect("nested stale cache file should be created");
+        let sibling = cache.root.join("keep.txt");
+        fs::write(&sibling, b"outside artwork cache").expect("sibling should be created");
+
+        assert_eq!(
+            clear_artwork_cache(&cache.artwork).expect("cache clear should succeed"),
+            CacheStatus {
+                size_bytes: 0,
+                file_count: 0,
+            }
+        );
+        assert!(cache.artwork.is_dir());
+        assert_eq!(fs::read(sibling).unwrap(), b"outside artwork cache");
+        assert_eq!(fs::read_dir(&cache.artwork).unwrap().count(), 0);
+    }
+}

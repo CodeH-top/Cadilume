@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main player and desktop lyrics windows",
+  "windows": ["main", "desktop-lyrics"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://app.plex.tv/auth*" },
+        { "url": "ms-settings:*" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,156 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { addTrackToPlaylist, artworkDataUrl, createPin, getPlaylists, pollPin } from "./api";
+import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+
+beforeEach(() => {
+  invokeMock.mockReset();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { __TAURI_INTERNALS__: {} },
+  });
+});
+
+afterEach(() => {
+  if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+  else Reflect.deleteProperty(globalThis, "window");
+});
+
+describe("music metadata helpers", () => {
+  const track: PlexItem = {
+    ratingKey: "1",
+    key: "/library/metadata/1",
+    type: "track",
+    title: "Song",
+    parentTitle: "Album",
+    grandparentTitle: "Artist",
+  };
+
+  it("formats Plex millisecond durations", () => {
+    expect(formatDuration(185_000)).toBe("3:05");
+    expect(formatDuration()).toBe("0:00");
+  });
+
+  it("uses Plex parent hierarchy for labels", () => {
+    expect(trackArtist(track)).toBe("Artist");
+    expect(trackAlbum(track)).toBe("Album");
+  });
+});
+
+describe("Plex audio playlists", () => {
+  it("requests audio playlists and removes smart/video entries at the API boundary", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        Metadata: [
+          {
+            ratingKey: "42",
+            key: "/playlists/42/items",
+            type: "playlist",
+            title: "通勤音乐",
+            playlistType: "audio",
+            smart: "0",
+            leafCount: "12",
+            duration: "185000",
+          },
+          {
+            ratingKey: "43",
+            key: "/playlists/43/items",
+            type: "playlist",
+            title: "智能推荐",
+            playlistType: "audio",
+            smart: "1",
+          },
+          {
+            ratingKey: "44",
+            key: "/playlists/44/items",
+            type: "playlist",
+            title: "电影片单",
+            playlistType: "video",
+            smart: "0",
+          },
+        ],
+      },
+    });
+
+    const playlist = await getPlaylists("server-a");
+    expect(playlist).toHaveLength(1);
+    expect(playlist[0]).toMatchObject({
+      ratingKey: "42",
+      title: "通勤音乐",
+      playlistType: "audio",
+      smart: false,
+      leafCount: 12,
+      duration: 185000,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("server_get", {
+      serverId: "server-a",
+      path: "/playlists",
+      query: { playlistType: "audio" },
+    });
+  });
+
+  it("does not invoke Tauri in the browser demo runtime", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {},
+    });
+
+    await expect(getPlaylists("demo-server")).resolves.toEqual([]);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("passes the playlist and track identifiers to the Rust command unchanged", async () => {
+    await addTrackToPlaylist("server-a", "987654321012345678", "track-17");
+
+    expect(invokeMock).toHaveBeenCalledWith("add_to_playlist", {
+      serverId: "server-a",
+      playlistId: "987654321012345678",
+      ratingKey: "track-17",
+    });
+  });
+});
+
+describe("Plex PIN authentication boundary", () => {
+  it("uses only an authenticated flag in browser demo responses", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {},
+    });
+
+    const created = await createPin();
+    const authenticated = await pollPin(created.id);
+
+    expect(created).toEqual({ id: 1, code: "DEMO", expiresIn: 300, authenticated: false });
+    expect(authenticated).toEqual({ id: 1, code: "DEMO", expiresIn: 300, authenticated: true });
+    expect(created).not.toHaveProperty("authToken");
+    expect(authenticated).not.toHaveProperty("authToken");
+  });
+});
+
+describe("artworkDataUrl dimensions", () => {
+  it("keeps square calls compatible and supports a separate background height", async () => {
+    invokeMock.mockResolvedValue("data:image/png;base64,fixture");
+
+    await expect(artworkDataUrl("server-a", "/library/metadata/1/thumb", 320)).resolves.toContain("data:image");
+    expect(invokeMock).toHaveBeenLastCalledWith("image_data_url", {
+      serverId: "server-a",
+      path: "/library/metadata/1/thumb",
+      width: 320,
+      height: 320,
+    });
+
+    await artworkDataUrl("server-a", "/library/metadata/1/art", 1440, 900);
+    expect(invokeMock).toHaveBeenLastCalledWith("image_data_url", {
+      serverId: "server-a",
+      path: "/library/metadata/1/art",
+      width: 1440,
+      height: 900,
+    });
+  });
+});

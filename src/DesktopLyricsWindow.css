@@ -1,0 +1,341 @@
+/* The Tauri window is transparent; only the hover chrome gets a glass surface. */
+html[data-desktop-lyrics],
+html[data-desktop-lyrics] body,
+html[data-desktop-lyrics] #root {
+  background: transparent !important;
+}
+
+html[data-desktop-lyrics] body {
+  color: #fff;
+}
+
+.desktop-karaoke-window {
+  --karaoke-ink: rgba(255, 255, 255, 0.9);
+  --karaoke-muted: rgba(255, 255, 255, 0.42);
+  --karaoke-outline: rgba(4, 7, 12, 0.82);
+  --karaoke-accent: #ffc46a;
+  --karaoke-accent-hot: #fff0b5;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  align-items: center;
+  padding: 17px 22px;
+  overflow: hidden;
+  background: transparent;
+  color: var(--karaoke-ink);
+  user-select: none;
+  isolation: isolate;
+}
+
+.desktop-karaoke-window::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 14px 10px;
+  border-radius: 28px;
+  background: radial-gradient(circle at 11% 50%, rgba(255, 196, 106, 0.18), transparent 30%), linear-gradient(100deg, rgba(5, 8, 14, 0.28), transparent 55%);
+  opacity: 0;
+  transform: scale(0.98);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+
+.desktop-karaoke-window:hover::before,
+.desktop-karaoke-window:focus-within::before {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.desktop-karaoke-surface {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 126px minmax(0, 1fr);
+  align-items: center;
+  gap: 22px;
+}
+
+.desktop-karaoke-art {
+  position: relative;
+  width: 116px;
+  height: 116px;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.desktop-karaoke-record {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50%;
+  background: radial-gradient(circle at 48% 46%, #353940 0 4%, #15171b 5% 8%, #292c31 9% 10%, #0c0d10 11% 18%, #22252a 19% 20%, #0b0c0f 21% 35%, #24272c 36% 37%, #090a0c 38% 52%, #1c1f23 53% 54%, #08090b 55% 70%, #181a1f 71% 72%, #06070a 73% 100%);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.36), inset 4px 3px 12px rgba(255, 255, 255, 0.06), inset -6px -4px 12px rgba(0, 0, 0, 0.58);
+  transform: rotate(-8deg);
+}
+
+.desktop-karaoke-record.is-playing {
+  animation: desktop-karaoke-spin 8s linear infinite;
+}
+
+.desktop-karaoke-groove {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.groove-one { inset: 12px; }
+.groove-two { inset: 25px; opacity: 0.66; }
+
+.desktop-karaoke-label {
+  position: relative;
+  z-index: 1;
+  width: 50px;
+  height: 50px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-radius: 50%;
+  background: #db8248;
+  color: #20140c;
+  box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.22), inset 0 2px 5px rgba(255, 255, 255, 0.22);
+}
+
+.desktop-karaoke-label img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.desktop-karaoke-copy {
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+  padding: 5px 0;
+  pointer-events: none;
+}
+
+.desktop-karaoke-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.desktop-karaoke-title,
+.desktop-karaoke-artist {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-karaoke-title {
+  max-width: 42%;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.desktop-karaoke-artist {
+  max-width: 48%;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 10px;
+}
+
+.desktop-karaoke-status {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.42);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+
+.desktop-karaoke-status.is-playing {
+  background: #73dc9a;
+  box-shadow: 0 0 0 3px rgba(115, 220, 154, 0.14), 0 0 10px rgba(115, 220, 154, 0.7);
+}
+
+.desktop-karaoke-lines {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.desktop-karaoke-line {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  font-weight: 820;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+  text-shadow: 0 2px 0 var(--karaoke-outline), 0 0 2px var(--karaoke-outline), 0 4px 10px rgba(0, 0, 0, 0.72), 1px 1px 0 rgba(255, 255, 255, 0.17);
+  -webkit-text-stroke: 0.55px rgba(0, 0, 0, 0.38);
+}
+
+.desktop-karaoke-line-current {
+  min-height: 39px;
+  color: var(--karaoke-muted);
+  font-size: clamp(22px, 3vw, 34px);
+}
+
+.desktop-karaoke-line-base,
+.desktop-karaoke-line-fill {
+  display: block;
+}
+
+.desktop-karaoke-line-fill {
+  position: absolute;
+  inset: 0 auto auto 0;
+  /* Keep the overlay's line breaks identical to the base text. Clip its
+     paint area instead of shrinking its layout width. */
+  width: 100%;
+  max-width: none;
+  overflow: hidden;
+  clip-path: inset(0 calc(100% - var(--karaoke-progress, 0%)) 0 0);
+  color: var(--karaoke-accent-hot);
+  background: linear-gradient(180deg, #fff7d8 0%, var(--karaoke-accent) 55%, #f19735 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 2px 0 rgba(87, 43, 8, 0.75), 0 0 4px rgba(255, 183, 70, 0.85), 0 4px 10px rgba(0, 0, 0, 0.64);
+  transition: clip-path 80ms linear;
+}
+
+.desktop-karaoke-line-next {
+  color: rgba(255, 255, 255, 0.53);
+  font-size: clamp(13px, 1.8vw, 18px);
+  font-weight: 650;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.78), 0 3px 7px rgba(0, 0, 0, 0.5);
+  -webkit-text-stroke: 0.35px rgba(0, 0, 0, 0.34);
+}
+
+.desktop-karaoke-line.is-empty {
+  min-height: 1em;
+}
+
+.desktop-karaoke-progress {
+  width: min(100%, 520px);
+  height: 2px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+.desktop-karaoke-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #f19735, #ffe7a4);
+  transition: width 80ms linear;
+}
+
+.desktop-karaoke-chrome {
+  position: absolute;
+  z-index: 3;
+  top: 8px;
+  right: 13px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.17);
+  border-radius: 11px;
+  background: rgba(28, 31, 37, 0.68);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24), inset 0 1px rgba(255, 255, 255, 0.08);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.desktop-karaoke-window:hover .desktop-karaoke-chrome,
+.desktop-karaoke-window:focus-within .desktop-karaoke-chrome {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.desktop-karaoke-hint {
+  padding: 0 5px;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.desktop-karaoke-control {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.68);
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.desktop-karaoke-control:hover,
+.desktop-karaoke-control:focus-visible {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.desktop-karaoke-close:hover,
+.desktop-karaoke-close:focus-visible {
+  color: #fff;
+  background: rgba(226, 93, 86, 0.65);
+}
+
+.desktop-karaoke-window.is-locked .desktop-karaoke-surface {
+  cursor: default;
+}
+
+.desktop-karaoke-window.is-unlocked .desktop-karaoke-surface {
+  cursor: move;
+}
+
+@keyframes desktop-karaoke-spin {
+  to { transform: rotate(352deg); }
+}
+
+@media (prefers-color-scheme: light) {
+  .desktop-karaoke-window {
+    --karaoke-ink: rgba(255, 255, 255, 0.96);
+    --karaoke-muted: rgba(255, 255, 255, 0.63);
+    --karaoke-outline: rgba(12, 13, 16, 0.92);
+  }
+}
+
+@media (max-width: 620px) {
+  .desktop-karaoke-window { padding-inline: 15px; }
+  .desktop-karaoke-surface { grid-template-columns: 84px minmax(0, 1fr); gap: 13px; }
+  .desktop-karaoke-art { width: 80px; height: 80px; }
+  .desktop-karaoke-record { width: 78px; height: 78px; }
+  .desktop-karaoke-label { width: 35px; height: 35px; }
+  .desktop-karaoke-line-current { min-height: 31px; font-size: clamp(17px, 5vw, 26px); }
+  .desktop-karaoke-line-next { font-size: 12px; }
+  .desktop-karaoke-hint { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-karaoke-window::before,
+  .desktop-karaoke-chrome,
+  .desktop-karaoke-line-fill,
+  .desktop-karaoke-progress span { transition: none; }
+  .desktop-karaoke-record.is-playing { animation: none; }
+}
