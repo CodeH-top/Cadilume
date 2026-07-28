@@ -1,0 +1,60 @@
+{
+  "fill": {
+    "linear-gradient": [
+      "srgb:0.94118,0.63137,0.36471,1.00000",
+      "srgb:0.94118,0.63137,0.36471,1.00000"
+    ]
+  },
+  "groups": [
+    {
+      "blend-mode": "normal",
+      "layers": [
+        {
+          "blend-mode": "normal",
+          "glass": false,
+          "image-name": "cadilume-glyph.svg",
+          "name": "Cadilume Glyph",
+          "opacity-specializations": [
+            {
+              "value": 1
+            },
+            {
+              "appearance": "dark",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "blend-mode": "normal",
+          "glass": false,
+          "image-name": "cadilume-glyph-dark.svg",
+          "name": "Cadilume Glyph Dark",
+          "opacity-specializations": [
+            {
+              "value": 0
+            },
+            {
+              "appearance": "dark",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "opacity": 1,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}

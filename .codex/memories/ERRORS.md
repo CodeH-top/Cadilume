@@ -1,5 +1,10 @@
 # ERRORS
 
+## 2026-07-28 — Xcode 26 `ictool` name collision
+
+- `xcrun --find ictool` resolves to Xcode's asset-catalog compiler and does not support Icon Composer's `--export-preview` interface, even though both executables share the same name.
+- Locate the Icon Composer CLI relative to the active `xcode-select -p` directory at `../Applications/Icon Composer.app/Contents/Executables/ictool`; continue using `xcrun actool` for the asset-catalog compilation step.
+
 ## 2026-07-28 — Tauri DMG signing and Gatekeeper boundary
 
 - `pnpm tauri bundle --bundles dmg --no-sign` rebuilds a temporary `.app` for the DMG and removes it after packaging, so manually signing a previously generated app does not guarantee that signature reaches the disk image.

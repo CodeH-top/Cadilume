@@ -8,6 +8,7 @@
 ## 2026-07-28 — Sharp macOS icon pipeline
 
 - Tauri's default icon conversion can leave the `.icns` 1024px slot derived from a lower-resolution raster. Cadilume instead renders `app-icon.svg` directly to a true 1024×1024 master, downsamples each standard Retina slot, and rebuilds `icon.icns` with `iconutil` via `pnpm icons:macos`.
+- macOS 26's layered icon is an additional `Cadilume.icon` → `Assets.car` path, not a replacement for the legacy ICNS. `actool` also emits a reduced ICNS without 512/1024 slots, so copy only its `Assets.car` and retain the independently generated full fallback ICNS.
 - Release verification must extract the app's `icon.icns` and the DMG `.VolumeIcon.icns`; both `icon_512x512@2x.png` files should be 1024×1024 and hash-identical to the SVG-rendered master. This also detects an old icon accidentally retained in the DMG staging volume.
 
 ## 2026-07-28 — Playback-session restore and queue boundaries

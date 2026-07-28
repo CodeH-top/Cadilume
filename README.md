@@ -65,7 +65,7 @@ Cadilume 的首要原则：
 
 ## 开发
 
-要求：Node.js 20+、pnpm 10+、Rust stable，以及 [Tauri 2 平台依赖](https://v2.tauri.app/start/prerequisites/)。
+要求：Node.js 20+、pnpm 10+、Rust stable，以及 [Tauri 2 平台依赖](https://v2.tauri.app/start/prerequisites/)。在 macOS 上重新生成分层应用图标还需要 Xcode 26 或更高版本及其中的 Icon Composer。
 
 ```bash
 pnpm install
@@ -82,7 +82,7 @@ pnpm build
 pnpm tauri build
 ```
 
-macOS 图标统一从项目内的 `src-tauri/icons/app-icon.svg` 生成。`icons:macos` 会先更新各平台图标，再用真实 1024px 矢量直出重建 `.icns` 的全部 Retina 槽位，避免把 512px 图放大后导致 DMG/Finder 图标发虚：
+macOS 图标统一从项目内的 `src-tauri/icons/app-icon.svg` 与 `src-tauri/icons/Cadilume.icon` 生成。`icons:macos` 会先更新各平台图标，再用真实 1024px 矢量直出重建 `.icns` 的全部 Retina 槽位，同时编译 macOS 26 分层图标所需的 `Assets.car`；旧系统、应用包和 DMG 卷图标都保留清晰的兼容回退：
 
 ```bash
 pnpm icons:macos
@@ -93,7 +93,7 @@ pnpm icons:macos
 ```bash
 pnpm tauri bundle --bundles app,dmg -c '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
 codesign --verify --deep --strict --verbose=4 src-tauri/target/release/bundle/macos/Cadilume.app
-hdiutil verify src-tauri/target/release/bundle/dmg/Cadilume_0.1.0_aarch64.dmg
+hdiutil verify src-tauri/target/release/bundle/dmg/Cadilume_0.1.1_aarch64.dmg
 ```
 
 面向 GitHub 用户、且希望稳定得到普通首次打开确认的正式发布，必须使用 Developer ID Application、Hardened Runtime 与安全时间戳完成签名，再通过 Apple notarization 并 staple 公证票据；ad-hoc 或本地自签证书都不能替代这条信任链。

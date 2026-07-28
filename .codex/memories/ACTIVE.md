@@ -11,7 +11,7 @@
 - [ACT-007] Use the browser demo dataset only outside Tauri. Real Plex traffic must run through Rust commands.
 - [ACT-008] Keep the product/application name `Cadilume`, Bundle/application identifier `top.codeh.cadilume`, and repository directory `cadilume` aligned. Use Plex/Plexamp/PMS names only for third-party service, API/protocol, interoperability, or clean-room research semantics.
 - [ACT-009] The expanded now-playing view is an in-window modal that covers the entire viewport, including the fixed bottom bar, and must carry its own complete playback controls; it may never render outside the application window.
-- [ACT-010] Generate macOS `.icns` assets from `src-tauri/icons/app-icon.svg` with a true 1024px Retina slot via `pnpm icons:macos`; verify both the app icon and DMG volume icon before release packaging.
+- [ACT-010] Generate the macOS 26 layered `Assets.car` from `src-tauri/icons/Cadilume.icon` and the legacy `.icns` from `app-icon.svg` with a true 1024px Retina slot via `pnpm icons:macos`; verify both the app icon and DMG volume icon before release packaging.
 - [ACT-011] Treat ad-hoc signing only as a local acceptance package. Public macOS distribution that should pass Gatekeeper normally requires a Developer ID Application identity, hardened runtime, secure timestamp, notarization, and a stapled ticket.
 
 ## Validation
