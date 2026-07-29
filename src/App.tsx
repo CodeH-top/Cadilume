@@ -82,7 +82,7 @@ import type {
 } from "./types";
 import { formatDuration, trackAlbum, trackArtist } from "./types";
 import { readPersistedPlaybackSession, usePlayer, type PlaybackFailure } from "./usePlayer";
-import { useOutputDevices } from "./useOutputDevices";
+import { activateOutputControl, useOutputDevices } from "./useOutputDevices";
 import { useLyrics } from "./useLyrics";
 import { usePlexLogin } from "./usePlexLogin";
 import { BrandIcon } from "./BrandIcon";
@@ -731,10 +731,22 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
           if (!player.current) return;
           void toggleDesktopLyrics();
         }}
-        onToggleDevices={() => {
-          setNowPlayingOpen(false);
-          setPlaylistTrack(undefined);
-          setSidePanel((value) => value === "devices" ? null : "devices");
+        onOutputAction={() => {
+          const result = activateOutputControl(
+            outputDevices.platform,
+            hasCurrentTrack,
+            player.showAirPlayPicker,
+            () => {
+              setNowPlayingOpen(false);
+              setPlaylistTrack(undefined);
+              setSidePanel((value) => value === "devices" ? null : "devices");
+            },
+          );
+          if (result === "missing-track") {
+            setNotice("请先播放一首歌曲，再选择 AirPlay 设备。");
+          } else if (result === "airplay-unavailable") {
+            setNotice("当前 macOS WebView 没有提供 AirPlay 选择器，请从控制中心的“声音”菜单选择 AirPlay 设备。");
+          }
         }}
       />
     </div>
@@ -1156,7 +1168,7 @@ function PlaylistPicker({ serverId, track, onClose, onAdded }: {
   );
 }
 
-function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, desktopLyricsVisible, devicesOpen, outputPlatform, canOpenNowPlaying, canToggleQueue, canToggleDesktopLyrics, onOpenNowPlaying, onToggleQueue, onToggleDesktopLyrics, onToggleDevices }: {
+function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, desktopLyricsVisible, devicesOpen, outputPlatform, canOpenNowPlaying, canToggleQueue, canToggleDesktopLyrics, onOpenNowPlaying, onToggleQueue, onToggleDesktopLyrics, onOutputAction }: {
   player: ReturnType<typeof usePlayer>;
   nowPlayingTriggerRef: RefObject<HTMLButtonElement | null>;
   expanded: boolean;
@@ -1170,7 +1182,7 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, desktopL
   onOpenNowPlaying: () => void;
   onToggleQueue: () => void;
   onToggleDesktopLyrics: () => void;
-  onToggleDevices: () => void;
+  onOutputAction: () => void;
 }) {
   const volumeIcon = player.muted || player.volume === 0 ? <VolumeX size={18} /> : player.volume < 0.5 ? <Volume1 size={18} /> : <Volume2 size={18} />;
   const cycleRepeat = () => player.setRepeat(player.repeat === "off" ? "all" : player.repeat === "all" ? "one" : "off");
@@ -1193,7 +1205,7 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, desktopL
       <div className="player-extras">
         <IconButton label={desktopLyricsVisible ? "隐藏桌面歌词" : "显示桌面歌词"} active={desktopLyricsVisible} disabled={!canToggleDesktopLyrics} onClick={onToggleDesktopLyrics}><Captions size={19} /></IconButton>
         <IconButton label="播放队列" active={queueOpen} disabled={!canToggleQueue} onClick={onToggleQueue}><ListMusic size={19} /></IconButton>
-        <IconButton label={outputPlatform === "macos" ? "AirPlay 与播放设备" : "播放设备"} active={devicesOpen} onClick={onToggleDevices}>{outputPlatform === "macos" ? <Airplay size={19} /> : <Speaker size={18} />}</IconButton>
+        <IconButton label={outputPlatform === "macos" ? "选择 AirPlay 设备" : "播放设备"} active={outputPlatform === "macos" ? player.airPlayActive : devicesOpen} onClick={onOutputAction}>{outputPlatform === "macos" ? <Airplay size={19} /> : <Speaker size={18} />}</IconButton>
         <div className="volume-control">
           <IconButton label={player.muted ? "取消静音" : "静音"} onClick={() => player.setMuted(!player.muted)}>{volumeIcon}</IconButton>
           <input aria-label="播放器独立音量" type="range" min="0" max="1" step="0.01" value={player.muted ? 0 : player.volume} onChange={(event) => player.setVolume(Number(event.target.value))} />
