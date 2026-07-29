@@ -953,7 +953,7 @@ function LyricsPanel({ track, lyrics, onClose, onSeek }: {
           return (
             <button
               ref={(node) => { lineRefs.current[line.id] = node; }}
-              className={`lyric-line ${active ? "active" : ""}`}
+              className={`lyric-line ${active ? "is-active" : ""} ${timed ? "is-timed" : "is-static"}`}
               key={line.id}
               type="button"
               disabled={!timed}

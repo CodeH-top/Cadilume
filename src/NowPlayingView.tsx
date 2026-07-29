@@ -510,7 +510,7 @@ export function NowPlayingView({
                       onClick={() => handleLyricSeek(line)}
                     >
                       <span className="now-playing-lyric-text">{line.texts.join(" · ")}</span>
-                      {active && <span className="now-playing-lyric-marker" aria-hidden="true" />}
+                      <span className="now-playing-lyric-marker" aria-hidden="true" />
                     </button>
                   );
                 })
