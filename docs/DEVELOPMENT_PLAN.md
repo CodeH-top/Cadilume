@@ -168,7 +168,7 @@
 
 - 分析方向：区分 PMS 转码响应错误、错误 MIME/Range、票据失效和 WebView codec 拒绝；检查失败重试是否错误地把“已是 320 kbps”当成终点。
 - 验收：有可用连接/兼容转码时自动恢复；最终失败时全局提醒包含可行动建议，日志保留技术原因。
-- 状态：已完成有界兼容码率回退、全量自动验证与内部浏览器最小尺寸实测。
+- 状态：有界兼容码率回退、全量自动验证与内部浏览器最小尺寸实测已完成；此前真实失败曲目仍需在用户实际 PMS 上端到端复播，完成前不宣称所有曲目均已验证解决。
 
 ## 5. 歌词与展开播放器
 
@@ -248,7 +248,7 @@
 - 自动验证：`pnpm check` 通过；`pnpm test` 7 个文件、65 项测试通过；`pnpm build` 通过；Rust 35 项测试通过；`cargo fmt --check` 与 `git diff --check` 通过。
 - Web UI：Codex 内部浏览器新建干净标签页并固定 `960×640`；通过可见设置关闭预缓冲后进入歌曲页播放，正在播放信息与控制完整，底栏 `DOMRect.bottom=640`、宽度 960；页面无横向溢出，可见文字最小 12px，控制台 warning/error 为 0。
 - 实测边界：内部浏览器使用演示播放分支，不创建 Tauri 本机音频代理；真实码率回退顺序和终止边界由 32 项 `usePlayer` 定向测试与 17 项 `stream_proxy` 定向测试覆盖，浏览器负责验证播放态 UI、最小尺寸和运行稳定性。
-- 结论：PLAY-005 通过，可以进入 PLAY-004 全局播放失败提醒。
+- 结论：PLAY-005 的逻辑实现和自动验证通过，可以进入 PLAY-004 全局播放失败提醒；用户实际 PMS 的问题曲目保留为外部真机验收项。
 
 ### 2026-07-29 — PLAY-004：全局播放失败提醒
 
@@ -392,7 +392,7 @@
 - 文档同步：README、`docs/ARCHITECTURE.md` 与 `design-system/MASTER.md` 已移除 Apple Music/Spotify 视觉基线、独立桌面歌词、设置页退出应用、`1280×820` 默认尺寸和 AirPlay 二次设备面板等过期描述；统一为 Plex/Plexamp 信息密度的 clean-room Cadilume 视觉、深浅双主题、默认/最小 `960×640`、主窗口右侧歌词、常驻普通/智能/只读歌单和设置页仅退出账号。
 - 播放边界：三类连接标签（本地直连、远程直连、Plex Relay）与媒体决策（原始直放、PMS 转码）分开描述；明确 Cadilume 客户端永不转码，loopback 仅做高熵票据代理，必要的兼容转换/降码率由 PMS universal transcode 完成。
 - 设置文案：播放质量说明改为“优先直放原始音频；需要格式兼容或限码率时由 Plex Media Server 转码，Cadilume 本地不转码”，自动选项改为“优先直放 / PMS 兼容转码”，避免把连接拓扑或 WebView 解码误写成客户端转码。
-- 记忆同步：项目 `PROFILE.md`、`ACTIVE.md`、`LEARNINGS.md`、`ERRORS.md` 已更新新窗口、退出入口、歌词与转码边界；删除透明桌面歌词的过期操作规则，并记录新鲜 `CARGO_TARGET_DIR` 的清洁构建 workaround。父工作区和全局记忆无 Cadilume 专属规则，本轮不修改。
+- 记忆同步：项目 `PROFILE.md`、`ACTIVE.md`、`LEARNINGS.md`、`ERRORS.md`、`FEATURE_REQUESTS.md` 已更新新窗口、退出入口、歌词与转码边界；删除透明桌面歌词的过期操作规则，记录新鲜 `CARGO_TARGET_DIR` 的清洁构建 workaround，并保留真实问题曲目与逐曲最终链路的待验边界。父工作区和全局记忆无 Cadilume 专属规则，本轮不修改。
 - 自动文档校验：`git diff --check` 通过；旧正向描述扫描无残留（计划中的历史分析与验收记录保留为审计轨迹）。
 - 自动回归：`pnpm check`、`pnpm build`、9 个前端测试文件共 80 项测试、36 项 Rust 测试、`cargo fmt --check` 和 `git diff --check` 全部通过。另使用全新 `/tmp/cadilume-tauri-build.*` 目标完成 `pnpm tauri build --no-bundle` Release 编译，随后清理该临时目标；未构建 DMG，未产生或残留 `.app`。
 - Web UI：只使用 Codex 内部浏览器，新建干净标签并固定 `960×640`。深浅主题均无横向溢出，可见文字最小 12px，根节点 `user-select:none`、搜索输入 `user-select:text`；底栏始终为 `y=548`、`bottom=640`，进度/音量填充实测为 `29.01% / 72%`。
