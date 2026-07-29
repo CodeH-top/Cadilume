@@ -40,7 +40,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import {
   artworkUrl,
   addTrackToPlaylist,
@@ -62,6 +62,7 @@ import {
 } from "./api";
 import "./App.css";
 import { getCenteredLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
+import { rangeFillPercent } from "./playerUi";
 import type {
   BootstrapResponse,
   CacheStatus,
@@ -1210,6 +1211,8 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOp
   onOutputAction: () => void;
 }) {
   const volumeIcon = player.muted || player.volume === 0 ? <VolumeX size={18} /> : player.volume < 0.5 ? <Volume1 size={18} /> : <Volume2 size={18} />;
+  const progressFill = rangeFillPercent(player.progress, player.duration);
+  const volumeFill = rangeFillPercent(player.muted ? 0 : player.volume, 1);
   const cycleRepeat = () => player.setRepeat(player.repeat === "off" ? "all" : player.repeat === "all" ? "one" : "off");
   return (
     <footer className={`player-bar ${expanded ? "is-expanded" : ""}`} aria-label="播放器" aria-hidden={expanded || undefined} inert={expanded || undefined}>
@@ -1225,7 +1228,7 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOp
           <IconButton label="下一首" onClick={player.next}><SkipForward size={19} fill="currentColor" /></IconButton>
           <IconButton label={player.repeat === "one" ? "单曲循环" : player.repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止"} active={player.repeat !== "off"} onClick={cycleRepeat}>{player.repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}</IconButton>
         </div>
-        <div className="progress-row"><span>{formatDuration(player.progress * 1000)}</span><input aria-label="播放进度" type="range" min="0" max={Math.max(1, player.duration)} step="1" value={Math.min(player.progress, player.duration || 0)} onChange={(event) => player.seek(Number(event.target.value))} /><span>{formatDuration(player.duration * 1000)}</span></div>
+        <div className="progress-row"><span>{formatDuration(player.progress * 1000)}</span><input aria-label="播放进度" type="range" min="0" max={Math.max(1, player.duration)} step="1" value={Math.min(player.progress, player.duration || 0)} style={{ "--range-progress": `${progressFill}%` } as CSSProperties} onChange={(event) => player.seek(Number(event.target.value))} /><span>{formatDuration(player.duration * 1000)}</span></div>
       </div>
       <div className="player-extras">
         <IconButton label={lyricsOpen ? "关闭歌词" : "打开歌词"} active={lyricsOpen} disabled={!canToggleLyrics} onClick={onToggleLyrics}><Captions size={19} /></IconButton>
@@ -1233,7 +1236,7 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOp
         <IconButton label={outputPlatform === "macos" ? "选择 AirPlay 设备" : "播放设备"} active={outputPlatform === "macos" ? player.airPlayActive : devicesOpen} onClick={onOutputAction}>{outputPlatform === "macos" ? <Airplay size={19} /> : <Speaker size={18} />}</IconButton>
         <div className="volume-control">
           <IconButton label={player.muted ? "取消静音" : "静音"} onClick={() => player.setMuted(!player.muted)}>{volumeIcon}</IconButton>
-          <input aria-label="播放器独立音量" type="range" min="0" max="1" step="0.01" value={player.muted ? 0 : player.volume} onChange={(event) => player.setVolume(Number(event.target.value))} />
+          <input aria-label="播放器独立音量" type="range" min="0" max="1" step="0.01" value={player.muted ? 0 : player.volume} style={{ "--range-progress": `${volumeFill}%` } as CSSProperties} onChange={(event) => player.setVolume(Number(event.target.value))} />
           <span>{Math.round((player.muted ? 0 : player.volume) * 100)}</span>
         </div>
       </div>
