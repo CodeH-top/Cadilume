@@ -13,7 +13,7 @@
 - Purpose: lightweight, desktop-first music client for macOS and Windows that interoperates with authorized Plex Media Server libraries.
 - Stack: Tauri 2, React 19, TypeScript, Rust, Vite.
 - Repository: independent git repository on branch `main`.
-- UI direction: native system window, equally complete dark/light themes, Plex/Plexamp-like desktop information density through a clean-room Cadilume implementation, fixed bottom player, persistent independent volume, default/minimum size `960×640`.
+- UI direction: native system window, equally complete dark/light themes, Plex/Plexamp-like desktop information density through a clean-room Cadilume implementation, fixed bottom player, persistent independent volume, default/minimum size `1280×820`.
 
 ## User Priorities
 

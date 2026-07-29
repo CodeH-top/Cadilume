@@ -136,8 +136,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .searchbox input::placeholder { color: var(--muted-faint); }
 kbd { border: 1px solid var(--border-strong); border-radius: 5px; padding: 1px 5px; color: var(--muted-faint); background: var(--surface-deep); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .topbar-actions { display: flex; align-items: center; gap: 9px; }
-.connection-pill { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font-size: 12px; }
-.status-dot { width: 6px; height: 6px; border-radius: 50%; background: #70c692; box-shadow: 0 0 0 3px rgba(112, 198, 146, 0.1); }
+.connection-pill { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px; border: 1px solid var(--border); border-radius: 99px; color: var(--muted-strong); background: color-mix(in srgb, var(--panel) 82%, transparent); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: #70c692; box-shadow: 0 0 0 3px rgba(112, 198, 146, 0.12); }
+.connection-pill[data-connection="remote"] .status-dot { background: #6aaee8; box-shadow: 0 0 0 3px rgba(106, 174, 232, 0.12); }
+.connection-pill[data-connection="relay"] .status-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .icon-button { display: inline-grid; flex: 0 0 auto; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted); transition: color 160ms ease, background 160ms ease; }
 .icon-button:hover:not(:disabled) { color: var(--text); background: var(--panel-hover); }
 .icon-button.active,
@@ -415,7 +417,6 @@ button.device-option:hover { border-color: var(--border-strong); background: var
   .player-extras { gap: 4px; }
   .player-extras > .icon-button { width: 28px; height: 28px; }
   .content { padding-inline: 25px; }
-  .connection-pill { display: none; }
   .app-shell.side-panel-visible { grid-template-columns: var(--sidebar-width) minmax(0, 1fr); }
   .queue-panel, .lyrics-panel { position: fixed; z-index: var(--z-side-panel); top: 0; right: 0; bottom: var(--player-height); width: min(350px, calc(100vw - 16px)); max-width: calc(100vw - 16px); max-height: calc(100vh - var(--player-height)); overflow: hidden; box-shadow: -20px 0 45px rgba(0, 0, 0, 0.35); }
 }

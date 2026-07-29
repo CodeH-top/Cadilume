@@ -609,7 +609,16 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
             <kbd>{outputDevices.platform === "macos" ? "⌘ K" : "Ctrl K"}</kbd>
           </form>
           <div className="topbar-actions">
-            {selectedServer && <span className="connection-pill"><span className="status-dot" />{selectedServer.local ? "本地直连" : selectedServer.relay ? "Plex Relay" : "远程直连"}</span>}
+            {selectedServer && (() => {
+              const connectionKind = selectedServer.local ? "local" : selectedServer.relay ? "relay" : "remote";
+              const connectionLabel = selectedServer.local ? "本地直连" : selectedServer.relay ? "Plex Relay" : "远程直连";
+              return (
+                <span className="connection-pill" data-connection={connectionKind} aria-label={`连接方式：${connectionLabel}`} title="当前选中服务器的连接方式">
+                  <span className="status-dot" aria-hidden="true" />
+                  {connectionLabel}
+                </span>
+              );
+            })()}
           </div>
         </header>
 
