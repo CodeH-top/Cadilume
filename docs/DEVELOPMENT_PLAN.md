@@ -167,9 +167,10 @@
 
 - 根因：底栏按钮先打开播放设备侧栏，侧栏里才调用 WebKit 系统选择器。
 - 首轮方案：macOS 底栏 AirPlay 按钮直接调用当前 Audio 的 `webkitShowPlaybackTargetPicker()`；Windows/其他平台继续使用设备面板。
-- 第二轮反馈：系统面板仍有卡顿和 `Show More` 二段展开，体验不自然。先确认这是 WebKit 系统 picker 的公共 API 行为还是 Cadilume 自定义面板造成；若 WebKit picker 本身受限，评估只用公开 `AVRoutePickerView` 的原生桥接，不使用私有 API、模拟点击或自绘虚假设备列表。
+- 第二轮结论：Apple 官方 `AVRoutePickerView` 文档中的系统路由列表示例本身就包含 `Show more`，证明该分组属于系统 UI；公开 API 只允许设置按钮样式、媒体偏好和用于路由的 `AVPlayer`，不提供展开全部设备或控制列表布局的开关。Cadilume 当前播放对象是 WebKit `HTMLAudioElement`，不能绑定给 `AVRoutePickerView.player`，因此原生桥接既不能删除 `Show More`，也不能可靠控制当前音频链路。
+- 决策：继续同步调用 active Audio 的 `webkitShowPlaybackTargetPicker()`，这是能保持 WebKit 播放目标语义的一次点击公开路径；不加入无效的 `AVRoutePickerView` 桥接，不使用私有 API、模拟点击或自绘虚假设备列表。系统设备发现耗时、分组和 `Show More` 不能由 Cadilume 控制。
 - 验收：一次点击只出现一个系统路由选择界面，不先打开 Cadilume 侧栏、不重复触发；展开层和普通底栏行为一致。系统自身无法由应用控制的分组/更多项目需在记录中明确，不以不可靠 DOM 技巧规避。
-- 状态：首轮单击直达已完成；第二轮公共 API 与卡顿根因待真机复验。
+- 状态：单击直达与公开 API 边界评估完成；真实 AirPlay 接收器的发现耗时和连接仍需 macOS 安装包真机验收，不能用 Chrome 模拟。
 
 ### PLAY-002：底栏进度条和音量条看不出当前值
 
@@ -522,3 +523,12 @@
 - 自动验证：`pnpm check`、10 个测试文件共 81 项前端测试、`pnpm build`、`cargo fmt --check`、36 项 Rust 测试、`pnpm tauri build --no-bundle` Release 编译与 `git diff --check` 全部通过；未构建 DMG，项目内没有生成或残留 `.app`。
 - 视觉边界：本步遵循 macOS 设计技能的内容优先、双主题独立配色、微交互反馈与分层阴影原则；只用 DOM、computed style 和真实交互状态验证，未主动截取用户屏幕。
 - 结论：NP-002 通过，可以进入 AIR-001 的系统 AirPlay 选择器边界评估。
+
+### 2026-07-29 — AIR-001：系统 AirPlay 选择器公开边界
+
+- 当前链路：底栏一次点击后同步调用 active `HTMLAudioElement.webkitShowPlaybackTargetPicker()`；调用前没有 Promise、定时器或 Cadilume 设备面板，满足 WebKit 的用户手势约束。无线状态继续由同一元素的 `webkitcurrentplaybacktargetiswirelesschanged` 更新。
+- 官方证据：[Apple `AVRoutePickerView`](https://developer.apple.com/documentation/avkit/avroutepickerview) 的说明与示例图明确展示系统附近接收器 popover，列表末尾本身包含 `Show more`；公开可配置项只有 delegate、颜色/按钮样式、视频设备优先级、`AVPlayer` 和自定义第三方路由控制器，没有“展开全部 AirPlay 设备”或自定义系统列表布局的接口。
+- 桥接结论：[Apple `AVRoutePickerView.player`](https://developer.apple.com/documentation/avkit/avroutepickerview/player) 只能接收 `AVPlayer`。Cadilume 当前由 WebKit `HTMLAudioElement` 解码与持有 AirPlay 路由；新增 native picker 无法绑定这个播放对象，除非先把整个播放内核迁移到 AVPlayer。仅为改变弹窗外观而创建未绑定 picker 会引入第二套路由状态，不能作为可靠修复。
+- 实施决策：本步不修改播放代码；保留当前唯一能直接作用于 WebKit 音频的公开 picker。系统列表的发现延迟、分组与 `Show More` 记为不可由应用控制的 macOS/WebKit 行为；不采用私有 API、遍历系统视图、模拟第二次点击或伪造设备列表。
+- Chrome `1280×820`：单击“选择 AirPlay 设备”后 `.devices-panel=0`、AirPlay 按钮只有 1 个、无横向溢出；Chrome 不具备 WebKit 系统 picker，因此直接进入既有明确回退提示，没有二次点击或 Cadilume 弹窗。真实系统 popover 仍需 macOS 安装包配合实际接收器验收。
+- 结论：AIR-001 公共实现已达到当前播放架构的可靠上限；下一步进入 LYR-002，使用固定曲目比较 Plex Web 与 Cadilume 的歌词时间源。
