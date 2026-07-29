@@ -395,7 +395,6 @@ export function NowPlayingView({
             <ChevronDown size={22} strokeWidth={1.8} aria-hidden="true" />
           </button>
           <div className="now-playing-header-title" aria-live="polite">
-            <span className="now-playing-kicker">NOW PLAYING</span>
             <span>{stateLabel}</span>
           </div>
           <div className="now-playing-header-actions">
@@ -472,10 +471,7 @@ export function NowPlayingView({
 
           <section className="now-playing-lyrics-column" aria-label="同步歌词">
             <div className="now-playing-lyrics-heading">
-              <div>
-                <span className="now-playing-kicker">LYRICS</span>
-                <h2>歌词</h2>
-              </div>
+              <h2>歌词</h2>
               <span className="now-playing-lyrics-count" aria-live="polite">{lineCountLabel}</span>
             </div>
             <div

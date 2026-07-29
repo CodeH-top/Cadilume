@@ -34,7 +34,7 @@
   visibility: hidden;
   transform: translateY(100%);
   pointer-events: none;
-  transition: opacity 260ms ease, transform 450ms cubic-bezier(0.22, 0.8, 0.25, 1), visibility 0s linear 450ms;
+  transition: opacity 190ms ease, transform 190ms ease-out, visibility 0s linear 190ms;
 }
 
 .now-playing-view.is-open {
@@ -293,15 +293,6 @@
   color: var(--now-playing-muted);
   font-size: 13px;
   letter-spacing: 0.02em;
-}
-
-.now-playing-kicker {
-  color: var(--now-playing-accent);
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.18em;
-  line-height: 1;
-  text-transform: uppercase;
 }
 
 .now-playing-header-actions {
@@ -695,7 +686,7 @@
 }
 
 .now-playing-lyrics-heading h2 {
-  margin: 6px 0 0;
+  margin: 0;
   font-size: clamp(26px, 2.6vw, 40px);
   letter-spacing: -0.06em;
   line-height: 0.98;
@@ -838,6 +829,7 @@
 .now-playing-lyrics-footer small {
   max-width: 52%;
   overflow: hidden;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

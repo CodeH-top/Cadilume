@@ -105,10 +105,17 @@ function App() {
 function MainApplication({ themeMode, onThemeMode }: { themeMode: ThemeMode; onThemeMode: (mode: ThemeMode) => void }) {
   const [session, setSession] = useState<BootstrapResponse>();
   const [error, setError] = useState<string>();
+  const requestedUiPreview = import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get("ui-preview")
+    : null;
+  const uiPreview = requestedUiPreview === "login" || requestedUiPreview === "splash"
+    ? requestedUiPreview
+    : null;
 
   useEffect(() => {
+    if (uiPreview) return;
     void showMainWindow().catch(() => undefined);
-  }, []);
+  }, [uiPreview]);
 
   const load = useCallback(async () => {
     setError(undefined);
@@ -119,8 +126,14 @@ function MainApplication({ themeMode, onThemeMode }: { themeMode: ThemeMode; onT
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!uiPreview) void load();
+  }, [load, uiPreview]);
 
+  if (uiPreview === "splash") return <SplashScreen />;
+  if (uiPreview === "login") {
+    return <LoginScreen clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} />;
+  }
   if (!session && !error) return <SplashScreen />;
   if (!session || error) return <FatalError message={error || "无法启动 Cadilume"} retry={load} />;
   if (!session.authenticated || !session.account) {
@@ -714,7 +727,7 @@ function ContentView(props: ContentViewProps) {
   return (
     <>
       <div className="page-heading home-heading">
-        <div><p className="eyebrow">{props.section?.title || "音乐资料库"}</p><h1>{greeting()}，{props.account.title || props.account.username}</h1><p>从最近加入的专辑开始，或使用顶部快捷搜索整个资料库。</p></div>
+        <div><h1>{greeting()}，{props.account.title || props.account.username}</h1><p>正在浏览“{props.section?.title || "音乐资料库"}”；可从最近加入的专辑开始，或使用顶部搜索。</p></div>
         <div className="library-stat"><HardDrive size={18} /><span><strong>{props.server?.name || "Plex Server"}</strong><small>{props.server?.owned ? "你拥有的服务器" : sharedSourceLabel(props.server?.sourceTitle)}</small></span></div>
       </div>
       <CardCollection title="最近加入" subtitle="服务器中最新的音乐" items={props.items} onOpen={props.onOpen} compact />
@@ -745,12 +758,14 @@ function CardCollection({ title, subtitle, items, round = false, compact = false
 function DetailView({ detail, onBack, onPlay, onOpen, onPlayTrack }: { detail: { source: PlexItem; children: PlexItem[] }; onBack: () => void; onPlay: () => void; onOpen: (item: PlexItem) => void; onPlayTrack: (track: PlexItem, context: PlexItem[]) => void }) {
   const tracks = detail.children.filter((item) => item.type === "track");
   const albums = detail.children.filter((item) => item.type === "album");
+  const typeLabel = detail.source.type === "artist" ? "艺术家" : "专辑";
+  const description = detail.source.parentTitle || detail.source.summary || `${detail.children.length} 项内容`;
   return (
     <>
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} />返回</button>
       <header className="detail-hero">
         <Artwork item={detail.source} size="hero" className={detail.source.type === "artist" ? "round" : ""} />
-        <div><p className="eyebrow">{detail.source.type === "artist" ? "艺术家" : "专辑"}</p><h1>{detail.source.title}</h1><p>{detail.source.parentTitle || detail.source.summary || `${detail.children.length} 项内容`}</p>{tracks.length > 0 && <button className="primary-button" onClick={onPlay}><Play size={17} fill="currentColor" />播放</button>}</div>
+        <div><h1>{detail.source.title}</h1><p>{typeLabel} · {description}</p>{tracks.length > 0 && <button className="primary-button" onClick={onPlay}><Play size={17} fill="currentColor" />播放</button>}</div>
       </header>
       {tracks.length > 0 && <TrackTable title="曲目" tracks={tracks} onPlay={onPlayTrack} />}
       {albums.length > 0 && <CardCollection title="专辑" subtitle={`${detail.source.title} 的作品`} items={albums} onOpen={onOpen} />}
@@ -784,7 +799,7 @@ function SearchResults({ hubs, query, onOpen, onPlayTrack }: { hubs: PlexHub[]; 
   if (!total) return <EmptyState title={`没有找到“${query}”`} description="尝试更短的关键词，或切换到其他音乐资料库。" icon={<Search size={28} />} />;
   return (
     <>
-      <div className="page-heading"><div><p className="eyebrow">搜索结果</p><h1>“{query}”</h1><p>共找到 {total} 项内容</p></div></div>
+      <div className="page-heading"><div><h1>“{query}”的搜索结果</h1><p>共找到 {total} 项内容</p></div></div>
       {hubs.map((hub, index) => hub.type === "track"
         ? <TrackTable key={`${hub.title}-${index}`} title={hub.title} tracks={hub.items} onPlay={onPlayTrack} />
         : <CardCollection key={`${hub.title}-${index}`} title={hub.title} subtitle="" items={hub.items} round={hub.type === "artist"} compact onOpen={onOpen} />)}
@@ -795,7 +810,7 @@ function SearchResults({ hubs, query, onOpen, onPlayTrack }: { hubs: PlexHub[]; 
 function SettingsView(props: ContentViewProps) {
   return (
     <div className="settings-page">
-      <div className="page-heading"><div><p className="eyebrow">偏好设置</p><h1>设置</h1><p>桌面窗口、播放、缓存和账号。</p></div></div>
+      <div className="page-heading"><div><h1>设置</h1><p>桌面窗口、播放、缓存和账号。</p></div></div>
       <SettingsGroup icon={<Minimize2 size={18} />} title="关闭主窗口时" description="无论选择哪一种，菜单栏或通知区域都会提供明确的退出入口。">
         <div className="choice-grid">
           <ChoiceCard active={props.closeBehavior === "tray"} title="最小化到托盘 / 菜单栏" description="继续后台播放，通过状态图标再次打开或退出。" icon={<Radio size={21} />} onClick={() => props.onCloseBehavior("tray")} />
@@ -866,7 +881,7 @@ function ChoiceCard({ active, title, description, icon, onClick }: { active: boo
 function QueuePanel({ queue, currentIndex, onClose, onSelect, onRemove }: { queue: PlexItem[]; currentIndex: number; onClose: () => void; onSelect: (track: PlexItem) => void; onRemove: (index: number) => void }) {
   return (
     <aside className="queue-panel" aria-label="播放队列">
-      <header><div><p className="eyebrow">接下来播放</p><h2>队列</h2></div><IconButton label="关闭队列" onClick={onClose}><X size={18} /></IconButton></header>
+      <header><h2>接下来播放</h2><IconButton label="关闭队列" onClick={onClose}><X size={18} /></IconButton></header>
       <div className="queue-list">
         {queue.length ? queue.map((track, index) => (
           <div className={`queue-item ${index === currentIndex ? "active" : ""}`} key={`${track.ratingKey}-${index}`}>
@@ -925,7 +940,7 @@ function LyricsPanel({ track, lyrics, onClose, onSeek }: {
   return (
     <aside className="lyrics-panel" aria-label="歌词">
       <header>
-        <div><p className="eyebrow">正在播放</p><h2>歌词</h2></div>
+        <h2>歌词</h2>
         <IconButton label="关闭歌词" onClick={onClose}><X size={18} /></IconButton>
       </header>
       <div className="lyrics-context">
@@ -1004,7 +1019,7 @@ function DevicesPanel({ output, player, onClose }: {
 
   return (
     <aside className="devices-panel" role="dialog" aria-label="播放设备">
-      <header><div><p className="eyebrow">声音输出</p><h2>播放设备</h2></div><IconButton label="关闭播放设备" onClick={onClose}><X size={18} /></IconButton></header>
+      <header><h2>播放设备</h2><IconButton label="关闭播放设备" onClick={onClose}><X size={18} /></IconButton></header>
       <div className="devices-content">
         {output.platform === "macos" ? (
           <>
@@ -1146,8 +1161,7 @@ function PlaylistPicker({ serverId, track, onClose, onAdded }: {
       <section ref={dialogRef} className="playlist-picker" role="dialog" aria-modal="true" aria-labelledby="playlist-picker-title">
         <header>
           <div>
-            <p className="eyebrow">添加歌曲</p>
-            <h2 id="playlist-picker-title" ref={titleRef} tabIndex={-1}>选择歌单</h2>
+            <h2 id="playlist-picker-title" ref={titleRef} tabIndex={-1}>添加到歌单</h2>
             <small>《{track.title}》 · {trackArtist(track)}</small>
           </div>
           <IconButton label="关闭歌单选择" disabled={Boolean(busyId)} onClick={onClose}><X size={18} /></IconButton>
@@ -1234,7 +1248,6 @@ function LoginScreen({ clientIdentifier, onAuthenticated }: { clientIdentifier: 
     <main className="login-screen">
       <section className="login-card">
         <div className="login-brand"><span className="brand-mark large"><BrandIcon size={28} /></span><span>Cadilume</span></div>
-        <p className="eyebrow">你的音乐，你的桌面</p>
         <h1>连接 Plex 音乐资料库</h1>
         <p className="login-copy">使用系统浏览器安全登录。免费账号只要获得服务器音乐库共享权限，也可以正常浏览和播放。</p>
         <div className="login-features"><span><Check size={16} />独立播放器音量</span><span><Check size={16} />家庭与共享服务器</span><span><Check size={16} />明确的托盘退出入口</span></div>
@@ -1242,7 +1255,7 @@ function LoginScreen({ clientIdentifier, onAuthenticated }: { clientIdentifier: 
         {login.error && <p className="form-error" role="alert">{login.error}</p>}
         <small className="login-legal">仅请求当前账号已获授权的服务器和音乐库，不绕过 Plex 权限。</small>
       </section>
-      <aside className="login-art" aria-hidden="true"><div className="record record-one" /><div className="record record-two" /><div className="sound-lines">{Array.from({ length: 34 }, (_, index) => <span key={index} style={{ height: `${18 + ((index * 23) % 92)}px` }} />)}</div><p>Lightweight.<br />Private.<br />Desktop first.</p></aside>
+      <aside className="login-art" aria-hidden="true"><div className="record record-one" /><div className="record record-two" /><div className="sound-lines">{Array.from({ length: 34 }, (_, index) => <span key={index} style={{ height: `${18 + ((index * 23) % 92)}px` }} />)}</div></aside>
     </main>
   );
 }
@@ -1407,9 +1420,8 @@ function SplashScreen() {
     <main className="splash-screen">
       <section className="splash-card" aria-live="polite" aria-busy="true">
         <span className="brand-mark splash-mark"><BrandIcon size={38} /></span>
-        <p className="eyebrow">桌面音乐资料库</p>
         <h1>Cadilume</h1>
-        <p>正在恢复账号、音乐来源与上次播放现场。</p>
+        <p>正在恢复桌面音乐资料库的账号、音乐来源与上次播放现场。</p>
         <div className="splash-progress" role="status"><LoaderCircle className="spin" size={24} /><span>正在连接你的音乐资料库…</span></div>
       </section>
     </main>
