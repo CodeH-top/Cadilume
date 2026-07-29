@@ -31,6 +31,7 @@ import {
   SkipBack,
   SkipForward,
   SlidersHorizontal,
+  Sparkles,
   Speaker,
   Sun,
   Trash2,
@@ -51,6 +52,7 @@ import {
   getCacheStatus,
   getChildren,
   getLibraryItems,
+  getPlaylistItems,
   getPlaylists,
   getRecentAlbums,
   getSections,
@@ -62,6 +64,7 @@ import {
   showMainWindow,
 } from "./api";
 import "./App.css";
+import { selectRandomContextPlayback } from "./contextPlayback";
 import { getCenteredLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
 import { rangeFillPercent } from "./playerUi";
 import type {
@@ -161,6 +164,13 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const [nowPlayingOpen, setNowPlayingOpen] = useState(false);
   const [nowPlayingMode, setNowPlayingMode] = useState<NowPlayingMode>(readNowPlayingMode);
   const [playlistTrack, setPlaylistTrack] = useState<PlexItem>();
+  const [playlists, setPlaylists] = useState<PlexPlaylist[]>([]);
+  const [playlistListLoading, setPlaylistListLoading] = useState(false);
+  const [playlistListError, setPlaylistListError] = useState<string>();
+  const [selectedPlaylist, setSelectedPlaylist] = useState<PlexPlaylist>();
+  const [playlistItems, setPlaylistItems] = useState<PlexItem[]>([]);
+  const [playlistItemsLoading, setPlaylistItemsLoading] = useState(false);
+  const [playlistItemsError, setPlaylistItemsError] = useState<string>();
   const [detail, setDetail] = useState<{ source: PlexItem; children: PlexItem[] }>();
   const [closeBehavior, setCloseBehavior] = useState<CloseBehavior>(initialSession.closeBehavior);
   const [quality, setQuality] = useState<StreamQuality>(() => readStoredQuality(initialPlaybackSession?.quality));
@@ -170,9 +180,12 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const [sourcesSyncing, setSourcesSyncing] = useState(false);
   const [playbackSettingsRequest, setPlaybackSettingsRequest] = useState(0);
   const [playbackFailurePreview, setPlaybackFailurePreview] = useState<PlaybackFailure>();
+  const contentRef = useRef<HTMLElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const nowPlayingTriggerRef = useRef<HTMLButtonElement>(null);
   const loadedSectionRef = useRef<string | undefined>(undefined);
+  const playlistListRequestRef = useRef(0);
+  const playlistItemsRequestRef = useRef(0);
   const preferredPlaybackServerId = initialPlaybackSession?.serverId;
   const player = usePlayer(serverId, quality);
   const outputDevices = useOutputDevices(player.setOutputSinkId);
@@ -216,6 +229,10 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
 
   const selectedServer = servers.find((server) => server.id === serverId);
   const selectedSection = sections.find((section) => section.key === sectionKey);
+  useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, [detail?.source.ratingKey, selectedPlaylist?.ratingKey, view]);
+
   useEffect(() => {
     if (!previewPlaybackFailure || !player.current) {
       setPlaybackFailurePreview(undefined);
@@ -299,7 +316,44 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     return () => { cancelled = true; };
   }, [serverId, sourceRevision]);
 
+  const loadPlaylistList = useCallback(async () => {
+    const requestId = ++playlistListRequestRef.current;
+    if (!serverId) {
+      setPlaylists([]);
+      setPlaylistListError(undefined);
+      setPlaylistListLoading(false);
+      return;
+    }
+    setPlaylistListLoading(true);
+    setPlaylistListError(undefined);
+    try {
+      const result = await getPlaylists(serverId);
+      if (playlistListRequestRef.current === requestId) setPlaylists(result);
+    } catch (reason) {
+      if (playlistListRequestRef.current === requestId) {
+        setPlaylists([]);
+        setPlaylistListError(playlistReadErrorMessage(reason));
+      }
+    } finally {
+      if (playlistListRequestRef.current === requestId) setPlaylistListLoading(false);
+    }
+  }, [serverId]);
+
+  useEffect(() => {
+    playlistItemsRequestRef.current += 1;
+    setSelectedPlaylist(undefined);
+    setPlaylistItems([]);
+    setPlaylistItemsError(undefined);
+    setPlaylistItemsLoading(false);
+    void loadPlaylistList();
+  }, [loadPlaylistList, sourceRevision]);
+
   const loadView = useCallback(async (nextView: LibraryView) => {
+    playlistItemsRequestRef.current += 1;
+    setSelectedPlaylist(undefined);
+    setPlaylistItems([]);
+    setPlaylistItemsError(undefined);
+    setPlaylistItemsLoading(false);
     setView(nextView);
     setDetail(undefined);
     if (nextView === "settings") setSidePanel(null);
@@ -359,10 +413,41 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     }
   }, [items, player, serverId]);
 
+  const openPlaylist = useCallback(async (playlist: PlexPlaylist) => {
+    if (!serverId) return;
+    const requestId = ++playlistItemsRequestRef.current;
+    setSelectedPlaylist(playlist);
+    setPlaylistItems([]);
+    setPlaylistItemsError(undefined);
+    setPlaylistItemsLoading(true);
+    setDetail(undefined);
+    setSidePanel(null);
+    setPlaylistTrack(undefined);
+    try {
+      const result = await getPlaylistItems(serverId, playlist.ratingKey);
+      if (playlistItemsRequestRef.current === requestId) setPlaylistItems(result);
+    } catch (reason) {
+      if (playlistItemsRequestRef.current === requestId) {
+        setPlaylistItemsError(playlistReadErrorMessage(reason));
+      }
+    } finally {
+      if (playlistItemsRequestRef.current === requestId) setPlaylistItemsLoading(false);
+    }
+  }, [serverId]);
+
+  const closePlaylist = useCallback(() => {
+    playlistItemsRequestRef.current += 1;
+    setSelectedPlaylist(undefined);
+    setPlaylistItems([]);
+    setPlaylistItemsError(undefined);
+    setPlaylistItemsLoading(false);
+  }, []);
+
   const submitSearch = useCallback(async (event?: FormEvent) => {
     event?.preventDefault();
     const query = searchText.trim();
     if (!serverId || !sectionKey || !query) return;
+    closePlaylist();
     setView("search");
     setDetail(undefined);
     setLoading(true);
@@ -374,7 +459,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     } finally {
       setLoading(false);
     }
-  }, [searchText, sectionKey, serverId]);
+  }, [closePlaylist, searchText, sectionKey, serverId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -440,8 +525,24 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
 
   const playDetail = () => {
     const tracks = detail?.children.filter((item) => item.type === "track") || [];
-    if (tracks[0]) player.playContext(tracks[0], tracks);
+    if (!tracks[0]) return;
+    player.playContext(tracks[0], tracks);
+    player.setShuffle(false);
   };
+
+  const shuffleContext = useCallback((context: readonly PlexItem[]) => {
+    const selection = selectRandomContextPlayback(context);
+    if (!selection) return;
+    player.playContext(selection.current, selection.queue);
+    player.setShuffle(true);
+  }, [player]);
+
+  const playPlaylist = useCallback(() => {
+    const tracks = playlistItems.filter((item) => item.type === "track");
+    if (!tracks[0]) return;
+    player.playContext(tracks[0], tracks);
+    player.setShuffle(false);
+  }, [player, playlistItems]);
 
   const closeNowPlaying = useCallback(() => {
     setNowPlayingOpen(false);
@@ -479,13 +580,21 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         <nav>
           <p className="nav-label">资料库</p>
           {navigation.map(({ id, label, icon: NavIcon }) => (
-            <button className={`nav-item ${view === id ? "active" : ""}`} key={id} onClick={() => void loadView(id)}>
+            <button className={`nav-item ${!selectedPlaylist && view === id ? "active" : ""}`} key={id} onClick={() => void loadView(id)}>
               <NavIcon size={18} strokeWidth={1.8} /><span>{label}</span>
             </button>
           ))}
         </nav>
+        <PlaylistSidebar
+          playlists={playlists}
+          selectedId={selectedPlaylist?.ratingKey}
+          loading={playlistListLoading}
+          error={playlistListError}
+          onOpen={(playlist) => void openPlaylist(playlist)}
+          onRetry={() => void loadPlaylistList()}
+        />
         <div className="sidebar-footer">
-          <button className={`account-button ${view === "settings" ? "active" : ""}`} aria-current={view === "settings" ? "page" : undefined} onClick={() => void loadView("settings")}>
+          <button className={`account-button ${!selectedPlaylist && view === "settings" ? "active" : ""}`} aria-current={!selectedPlaylist && view === "settings" ? "page" : undefined} onClick={() => void loadView("settings")}>
             <Avatar account={account} />
             <span><strong>{account.title || account.username}</strong><small>{selectedServer ? (selectedServer.owned ? "我的服务器" : "共享资料库") : "选择音乐来源"}</small></span>
           </button>
@@ -504,9 +613,21 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
           </div>
         </header>
 
-        <main id="main-content" className="content" tabIndex={-1}>
+        <main ref={contentRef} id="main-content" className="content" tabIndex={-1}>
           {notice && <Notice message={notice} onClose={() => setNotice(undefined)} />}
-          {loading && !items.length ? <LoadingState /> : (
+          {selectedPlaylist ? (
+            <PlaylistDetailView
+              playlist={selectedPlaylist}
+              tracks={playlistItems}
+              loading={playlistItemsLoading}
+              error={playlistItemsError}
+              onBack={closePlaylist}
+              onRetry={() => void openPlaylist(selectedPlaylist)}
+              onPlay={playPlaylist}
+              onShuffle={() => shuffleContext(playlistItems)}
+              onPlayTrack={(track, context) => player.playContext(track, context)}
+            />
+          ) : loading && !items.length ? <LoadingState /> : (
             <ContentView
               view={view}
               items={items}
@@ -530,6 +651,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
               onOpen={openItem}
               onBack={() => setDetail(undefined)}
               onPlayDetail={playDetail}
+              onShuffleDetail={() => shuffleContext(detail?.children || [])}
               onPlayTrack={(track, context) => player.playContext(track, context)}
               onCloseBehavior={changeCloseBehavior}
               onQuality={changeQuality}
@@ -707,6 +829,7 @@ interface ContentViewProps {
   onOpen: (item: PlexItem) => void;
   onBack: () => void;
   onPlayDetail: () => void;
+  onShuffleDetail: () => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
   onCloseBehavior: (value: CloseBehavior) => void;
   onQuality: (value: StreamQuality) => void;
@@ -719,9 +842,54 @@ interface ContentViewProps {
   onLogout: () => void;
 }
 
+function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetry }: {
+  playlists: PlexPlaylist[];
+  selectedId?: string;
+  loading: boolean;
+  error?: string;
+  onOpen: (playlist: PlexPlaylist) => void;
+  onRetry: () => void;
+}) {
+  return (
+    <nav className="sidebar-playlists" aria-label="歌单">
+      <div className="sidebar-playlists-heading">
+        <span>歌单</span>
+        {!loading && !error && <small>{playlists.length}</small>}
+      </div>
+      <div className="sidebar-playlist-list" aria-busy={loading || undefined}>
+        {loading ? (
+          <div className="sidebar-playlist-state" role="status"><LoaderCircle className="spin" size={17} /><span>正在同步歌单…</span></div>
+        ) : error ? (
+          <div className="sidebar-playlist-state is-error" role="alert"><span>歌单读取失败</span><button type="button" onClick={onRetry}>重试</button></div>
+        ) : !playlists.length ? (
+          <div className="sidebar-playlist-state"><ListMusic size={18} /><span>暂无音乐歌单</span></div>
+        ) : playlists.map((playlist) => {
+          const capability = [playlist.smart ? "智能" : "普通", playlist.readOnly ? "只读" : undefined].filter(Boolean).join(" · ");
+          const active = selectedId === playlist.ratingKey;
+          const PlaylistIcon = playlist.smart ? Sparkles : ListMusic;
+          return (
+            <button
+              type="button"
+              className={`sidebar-playlist-item ${active ? "active" : ""}`}
+              key={playlist.ratingKey}
+              aria-current={active ? "page" : undefined}
+              aria-label={`${playlist.title}，${capability}歌单`}
+              title={playlist.title}
+              onClick={() => onOpen(playlist)}
+            >
+              <PlaylistIcon size={15} strokeWidth={1.9} />
+              <span><strong>{playlist.title}</strong><small>{capability}</small></span>
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
 function ContentView(props: ContentViewProps) {
   if (props.view === "settings") return <SettingsView {...props} />;
-  if (props.detail) return <DetailView detail={props.detail} onBack={props.onBack} onPlay={props.onPlayDetail} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
+  if (props.detail) return <DetailView detail={props.detail} onBack={props.onBack} onPlay={props.onPlayDetail} onShuffle={props.onShuffleDetail} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "search") return <SearchResults hubs={props.hubs} query={props.searchText} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "tracks") return <TrackTable title="歌曲" subtitle={`${props.items.length} 首已载入`} tracks={props.items} onPlay={props.onPlayTrack} />;
   if (props.view === "artists") return <CardCollection title="艺术家" subtitle="按名字浏览资料库" items={props.items} round onOpen={props.onOpen} />;
@@ -733,6 +901,45 @@ function ContentView(props: ContentViewProps) {
         <div className="library-stat"><HardDrive size={18} /><span><strong>{props.server?.name || "Plex Server"}</strong><small>{props.server?.owned ? "你拥有的服务器" : sharedSourceLabel(props.server?.sourceTitle)}</small></span></div>
       </div>
       <CardCollection title="最近加入" subtitle="服务器中最新的音乐" items={props.items} onOpen={props.onOpen} compact />
+    </>
+  );
+}
+
+function PlaylistDetailView({ playlist, tracks, loading, error, onBack, onRetry, onPlay, onShuffle, onPlayTrack }: {
+  playlist: PlexPlaylist;
+  tracks: PlexItem[];
+  loading: boolean;
+  error?: string;
+  onBack: () => void;
+  onRetry: () => void;
+  onPlay: () => void;
+  onShuffle: () => void;
+  onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
+}) {
+  const kind = [playlist.smart ? "智能" : "普通", playlist.readOnly ? "只读" : undefined].filter(Boolean).join(" · ") + "歌单";
+  const trackCount = loading ? playlist.leafCount ?? 0 : tracks.length;
+  return (
+    <>
+      <button className="back-button" onClick={onBack}><ArrowLeft size={17} />返回</button>
+      <header className="detail-hero playlist-detail-hero">
+        <Artwork item={playlist} size="hero" />
+        <div>
+          <h1>{playlist.title}</h1>
+          <p>{kind} · {trackCount} 首歌曲{playlist.summary ? ` · ${playlist.summary}` : ""}</p>
+          {playlist.smart && <small className="playlist-dynamic-note"><Sparkles size={13} />每次打开都会读取当前动态结果</small>}
+          <div className="detail-actions">
+            <button className="primary-button" type="button" disabled={loading || Boolean(error) || !tracks.length} onClick={onPlay}><Play size={17} fill="currentColor" />播放全部</button>
+            <button className="secondary-button" type="button" disabled={loading || Boolean(error) || !tracks.length} onClick={onShuffle}><Shuffle size={16} />随机播放</button>
+          </div>
+        </div>
+      </header>
+      {loading ? (
+        <div className="playlist-detail-state" role="status"><LoaderCircle className="spin" size={22} /><span>正在读取歌单曲目…</span></div>
+      ) : error ? (
+        <div className="playlist-detail-state is-error" role="alert"><TriangleAlert size={24} /><strong>无法读取这个歌单</strong><span>{error}</span><button className="secondary-button" type="button" onClick={onRetry}><RefreshCw size={15} />重试</button></div>
+      ) : tracks.length ? (
+        <TrackTable title="曲目" subtitle={`${tracks.length} 首歌曲`} tracks={tracks} onPlay={onPlayTrack} />
+      ) : <EmptyState title="这个歌单还没有歌曲" description={playlist.smart ? "Plex 当前没有返回符合智能规则的曲目。" : "可以稍后从歌曲菜单向普通可写歌单添加内容。"} icon={<ListMusic size={28} />} />}
     </>
   );
 }
@@ -756,7 +963,7 @@ function CardCollection({ title, subtitle, items, round = false, compact = false
   );
 }
 
-function DetailView({ detail, onBack, onPlay, onOpen, onPlayTrack }: { detail: { source: PlexItem; children: PlexItem[] }; onBack: () => void; onPlay: () => void; onOpen: (item: PlexItem) => void; onPlayTrack: (track: PlexItem, context: PlexItem[]) => void }) {
+function DetailView({ detail, onBack, onPlay, onShuffle, onOpen, onPlayTrack }: { detail: { source: PlexItem; children: PlexItem[] }; onBack: () => void; onPlay: () => void; onShuffle: () => void; onOpen: (item: PlexItem) => void; onPlayTrack: (track: PlexItem, context: PlexItem[]) => void }) {
   const tracks = detail.children.filter((item) => item.type === "track");
   const albums = detail.children.filter((item) => item.type === "album");
   const typeLabel = detail.source.type === "artist" ? "艺术家" : "专辑";
@@ -766,7 +973,7 @@ function DetailView({ detail, onBack, onPlay, onOpen, onPlayTrack }: { detail: {
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} />返回</button>
       <header className="detail-hero">
         <Artwork item={detail.source} size="hero" className={detail.source.type === "artist" ? "round" : ""} />
-        <div><h1>{detail.source.title}</h1><p>{typeLabel} · {description}</p>{tracks.length > 0 && <button className="primary-button" onClick={onPlay}><Play size={17} fill="currentColor" />播放</button>}</div>
+        <div><h1>{detail.source.title}</h1><p>{typeLabel} · {description}</p>{tracks.length > 0 && <div className="detail-actions"><button className="primary-button" onClick={onPlay}><Play size={17} fill="currentColor" />播放</button>{detail.source.type === "album" && <button className="secondary-button" onClick={onShuffle}><Shuffle size={16} />随机播放</button>}</div>}</div>
       </header>
       {tracks.length > 0 && <TrackTable title="曲目" tracks={tracks} onPlay={onPlayTrack} />}
       {albums.length > 0 && <CardCollection title="专辑" subtitle={`${detail.source.title} 的作品`} items={albums} onOpen={onOpen} />}
@@ -1263,8 +1470,17 @@ function LoginScreen({ clientIdentifier, onAuthenticated }: { clientIdentifier: 
   );
 }
 
+interface ArtworkItem {
+  ratingKey: string;
+  title: string;
+  thumb?: string;
+  art?: string;
+  composite?: string;
+  imageUrl?: string;
+}
+
 function Artwork({ item, size, className = "", preferArt = false }: {
-  item?: PlexItem;
+  item?: ArtworkItem;
   size: "small" | "large" | "hero" | "player" | "immersive" | "backdrop";
   className?: string;
   preferArt?: boolean;
@@ -1275,7 +1491,9 @@ function Artwork({ item, size, className = "", preferArt = false }: {
   const [source, setSource] = useState(item?.imageUrl);
   const [failed, setFailed] = useState(false);
   const [ticketRetryCount, setTicketRetryCount] = useState(0);
-  const path = preferArt ? item?.art || item?.thumb : item?.thumb || item?.art;
+  const path = preferArt
+    ? item?.art || item?.thumb || item?.composite
+    : item?.thumb || item?.composite || item?.art;
   const dimensions = size === "small" || size === "player"
     ? { width: 96, height: 96 }
     : size === "hero"
@@ -1452,6 +1670,14 @@ function readStoredQuality(fallback: StreamQuality = "auto"): StreamQuality {
   } catch {
     return fallback;
   }
+}
+
+function playlistReadErrorMessage(reason: unknown): string {
+  const message = reason instanceof Error ? reason.message : String(reason || "未知错误");
+  if (/\b(?:401|403|404)\b|forbidden|not found|permission|unauthori[sz]ed|无权|权限/iu.test(message)) {
+    return "当前账号无法读取这个歌单，或歌单已被服务器移除。共享服务器会继续服从 Plex Media Server 的访问权限。";
+  }
+  return message;
 }
 
 function playlistErrorMessage(reason: unknown): string {
