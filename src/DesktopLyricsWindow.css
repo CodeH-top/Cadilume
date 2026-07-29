@@ -139,14 +139,14 @@ html[data-desktop-lyrics] body {
 
 .desktop-karaoke-title {
   max-width: 42%;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 760;
 }
 
 .desktop-karaoke-artist {
   max-width: 48%;
   color: rgba(255, 255, 255, 0.62);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .desktop-karaoke-status {
@@ -185,7 +185,7 @@ html[data-desktop-lyrics] body {
 .desktop-karaoke-line-current {
   min-height: 39px;
   color: var(--karaoke-muted);
-  font-size: clamp(22px, 3vw, 34px);
+  font-size: clamp(24px, 3vw, 36px);
 }
 
 .desktop-karaoke-line-base,
@@ -213,7 +213,7 @@ html[data-desktop-lyrics] body {
 
 .desktop-karaoke-line-next {
   color: rgba(255, 255, 255, 0.53);
-  font-size: clamp(13px, 1.8vw, 18px);
+  font-size: clamp(15px, 1.8vw, 20px);
   font-weight: 650;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.78), 0 3px 7px rgba(0, 0, 0, 0.5);
   -webkit-text-stroke: 0.35px rgba(0, 0, 0, 0.34);
@@ -271,7 +271,7 @@ html[data-desktop-lyrics] body {
 .desktop-karaoke-hint {
   padding: 0 5px;
   color: rgba(255, 255, 255, 0.58);
-  font-size: 9px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -327,8 +327,8 @@ html[data-desktop-lyrics] body {
   .desktop-karaoke-art { width: 80px; height: 80px; }
   .desktop-karaoke-record { width: 78px; height: 78px; }
   .desktop-karaoke-label { width: 35px; height: 35px; }
-  .desktop-karaoke-line-current { min-height: 31px; font-size: clamp(17px, 5vw, 26px); }
-  .desktop-karaoke-line-next { font-size: 12px; }
+  .desktop-karaoke-line-current { min-height: 31px; font-size: clamp(19px, 5vw, 28px); }
+  .desktop-karaoke-line-next { font-size: 14px; }
   .desktop-karaoke-hint { display: none; }
 }
 

@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "Cadilume",
-        "width": 1280,
-        "height": 820,
+        "width": 960,
+        "height": 640,
         "minWidth": 960,
         "minHeight": 640,
         "center": true,

@@ -68,6 +68,29 @@ fn main_close_action(close_to_tray: bool) -> MainCloseAction {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn should_reveal_main_window_on_reopen(_has_visible_windows: bool) -> bool {
+    // A visible auxiliary window (for example desktop lyrics) must not prevent
+    // a Dock click from bringing the hidden main window back.
+    true
+}
+
+pub fn handle_run_event<R: Runtime>(app: &AppHandle<R>, event: tauri::RunEvent) {
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Reopen {
+        has_visible_windows,
+        ..
+    } = event
+    {
+        if should_reveal_main_window_on_reopen(has_visible_windows) {
+            let _ = reveal_main_window(app);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, event);
+}
+
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
         .text("show", "显示 Cadilume")
@@ -230,6 +253,9 @@ fn request_app_quit<R: Runtime>(app: &AppHandle<R>) {
 mod tests {
     use super::{main_close_action, MainCloseAction, QuitCoordinator};
 
+    #[cfg(target_os = "macos")]
+    use super::should_reveal_main_window_on_reopen;
+
     #[test]
     fn main_window_close_behavior_maps_to_an_explicit_process_action() {
         assert_eq!(main_close_action(true), MainCloseAction::HideToTray);
@@ -243,5 +269,12 @@ mod tests {
         assert!(coordinator.begin().is_none());
         coordinator.acknowledge();
         assert!(receiver.blocking_recv().is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dock_reopen_reveals_main_window_even_when_an_auxiliary_window_is_visible() {
+        assert!(should_reveal_main_window_on_reopen(false));
+        assert!(should_reveal_main_window_on_reopen(true));
     }
 }

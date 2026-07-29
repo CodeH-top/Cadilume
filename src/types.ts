@@ -81,7 +81,7 @@ export interface PlexItem {
   imageUrl?: string;
 }
 
-/** A regular (non-smart) Plex playlist that contains audio tracks. */
+/** An account-scoped Plex playlist candidate; PMS remains authoritative for write ACLs. */
 export interface PlexPlaylist {
   ratingKey: string;
   key: string;
@@ -90,6 +90,7 @@ export interface PlexPlaylist {
   summary?: string;
   playlistType: "audio" | "video" | "photo" | string;
   smart: boolean;
+  readOnly: boolean;
   thumb?: string;
   art?: string;
   composite?: string;

@@ -51,11 +51,19 @@ function optionalNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function booleanFlag(value: unknown): boolean {
+function optionalBooleanFlag(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value !== 0;
-  if (typeof value === "string") return ["1", "true", "yes"].includes(value.trim().toLowerCase());
-  return false;
+  if (typeof value === "number") {
+    if (value === 0) return false;
+    if (value === 1) return true;
+    return undefined;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["0", "false", "no"].includes(normalized)) return false;
+    if (["1", "true", "yes"].includes(normalized)) return true;
+  }
+  return undefined;
 }
 
 function normalizePlaylist(value: Record<string, unknown>): PlexPlaylist | undefined {
@@ -64,8 +72,9 @@ function normalizePlaylist(value: Record<string, unknown>): PlexPlaylist | undef
   if (!ratingKey || !title) return undefined;
   const playlistType = optionalString(value.playlistType)?.toLowerCase();
   if (!playlistType) return undefined;
-  const type = optionalString(value.type) || "playlist";
-  if (type !== "playlist") return undefined;
+  const type = (optionalString(value.type) || "playlist").toLowerCase();
+  const smart = optionalBooleanFlag(value.smart);
+  if (type !== "playlist" || smart === undefined) return undefined;
   return {
     ratingKey,
     key: optionalString(value.key) || `/playlists/${ratingKey}/items`,
@@ -73,7 +82,8 @@ function normalizePlaylist(value: Record<string, unknown>): PlexPlaylist | undef
     title,
     summary: optionalString(value.summary),
     playlistType,
-    smart: booleanFlag(value.smart),
+    smart,
+    readOnly: optionalBooleanFlag(value.readOnly) ?? false,
     thumb: optionalString(value.thumb),
     art: optionalString(value.art),
     composite: optionalString(value.composite),
@@ -157,16 +167,22 @@ export async function getRecentAlbums(serverId: string, sectionKey: string): Pro
 }
 
 /**
- * Return only regular audio playlists. The server receives the supported
- * `playlistType=audio` filter, while the client still removes smart playlists
- * because PMS versions may ignore a smart-playlist query parameter.
+ * Return writable regular audio playlists associated with the account behind
+ * the selected server token. Rust requests a flat `type=15` list so playlists
+ * nested under PMS playlist folders remain visible; this mapper still rejects
+ * smart, read-only, and malformed rows before they can become write targets.
  */
 export async function getPlaylists(serverId: string): Promise<PlexPlaylist[]> {
   if (!isDesktopRuntime()) return [];
-  const response = await serverGet(serverId, "/playlists", { playlistType: "audio" });
+  const response = await invoke<unknown>("get_playlists", { serverId });
   return playlistRecords(response)
     .map(normalizePlaylist)
-    .filter((playlist): playlist is PlexPlaylist => playlist !== undefined && playlist.playlistType === "audio" && !playlist.smart);
+    .filter((playlist): playlist is PlexPlaylist => (
+      playlist !== undefined
+      && playlist.playlistType === "audio"
+      && !playlist.smart
+      && !playlist.readOnly
+    ));
 }
 
 export async function getChildren(serverId: string, ratingKey: string): Promise<PlexItem[]> {

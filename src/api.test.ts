@@ -44,7 +44,7 @@ describe("music metadata helpers", () => {
 });
 
 describe("Plex audio playlists", () => {
-  it("requests audio playlists and removes smart/video entries at the API boundary", async () => {
+  it("keeps only writable regular audio playlists from the account-scoped response", async () => {
     invokeMock.mockResolvedValueOnce({
       MediaContainer: {
         Metadata: [
@@ -74,6 +74,30 @@ describe("Plex audio playlists", () => {
             playlistType: "video",
             smart: "0",
           },
+          {
+            ratingKey: "45",
+            key: "/playlists/45/items",
+            type: "playlist",
+            title: "别人分享的歌单",
+            playlistType: "audio",
+            smart: false,
+            readOnly: true,
+          },
+          {
+            ratingKey: "46",
+            key: "/playlists/46/items",
+            type: "playlistfolder",
+            title: "歌单目录",
+            playlistType: "audio",
+            smart: false,
+          },
+          {
+            ratingKey: "47",
+            key: "/playlists/47/items",
+            type: "playlist",
+            title: "属性不完整的歌单",
+            playlistType: "audio",
+          },
         ],
       },
     });
@@ -85,13 +109,12 @@ describe("Plex audio playlists", () => {
       title: "通勤音乐",
       playlistType: "audio",
       smart: false,
+      readOnly: false,
       leafCount: 12,
       duration: 185000,
     });
-    expect(invokeMock).toHaveBeenCalledWith("server_get", {
+    expect(invokeMock).toHaveBeenCalledWith("get_playlists", {
       serverId: "server-a",
-      path: "/playlists",
-      query: { playlistType: "audio" },
     });
   });
 

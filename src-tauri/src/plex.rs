@@ -783,6 +783,24 @@ pub async fn server_get(
 }
 
 #[tauri::command]
+pub async fn get_playlists(
+    server_id: String,
+    state: State<'_, PlexState>,
+) -> Result<Value, String> {
+    // `/playlists` is scoped by the per-server token to the signed-in account.
+    // `type=15` flattens playlist folders so nested account playlists are not
+    // lost when the client ignores directory rows. PMS still enforces every
+    // shared-server read and write permission attached to that token.
+    state
+        .server_response(&server_id, "/playlists", &regular_audio_playlist_query())
+        .await
+        .map_err(display_error)?
+        .json::<Value>()
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
 pub async fn add_to_playlist(
     server_id: String,
     playlist_id: String,
@@ -1886,6 +1904,14 @@ fn allowed_server_path(path: &str) -> bool {
             || path.starts_with("/:/"))
 }
 
+fn regular_audio_playlist_query() -> HashMap<String, String> {
+    HashMap::from([
+        ("type".to_string(), "15".to_string()),
+        ("playlistType".to_string(), "audio".to_string()),
+        ("smart".to_string(), "0".to_string()),
+    ])
+}
+
 fn playlist_item_uri(server_id: &str, rating_key: &str) -> Result<String> {
     if !valid_plex_identifier(server_id) || !valid_plex_identifier(rating_key) {
         return Err(anyhow!("无效的 Plex 歌单项目标识"));
@@ -1963,6 +1989,16 @@ mod tests {
         assert!(allowed_server_path("/:/timeline"));
         assert!(!allowed_server_path("https://example.com"));
         assert!(!allowed_server_path("/identity"));
+    }
+
+    #[test]
+    fn account_playlist_query_is_flat_audio_and_non_smart() {
+        let query = regular_audio_playlist_query();
+
+        assert_eq!(query.len(), 3);
+        assert_eq!(query.get("type").map(String::as_str), Some("15"));
+        assert_eq!(query.get("playlistType").map(String::as_str), Some("audio"));
+        assert_eq!(query.get("smart").map(String::as_str), Some("0"));
     }
 
     #[test]

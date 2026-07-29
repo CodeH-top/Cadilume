@@ -10,7 +10,7 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .on_window_event(window::handle_window_event)
         .setup(|app| {
@@ -31,6 +31,7 @@ pub fn run() {
             plex::logout,
             plex::discover_servers,
             plex::server_get,
+            plex::get_playlists,
             plex::add_to_playlist,
             plex::artwork_url,
             stream_proxy::stream_url,
@@ -47,6 +48,8 @@ pub fn run() {
             window::quit_app,
             window::acknowledge_quit,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("Cadilume 启动失败");
+
+    app.run(window::handle_run_event);
 }

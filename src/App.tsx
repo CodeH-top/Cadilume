@@ -4,15 +4,12 @@ import {
   ArrowLeft,
   Captions,
   Check,
-  ChevronDown,
   CircleUserRound,
   Database,
-  Ellipsis,
   HardDrive,
   Headphones,
   Home,
   Laptop,
-  Library,
   ListMusic,
   LoaderCircle,
   LogOut,
@@ -30,7 +27,6 @@ import {
   Repeat1,
   Search,
   Server,
-  Settings,
   Shuffle,
   SkipBack,
   SkipForward,
@@ -50,7 +46,6 @@ import {
   addTrackToPlaylist,
   bootstrap,
   clearArtworkCache,
-  createPin,
   discoverServers,
   getCacheStatus,
   getChildren,
@@ -60,10 +55,7 @@ import {
   getSections,
   isDesktopRuntime,
   logout,
-  openPlexLogin,
   openWindowsAudioSettings,
-  pollPin,
-  quitApplication,
   searchLibrary,
   setCloseBehavior as saveCloseBehavior,
   showMainWindow,
@@ -91,6 +83,7 @@ import { formatDuration, trackAlbum, trackArtist } from "./types";
 import { readPersistedPlaybackSession, usePlayer } from "./usePlayer";
 import { useOutputDevices } from "./useOutputDevices";
 import { useLyrics } from "./useLyrics";
+import { usePlexLogin } from "./usePlexLogin";
 import { BrandIcon } from "./BrandIcon";
 
 type Icon = typeof Home;
@@ -163,8 +156,11 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const [quality, setQuality] = useState<StreamQuality>(() => readStoredQuality(initialPlaybackSession?.quality));
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>();
   const [cacheBusy, setCacheBusy] = useState(false);
+  const [sourceRevision, setSourceRevision] = useState(0);
+  const [sourcesSyncing, setSourcesSyncing] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const nowPlayingTriggerRef = useRef<HTMLButtonElement>(null);
+  const loadedSectionRef = useRef<string | undefined>(undefined);
   const preferredPlaybackServerId = initialPlaybackSession?.serverId;
   const player = usePlayer(serverId, quality);
   const outputDevices = useOutputDevices(player.setOutputSinkId);
@@ -297,9 +293,12 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         if (result.some((server) => server.id === preferredPlaybackServerId)) return preferredPlaybackServerId;
         return result[0]?.id;
       });
+      setSourceRevision((revision) => revision + 1);
       if (!result.length) setNotice("当前账号没有发现可访问的 Plex Media Server。请先让服务器所有者共享音乐库。" );
+      return true;
     } catch (reason) {
       setNotice(reason instanceof Error ? reason.message : String(reason));
+      return false;
     } finally {
       setLoading(false);
     }
@@ -321,7 +320,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
       .catch((reason) => !cancelled && setNotice(String(reason)))
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
-  }, [serverId]);
+  }, [serverId, sourceRevision]);
 
   const loadView = useCallback(async (nextView: LibraryView) => {
     setView(nextView);
@@ -343,8 +342,17 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   }, [sectionKey, serverId]);
 
   useEffect(() => {
-    if (sectionKey) void loadView("home");
-  }, [sectionKey, loadView]);
+    if (!sectionKey || loadedSectionRef.current === sectionKey) return;
+    loadedSectionRef.current = sectionKey;
+    if (view !== "settings") void loadView("home");
+  }, [sectionKey, loadView, view]);
+
+  const syncSources = async () => {
+    setSourcesSyncing(true);
+    const succeeded = await loadServers();
+    if (succeeded) setNotice("已重新发现可访问的服务器，音乐资料库正在同步。");
+    setSourcesSyncing(false);
+  };
 
   const refreshCacheStatus = useCallback(async () => {
     try {
@@ -453,15 +461,6 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     }
   };
 
-  const quitFromSettings = async () => {
-    try {
-      player.flushPlaybackSession();
-      await quitApplication();
-    } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : String(reason));
-    }
-  };
-
   const playDetail = () => {
     const tracks = detail?.children.filter((item) => item.type === "track") || [];
     if (tracks[0]) player.playContext(tracks[0], tracks);
@@ -488,30 +487,11 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
               <NavIcon size={18} strokeWidth={1.8} /><span>{label}</span>
             </button>
           ))}
-          <p className="nav-label nav-label-spaced">来源</p>
-          <label className="select-row">
-            <Server size={17} />
-            <select aria-label="Plex 服务器" value={serverId || ""} onChange={(event) => setServerId(event.target.value)}>
-              {servers.map((server) => <option value={server.id} key={server.id}>{server.name}</option>)}
-            </select>
-            <ChevronDown size={14} />
-          </label>
-          <label className="select-row">
-            <Library size={17} />
-            <select aria-label="音乐资料库" value={sectionKey || ""} onChange={(event) => setSectionKey(event.target.value)}>
-              {sections.map((section) => <option value={section.key} key={section.key}>{section.title}</option>)}
-            </select>
-            <ChevronDown size={14} />
-          </label>
         </nav>
         <div className="sidebar-footer">
-          <button className={`nav-item ${view === "settings" ? "active" : ""}`} onClick={() => void loadView("settings")}>
-            <Settings size={18} /><span>设置</span>
-          </button>
-          <button className="account-button" onClick={() => void loadView("settings")}>
+          <button className={`account-button ${view === "settings" ? "active" : ""}`} aria-current={view === "settings" ? "page" : undefined} onClick={() => void loadView("settings")}>
             <Avatar account={account} />
-            <span><strong>{account.title || account.username}</strong><small>{selectedServer?.owned ? "我的服务器" : "共享资料库"}</small></span>
-            <Ellipsis size={17} />
+            <span><strong>{account.title || account.username}</strong><small>{selectedServer ? (selectedServer.owned ? "我的服务器" : "共享资料库") : "选择音乐来源"}</small></span>
           </button>
         </div>
       </aside>
@@ -525,7 +505,6 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
           </form>
           <div className="topbar-actions">
             {selectedServer && <span className="connection-pill"><span className="status-dot" />{selectedServer.local ? "本地直连" : selectedServer.relay ? "Plex Relay" : "远程直连"}</span>}
-            <IconButton label="刷新服务器" onClick={() => void loadServers()}><RefreshCw size={17} /></IconButton>
           </div>
         </header>
 
@@ -539,8 +518,13 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
               searchText={searchText}
               detail={detail}
               account={account}
+              servers={servers}
+              serverId={serverId}
               server={selectedServer}
+              sections={sections}
+              sectionKey={sectionKey}
               section={selectedSection}
+              sourcesSyncing={sourcesSyncing}
               closeBehavior={closeBehavior}
               quality={quality}
               themeMode={themeMode}
@@ -554,10 +538,12 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
               onCloseBehavior={changeCloseBehavior}
               onQuality={changeQuality}
               onThemeMode={onThemeMode}
+              onServerChange={setServerId}
+              onSectionChange={setSectionKey}
+              onSyncSources={() => void syncSources()}
               onPrebufferNext={player.setPrebufferNext}
               onClearCache={() => void clearCache()}
               onLogout={signOut}
-              onQuit={() => void quitFromSettings()}
             />
           )}
         </main>
@@ -672,8 +658,13 @@ interface ContentViewProps {
   searchText: string;
   detail?: { source: PlexItem; children: PlexItem[] };
   account: PlexAccount;
+  servers: PlexServer[];
+  serverId?: string;
   server?: PlexServer;
+  sections: LibrarySection[];
+  sectionKey?: string;
   section?: LibrarySection;
+  sourcesSyncing: boolean;
   closeBehavior: CloseBehavior;
   quality: StreamQuality;
   themeMode: ThemeMode;
@@ -687,10 +678,12 @@ interface ContentViewProps {
   onCloseBehavior: (value: CloseBehavior) => void;
   onQuality: (value: StreamQuality) => void;
   onThemeMode: (value: ThemeMode) => void;
+  onServerChange: (value: string) => void;
+  onSectionChange: (value: string) => void;
+  onSyncSources: () => void;
   onPrebufferNext: (value: boolean) => void;
   onClearCache: () => void;
   onLogout: () => void;
-  onQuit: () => void;
 }
 
 function ContentView(props: ContentViewProps) {
@@ -814,11 +807,30 @@ function SettingsView(props: ContentViewProps) {
           <button className="secondary-button" type="button" disabled={props.cacheBusy || !props.cacheStatus?.fileCount} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
         </div>
       </SettingsGroup>
-      <SettingsGroup icon={<Server size={18} />} title="当前来源" description="共享账号使用服务器在 resources 中为当前用户签发的专属访问令牌。">
-        <div className="info-list"><span>服务器<strong>{props.server?.name || "未连接"}</strong></span><span>资料库<strong>{props.section?.title || "未选择"}</strong></span><span>权限<strong>{props.server?.owned ? "所有者" : "家庭 / 共享访问"}</strong></span><span>连接<strong>{props.server?.local ? "本地" : props.server?.relay ? "Relay" : "远程"}</strong></span></div>
+      <SettingsGroup icon={<Server size={18} />} title="音乐来源" description="在这里选择 Cadilume 浏览和播放使用的服务器与音乐资料库；共享服务器始终使用当前账号的专属访问令牌。">
+        <div className="settings-stack">
+          <label className="field-row">
+            <span><strong>服务器</strong><small>当前账号有权访问的 Plex Media Server</small></span>
+            <select aria-label="Plex 服务器" value={props.serverId || ""} disabled={!props.servers.length} onChange={(event) => props.onServerChange(event.target.value)}>
+              {!props.servers.length && <option value="">未发现服务器</option>}
+              {props.servers.map((server) => <option value={server.id} key={server.id}>{server.name}</option>)}
+            </select>
+          </label>
+          <label className="field-row">
+            <span><strong>音乐资料库</strong><small>只显示服务器向当前账号开放的 Music 类型资料库</small></span>
+            <select aria-label="音乐资料库" value={props.sectionKey || ""} disabled={!props.sections.length} onChange={(event) => props.onSectionChange(event.target.value)}>
+              {!props.sections.length && <option value="">未发现音乐资料库</option>}
+              {props.sections.map((section) => <option value={section.key} key={section.key}>{section.title}</option>)}
+            </select>
+          </label>
+          <div className="source-sync-row">
+            <span>{props.server ? `${props.server.owned ? "所有者" : "家庭 / 共享访问"} · ${props.server.local ? "本地直连" : props.server.relay ? "Plex Relay" : "远程直连"}` : "尚未连接音乐来源"}</span>
+            <button className="secondary-button" type="button" disabled={props.sourcesSyncing} onClick={props.onSyncSources}>{props.sourcesSyncing ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}同步资料</button>
+          </div>
+        </div>
       </SettingsGroup>
       <SettingsGroup icon={<CircleUserRound size={18} />} title="Plex 账号" description={`${props.account.email} · 账号凭据保存在系统钥匙串，不写入浏览器存储。`}>
-        <div className="settings-actions"><button className="secondary-button" onClick={props.onLogout}><LogOut size={16} />退出账号</button><button className="danger-button" onClick={props.onQuit}><Power size={16} />退出 Cadilume</button></div>
+        <div className="settings-actions"><button className="danger-button" onClick={props.onLogout}><LogOut size={16} />退出账号</button></div>
       </SettingsGroup>
       <p className="legal-note">Cadilume 是独立客户端原型，与 Plex, Inc. 无隶属关系；只访问服务器已授予当前账号的内容。</p>
     </div>
@@ -1102,38 +1114,8 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, desktopL
   );
 }
 
-function LoginScreen({ clientIdentifier, onAuthenticated }: { clientIdentifier: string; onAuthenticated: () => void }) {
-  const [status, setStatus] = useState<"idle" | "waiting" | "success">("idle");
-  const [code, setCode] = useState<string>();
-  const [error, setError] = useState<string>();
-  const cancelled = useRef(false);
-  useEffect(() => () => { cancelled.current = true; }, []);
-
-  const start = async () => {
-    cancelled.current = false;
-    setError(undefined);
-    setStatus("waiting");
-    try {
-      const pin = await createPin();
-      setCode(pin.code);
-      await openPlexLogin(clientIdentifier, pin.code);
-      const deadline = Date.now() + Math.max(60, pin.expiresIn || 300) * 1000;
-      while (!cancelled.current && Date.now() < deadline) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1500));
-        const current = await pollPin(pin.id);
-        if (current.authenticated) {
-          setStatus("success");
-          await new Promise((resolve) => window.setTimeout(resolve, 350));
-          onAuthenticated();
-          return;
-        }
-      }
-      throw new Error("登录码已过期，请重新开始。" );
-    } catch (reason) {
-      setStatus("idle");
-      setError(reason instanceof Error ? reason.message : String(reason));
-    }
-  };
+function LoginScreen({ clientIdentifier, onAuthenticated }: { clientIdentifier: string; onAuthenticated: () => void | Promise<void> }) {
+  const login = usePlexLogin(clientIdentifier, onAuthenticated);
 
   return (
     <main className="login-screen">
@@ -1143,9 +1125,8 @@ function LoginScreen({ clientIdentifier, onAuthenticated }: { clientIdentifier: 
         <h1>连接 Plex 音乐资料库</h1>
         <p className="login-copy">使用系统浏览器安全登录。免费账号只要获得服务器音乐库共享权限，也可以正常浏览和播放。</p>
         <div className="login-features"><span><Check size={16} />独立播放器音量</span><span><Check size={16} />家庭与共享服务器</span><span><Check size={16} />明确的托盘退出入口</span></div>
-        <button className="primary-button login-button" onClick={() => void start()} disabled={status === "waiting"}>{status === "waiting" ? <><LoaderCircle className="spin" size={18} />等待浏览器确认 {code && `· ${code}`}</> : <><CircleUserRound size={18} />使用 Plex 账号登录</>}</button>
-        {status === "waiting" && <p className="login-hint">浏览器没有打开？登录码为 <strong>{code}</strong></p>}
-        {error && <p className="form-error" role="alert">{error}</p>}
+        <button className="primary-button login-button" onClick={() => void login.start()} disabled={login.busy} aria-busy={login.busy || undefined}>{login.busy ? <LoaderCircle className="spin" size={18} /> : <CircleUserRound size={18} />}{login.buttonLabel}</button>
+        {login.error && <p className="form-error" role="alert">{login.error}</p>}
         <small className="login-legal">仅请求当前账号已获授权的服务器和音乐库，不绕过 Plex 权限。</small>
       </section>
       <aside className="login-art" aria-hidden="true"><div className="record record-one" /><div className="record record-two" /><div className="sound-lines">{Array.from({ length: 34 }, (_, index) => <span key={index} style={{ height: `${18 + ((index * 23) % 92)}px` }} />)}</div><p>Lightweight.<br />Private.<br />Desktop first.</p></aside>
@@ -1271,7 +1252,17 @@ function LoadingState() {
 }
 
 function SplashScreen() {
-  return <main className="splash-screen"><span className="brand-mark large"><BrandIcon size={28} /></span><strong>Cadilume</strong><LoaderCircle className="spin" size={18} /></main>;
+  return (
+    <main className="splash-screen">
+      <section className="splash-card" aria-live="polite" aria-busy="true">
+        <span className="brand-mark splash-mark"><BrandIcon size={38} /></span>
+        <p className="eyebrow">桌面音乐资料库</p>
+        <h1>Cadilume</h1>
+        <p>正在恢复账号、音乐来源与上次播放现场。</p>
+        <div className="splash-progress" role="status"><LoaderCircle className="spin" size={24} /><span>正在连接你的音乐资料库…</span></div>
+      </section>
+    </main>
+  );
 }
 
 function FatalError({ message, retry }: { message: string; retry: () => void }) {

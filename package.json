@@ -9,6 +9,7 @@
     "check": "tsc --noEmit",
     "test": "vitest run",
     "preview": "vite preview",
+    "bundle:macos:dmg": "sh scripts/build-macos-dmg.sh",
     "icons:macos": "sh scripts/generate-macos-icons.sh",
     "tauri": "tauri"
   },

@@ -79,7 +79,7 @@ pnpm check
 pnpm test
 cargo test --manifest-path src-tauri/Cargo.toml
 pnpm build
-pnpm tauri build
+pnpm tauri build --no-bundle
 ```
 
 macOS 图标统一从项目内的 `src-tauri/icons/app-icon.svg` 与 `src-tauri/icons/Cadilume.icon` 生成。`icons:macos` 会先更新各平台图标，再用真实 1024px 矢量直出重建 `.icns` 的全部 Retina 槽位，同时编译 macOS 26 分层图标所需的 `Assets.car`；旧系统、应用包和 DMG 卷图标都保留清晰的兼容回退：
@@ -88,12 +88,22 @@ macOS 图标统一从项目内的 `src-tauri/icons/app-icon.svg` 与 `src-tauri/
 pnpm icons:macos
 ```
 
-没有 Developer ID 的本机验收包可在 release 二进制构建完成后使用一次性 ad-hoc identity 封装；它会完整密封 `Info.plist` 与资源，可用于排除封装后资源被改动或签名残缺，但不会取得 Gatekeeper 的公开分发信任。换到另一台 Mac 后仍可能被“无法验证开发者”拦截，并需要在“隐私与安全性”中手动允许，不能保证只出现普通的“来自互联网，是否打开”确认：
+没有 Developer ID 的本机验收包可使用一次性 ad-hoc identity 构建；它会完整密封 `Info.plist` 与资源，可用于排除封装后资源被改动或签名残缺，但不会取得 Gatekeeper 的公开分发信任。换到另一台 Mac 后仍可能被“无法验证开发者”拦截，并需要在“隐私与安全性”中手动允许，不能保证只出现普通的“来自互联网，是否打开”确认。统一通过专用脚本构建 DMG；脚本在成功、失败或可捕获中断后都会清理固定的 `bundle/macos/Cadilume.app`，避免临时应用包继续被系统检索，只保留 DMG。若遭遇 SIGKILL 或断电，下一次运行也会先清理旧包：
 
 ```bash
-pnpm tauri bundle --bundles app,dmg -c '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
-codesign --verify --deep --strict --verbose=4 src-tauri/target/release/bundle/macos/Cadilume.app
+pnpm bundle:macos:dmg
 hdiutil verify src-tauri/target/release/bundle/dmg/Cadilume_0.1.1_aarch64.dmg
+```
+
+需要复核包内应用签名时，以只读、不可浏览方式临时挂载 DMG，验证后立即卸载；不要依赖已经清理的源 `.app`：
+
+```bash
+dmg_path="src-tauri/target/release/bundle/dmg/Cadilume_0.1.1_aarch64.dmg"
+mount_dir=$(mktemp -d "${TMPDIR:-/tmp}/cadilume-dmg.XXXXXX")
+hdiutil attach "$dmg_path" -readonly -nobrowse -mountpoint "$mount_dir"
+codesign --verify --deep --strict --verbose=4 "$mount_dir/Cadilume.app"
+hdiutil detach "$mount_dir"
+rmdir "$mount_dir"
 ```
 
 面向 GitHub 用户、且希望稳定得到普通首次打开确认的正式发布，必须使用 Developer ID Application、Hardened Runtime 与安全时间戳完成签名，再通过 Apple notarization 并 staple 公证票据；ad-hoc 或本地自签证书都不能替代这条信任链。
