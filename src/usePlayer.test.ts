@@ -8,6 +8,7 @@ import {
   clearPersistedPlaybackSession,
   commitShuffleNext,
   createPlaybackFallbackState,
+  createPlaybackRetryRequest,
   createPersistedPlaybackSession,
   createShuffleBag,
   createShuffleNavigationState,
@@ -340,6 +341,35 @@ describe("resume safety", () => {
     await pendingSeek;
 
     expect(audio.currentTime).toBe(73);
+  });
+});
+
+describe("playback retry", () => {
+  it("retries the current queue item from its tracked progress", () => {
+    expect(createPlaybackRetryRequest(1, 3, 42.75, null)).toEqual({
+      index: 1,
+      resumeProgress: 42.75,
+    });
+  });
+
+  it("preserves a pending restored seek and rejects a stale queue index", () => {
+    expect(createPlaybackRetryRequest(1, 3, 8, 57.5)).toEqual({
+      index: 1,
+      resumeProgress: 57.5,
+    });
+    expect(createPlaybackRetryRequest(3, 3, 8, null)).toBeNull();
+    expect(createPlaybackRetryRequest(-1, 3, 8, null)).toBeNull();
+  });
+
+  it("normalizes an invalid stored progress before retrying", () => {
+    expect(createPlaybackRetryRequest(0, 1, Number.NaN, null)).toEqual({
+      index: 0,
+      resumeProgress: 0,
+    });
+    expect(createPlaybackRetryRequest(0, 1, -3, null)).toEqual({
+      index: 0,
+      resumeProgress: 0,
+    });
   });
 });
 

@@ -517,6 +517,11 @@ export interface PlaybackFailure {
   attemptedQualities: StreamQuality[];
 }
 
+export interface PlaybackRetryRequest {
+  index: number;
+  resumeProgress: number;
+}
+
 const MEDIA_ERROR_LABELS: Readonly<Record<number, string>> = {
   1: "播放被中止",
   2: "网络读取失败",
@@ -648,6 +653,21 @@ export function rejectPendingPlaybackFallback(
     ...state,
     attemptedQualities: appendAttemptedQualities(state.attemptedQualities, quality),
     pendingQuality: undefined,
+  };
+}
+
+/** Resolve a retry target from refs without losing an in-flight restored seek. */
+export function createPlaybackRetryRequest(
+  currentIndex: number,
+  queueLength: number,
+  progress: number,
+  pendingResume: number | null,
+): PlaybackRetryRequest | null {
+  if (!validQueueIndex(currentIndex, queueLength)) return null;
+  const requestedProgress = pendingResume ?? progress;
+  return {
+    index: currentIndex,
+    resumeProgress: finiteNumber(requestedProgress) ? Math.max(0, requestedProgress) : 0,
   };
 }
 
@@ -973,7 +993,12 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     }, PLAYBACK_SESSION_WRITE_THROTTLE_MS);
   }, [flushPlaybackSession]);
 
-  const loadAt = useCallback(async (index: number, autoplay = true, requestedResume?: number) => {
+  const loadAt = useCallback(async (
+    index: number,
+    autoplay = true,
+    requestedResume?: number,
+    forceFreshTicket = false,
+  ) => {
     const tracks = queueRef.current;
     const track = tracks[index];
     if (!track || !serverId) return;
@@ -1008,7 +1033,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
     let assignedSource = "";
     try {
-      if (airPlayActiveRef.current) {
+      if (!forceFreshTicket && airPlayActiveRef.current) {
         const preparedUrl = pool?.takePreparedUrl(preparation);
         if (preparedUrl && pool) {
           const audio = pool.active;
@@ -1026,7 +1051,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         }
       }
 
-      if (!airPlayActiveRef.current) {
+      if (!forceFreshTicket && !airPlayActiveRef.current) {
         const preparedAudio = pool?.takePrepared(preparation);
         if (preparedAudio) {
           audioRef.current = preparedAudio;
@@ -1072,6 +1097,24 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       }
     }
   }, [quality, schedulePersistedSession, serverId]);
+
+  const retryCurrent = useCallback(() => {
+    const retry = createPlaybackRetryRequest(
+      indexRef.current,
+      queueRef.current.length,
+      progressRef.current,
+      resumeProgressRef.current,
+    );
+    if (!retry) return;
+    // `loadAt` synchronously advances the request id before its first await,
+    // so older ticket/fallback promises cannot overwrite this fresh retry.
+    void loadAt(retry.index, true, retry.resumeProgress, true);
+  }, [loadAt]);
+
+  const dismissPlaybackFailure = useCallback(() => {
+    setPlaybackFailure(undefined);
+    setError(undefined);
+  }, []);
 
   const resetShuffleState = useCallback((currentIndex: number) => {
     shuffleNavigationRef.current = createShuffleNavigationState(queueRef.current.length, currentIndex);
@@ -1710,6 +1753,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     airPlayActive,
     error,
     playbackFailure,
+    retryCurrent,
+    dismissPlaybackFailure,
     playContext,
     toggle,
     next,
@@ -1725,5 +1770,5 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     removeFromQueue,
     flushPlaybackSession,
     discardPlaybackSession,
-  }), [airPlayActive, current, currentIndex, discardPlaybackSession, duration, error, flushPlaybackSession, muted, next, outputSinkId, playContext, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, seek, setOutputSinkId, setPrebufferNext, setVolume, showAirPlayPicker, shuffle, toggle, volume]);
+  }), [airPlayActive, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, muted, next, outputSinkId, playContext, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setOutputSinkId, setPrebufferNext, setVolume, showAirPlayPicker, shuffle, toggle, volume]);
 }

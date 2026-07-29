@@ -34,6 +34,7 @@ import {
   Speaker,
   Sun,
   Trash2,
+  TriangleAlert,
   Volume1,
   Volume2,
   VolumeX,
@@ -80,7 +81,7 @@ import type {
   ThemeMode,
 } from "./types";
 import { formatDuration, trackAlbum, trackArtist } from "./types";
-import { readPersistedPlaybackSession, usePlayer } from "./usePlayer";
+import { readPersistedPlaybackSession, usePlayer, type PlaybackFailure } from "./usePlayer";
 import { useOutputDevices } from "./useOutputDevices";
 import { useLyrics } from "./useLyrics";
 import { usePlexLogin } from "./usePlexLogin";
@@ -98,6 +99,7 @@ const navigation: Array<{ id: LibraryView; label: string; icon: Icon }> = [
 const ArtworkServerContext = createContext<string | undefined>(undefined);
 const artworkCache = new Map<string, Promise<string>>();
 const NOW_PLAYING_MODE_STORAGE_KEY = "cadilume-now-playing-mode";
+const PLAYBACK_SETTINGS_ID = "playback-settings";
 
 function App() {
   const [themeMode, setThemeMode] = useThemeMode();
@@ -158,6 +160,8 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const [cacheBusy, setCacheBusy] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
   const [sourcesSyncing, setSourcesSyncing] = useState(false);
+  const [playbackSettingsRequest, setPlaybackSettingsRequest] = useState(0);
+  const [playbackFailurePreview, setPlaybackFailurePreview] = useState<PlaybackFailure>();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const nowPlayingTriggerRef = useRef<HTMLButtonElement>(null);
   const loadedSectionRef = useRef<string | undefined>(undefined);
@@ -169,6 +173,9 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const hasQueue = hasCurrentTrack && player.queue.length > 0;
   const expandedPlayerOpen = nowPlayingOpen && hasCurrentTrack;
   const queuePanelOpen = sidePanel === "queue" && hasQueue;
+  const previewPlaybackFailure = import.meta.env.DEV
+    && new URLSearchParams(window.location.search).has("playback-error-preview");
+  const activePlaybackFailure = player.playbackFailure ?? playbackFailurePreview;
 
   const selectedServer = servers.find((server) => server.id === serverId);
   const selectedSection = sections.find((section) => section.key === sectionKey);
@@ -184,6 +191,33 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     currentStartMs: currentLyricLine?.startMs,
     currentEndMs: currentLyricLine?.endMs,
   });
+
+  useEffect(() => {
+    if (!previewPlaybackFailure || !player.current) {
+      setPlaybackFailurePreview(undefined);
+      return;
+    }
+    setPlaybackFailurePreview({
+      message: "音频无法播放。",
+      technicalDetails: "MediaError code 4（格式或来源不受支持）；当前音源已经是 320 kbps。",
+      attemptedQualities: ["auto", "320", "256", "192"],
+    });
+  }, [player.current?.ratingKey, previewPlaybackFailure]);
+
+  useEffect(() => {
+    if (!activePlaybackFailure) return;
+    setPlaylistTrack(undefined);
+  }, [activePlaybackFailure]);
+
+  useEffect(() => {
+    if (view !== "settings" || playbackSettingsRequest === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      const section = document.getElementById(PLAYBACK_SETTINGS_ID);
+      section?.scrollIntoView({ block: "start", behavior: "smooth" });
+      section?.querySelector<HTMLSelectElement>("select")?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [playbackSettingsRequest, view]);
 
   useEffect(() => {
     let cancelled = false;
@@ -474,6 +508,25 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     });
   }, []);
 
+  const dismissPlaybackFailure = useCallback(() => {
+    setPlaybackFailurePreview(undefined);
+    player.dismissPlaybackFailure();
+  }, [player.dismissPlaybackFailure]);
+
+  const retryPlayback = useCallback(() => {
+    setPlaybackFailurePreview(undefined);
+    player.retryCurrent();
+  }, [player.retryCurrent]);
+
+  const openPlaybackSettings = useCallback(() => {
+    dismissPlaybackFailure();
+    setNowPlayingOpen(false);
+    setPlaylistTrack(undefined);
+    setSidePanel(null);
+    setPlaybackSettingsRequest((request) => request + 1);
+    void loadView("settings");
+  }, [dismissPlaybackFailure, loadView]);
+
   return (
     <ArtworkServerContext.Provider value={serverId}>
     <div className={`app-shell ${queuePanelOpen ? "side-panel-visible" : ""}`}>
@@ -592,7 +645,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         onMutedChange={player.setMuted}
         onVolumeChange={player.setVolume}
         onClose={closeNowPlaying}
-        escapeEnabled={!playlistTrack}
+        escapeEnabled={!playlistTrack && !activePlaybackFailure}
         onOpenDesktop={() => void openDesktopLyrics()}
         onAddToPlaylist={() => {
           if (!player.current) return;
@@ -600,6 +653,16 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
           setPlaylistTrack(player.current);
         }}
       />
+
+      {activePlaybackFailure && (
+        <PlaybackErrorAlert
+          failure={activePlaybackFailure}
+          trackTitle={player.current?.title}
+          onRetry={retryPlayback}
+          onOpenSettings={openPlaybackSettings}
+          onClose={dismissPlaybackFailure}
+        />
+      )}
 
       {playlistTrack && hasCurrentTrack && serverId && (
         <PlaylistPicker
@@ -791,7 +854,7 @@ function SettingsView(props: ContentViewProps) {
           <ChoiceCard active={props.themeMode === "dark"} title="深色" description="适合夜间与低光环境。" icon={<Moon size={21} />} onClick={() => props.onThemeMode("dark")} />
         </div>
       </SettingsGroup>
-      <SettingsGroup icon={<SlidersHorizontal size={18} />} title="播放质量" description="直放保留原始音质；遇到不兼容格式或 Relay 带宽限制时可转码。">
+      <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放质量" description="直放保留原始音质；遇到不兼容格式或 Relay 带宽限制时可转码。">
         <div className="settings-stack">
           <label className="field-row"><span>音频质量</span><select value={props.quality} onChange={(event) => props.onQuality(event.target.value as StreamQuality)}><option value="auto">自动（本地直放 / 远程转码）</option><option value="original">始终原始质量</option><option value="320">320 kbps</option><option value="256">256 kbps</option><option value="192">192 kbps</option></select></label>
           <label className="toggle-row">
@@ -837,8 +900,8 @@ function SettingsView(props: ContentViewProps) {
   );
 }
 
-function SettingsGroup({ icon, title, description, children }: { icon: ReactNode; title: string; description: string; children: ReactNode }) {
-  return <section className="settings-group"><header><span className="settings-icon">{icon}</span><div><h2>{title}</h2><p>{description}</p></div></header><div className="settings-body">{children}</div></section>;
+function SettingsGroup({ id, icon, title, description, children }: { id?: string; icon: ReactNode; title: string; description: string; children: ReactNode }) {
+  return <section id={id} className="settings-group"><header><span className="settings-icon">{icon}</span><div><h2>{title}</h2><p>{description}</p></div></header><div className="settings-body">{children}</div></section>;
 }
 
 function ChoiceCard({ active, title, description, icon, onClick }: { active: boolean; title: string; description: string; icon: ReactNode; onClick: () => void }) {
@@ -1098,7 +1161,6 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, desktopL
           <IconButton label={player.repeat === "one" ? "单曲循环" : player.repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止"} active={player.repeat !== "off"} onClick={cycleRepeat}>{player.repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}</IconButton>
         </div>
         <div className="progress-row"><span>{formatDuration(player.progress * 1000)}</span><input aria-label="播放进度" type="range" min="0" max={Math.max(1, player.duration)} step="1" value={Math.min(player.progress, player.duration || 0)} onChange={(event) => player.seek(Number(event.target.value))} /><span>{formatDuration(player.duration * 1000)}</span></div>
-        {player.error && <span className="player-error" role="status">{player.error}</span>}
       </div>
       <div className="player-extras">
         <IconButton label={desktopLyricsVisible ? "隐藏桌面歌词" : "显示桌面歌词"} active={desktopLyricsVisible} disabled={!canToggleDesktopLyrics} onClick={onToggleDesktopLyrics}><Captions size={19} /></IconButton>
@@ -1241,6 +1303,44 @@ function IconButton({ label, active = false, disabled = false, onClick, children
 
 function Notice({ message, onClose }: { message: string; onClose: () => void }) {
   return <div className="notice" role="status"><span>{message}</span><IconButton label="关闭提示" onClick={onClose}><X size={16} /></IconButton></div>;
+}
+
+function PlaybackErrorAlert({ failure, trackTitle, onRetry, onOpenSettings, onClose }: {
+  failure: PlaybackFailure;
+  trackTitle?: string;
+  onRetry: () => void;
+  onOpenSettings: () => void;
+  onClose: () => void;
+}) {
+  const retryRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => retryRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [failure.technicalDetails]);
+  const attempted = failure.attemptedQualities.map((quality) => {
+    if (quality === "auto") return "自动源";
+    if (quality === "original") return "原始质量";
+    return `${quality} kbps`;
+  }).join("、");
+  return (
+    <section className="playback-alert" role="alert" aria-live="assertive" aria-atomic="true">
+      <span className="playback-alert-icon" aria-hidden="true"><TriangleAlert size={21} /></span>
+      <div className="playback-alert-content">
+        <strong>{trackTitle ? `《${trackTitle}》暂时无法播放` : "这首歌曲暂时无法播放"}</strong>
+        <p>Cadilume 已尝试兼容的播放方式。你可以重新尝试，或检查播放质量与服务器连接。</p>
+        <div className="playback-alert-actions">
+          <button ref={retryRef} className="primary-button" type="button" onClick={onRetry}><RefreshCw size={16} />重试播放</button>
+          <button className="secondary-button" type="button" onClick={onOpenSettings}><SlidersHorizontal size={16} />前往播放设置</button>
+        </div>
+        <details className="playback-alert-details">
+          <summary>诊断信息</summary>
+          <code>{failure.technicalDetails}</code>
+          {attempted && <small>已尝试：{attempted}</small>}
+        </details>
+      </div>
+      <IconButton label="关闭播放失败提醒" onClick={onClose}><X size={17} /></IconButton>
+    </section>
+  );
 }
 
 function EmptyState({ title, description, icon = <Music2 size={28} /> }: { title: string; description: string; icon?: ReactNode }) {
