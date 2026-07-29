@@ -4,11 +4,14 @@ import {
   PLAYBACK_SESSION_MAX_QUEUE,
   PLAYBACK_SESSION_STORAGE_KEY,
   DualAudioPool,
+  activatePlaybackFallback,
   clearPersistedPlaybackSession,
   commitShuffleNext,
+  createPlaybackFallbackState,
   createPersistedPlaybackSession,
   createShuffleBag,
   createShuffleNavigationState,
+  decidePlaybackFallback,
   formatMediaError,
   getManualNextIndex,
   getPrebufferTargetIndex,
@@ -18,9 +21,9 @@ import {
   parsePersistedPlaybackSession,
   previewShuffleNext,
   readPersistedPlaybackSession,
+  rejectPendingPlaybackFallback,
   seekAfterMetadata,
   setAudioCurrentTimeSafely,
-  shouldFallbackTo320,
   sourceAlreadyUses320Kbps,
   takeShuffleIndex,
   type AudioPreparation,
@@ -371,14 +374,125 @@ describe("media playback diagnostics", () => {
     expect(formatMediaError({ code: 2, message: "" })).toContain("浏览器未提供 message");
   });
 
-  it("does not repeat the 320 kbps fallback when auto already resolved to 320", () => {
+  it("recognizes the public 320 kbps marker without exposing the ticket target", () => {
     const auto320 = "https://music.test/music/:/transcode/universal/start.mp3?maxAudioBitrate=320&X-Plex-Token=secret-token";
 
     expect(sourceAlreadyUses320Kbps(auto320)).toBe(true);
-    expect(shouldFallbackTo320("auto", auto320)).toBe(false);
-    expect(shouldFallbackTo320("auto", "https://music.test/library/parts/1.flac?X-Plex-Token=secret-token")).toBe(true);
-    expect(shouldFallbackTo320("original", "https://music.test/library/parts/1.flac")).toBe(true);
-    expect(shouldFallbackTo320("320", "https://music.test/library/parts/1.flac")).toBe(false);
+    expect(sourceAlreadyUses320Kbps("https://music.test/library/parts/1.flac?X-Plex-Token=secret-token")).toBe(false);
+  });
+
+  it("falls back from direct play through a finite descending compatibility chain", () => {
+    const initial = createPlaybackFallbackState("original");
+    const directFailure = decidePlaybackFallback(initial, "https://music.test/library/parts/1.flac");
+    expect(directFailure).toMatchObject({
+      action: "retry",
+      quality: "320",
+      state: { activeQuality: "original", attemptedQualities: ["original"], pendingQuality: "320" },
+    });
+    expect(initial).toEqual({ requestedQuality: "original", activeQuality: "original", attemptedQualities: [] });
+    if (directFailure.action !== "retry") throw new Error("expected 320 retry");
+
+    expect(decidePlaybackFallback(directFailure.state, "https://music.test/library/parts/1.flac")).toMatchObject({
+      action: "wait",
+    });
+
+    const at320 = activatePlaybackFallback(directFailure.state, "320");
+    const failure320 = decidePlaybackFallback(at320, "http://127.0.0.1/stream/ticket?maxAudioBitrate=320");
+    expect(failure320).toMatchObject({
+      action: "retry",
+      quality: "256",
+      state: { attemptedQualities: ["original", "320"], pendingQuality: "256" },
+    });
+    if (failure320.action !== "retry") throw new Error("expected 256 retry");
+
+    const at256 = activatePlaybackFallback(failure320.state, "256");
+    const failure256 = decidePlaybackFallback(at256, "http://127.0.0.1/stream/another-ticket");
+    expect(failure256).toMatchObject({ action: "retry", quality: "192" });
+    if (failure256.action !== "retry") throw new Error("expected 192 retry");
+
+    const at192 = activatePlaybackFallback(failure256.state, "192");
+    expect(decidePlaybackFallback(at192, "http://127.0.0.1/stream/final-ticket")).toMatchObject({
+      action: "stop",
+      state: { attemptedQualities: ["original", "320", "256", "192"] },
+    });
+  });
+
+  it("skips the duplicate 320 retry when auto already resolved to 320", () => {
+    const remoteAuto = decidePlaybackFallback(
+      createPlaybackFallbackState("auto"),
+      "http://127.0.0.1/stream/ticket?maxAudioBitrate=320",
+    );
+    expect(remoteAuto).toMatchObject({
+      action: "retry",
+      quality: "256",
+      state: { attemptedQualities: ["auto", "320"], pendingQuality: "256" },
+    });
+
+    const localAuto = decidePlaybackFallback(
+      createPlaybackFallbackState("auto"),
+      "http://127.0.0.1/stream/direct-ticket",
+    );
+    expect(localAuto).toMatchObject({ action: "retry", quality: "320" });
+    if (localAuto.action !== "retry") throw new Error("expected 320 retry");
+
+    const rejected320 = rejectPendingPlaybackFallback(localAuto.state, "320");
+    expect(decidePlaybackFallback(rejected320, "")).toMatchObject({
+      action: "retry",
+      quality: "256",
+      state: { attemptedQualities: ["auto", "320"], pendingQuality: "256" },
+    });
+  });
+
+  it("never upgrades an auto source whose effective transcode quality is known", () => {
+    expect(decidePlaybackFallback(
+      createPlaybackFallbackState("auto"),
+      "http://127.0.0.1/stream/ticket?maxAudioBitrate=256",
+    )).toMatchObject({
+      action: "retry",
+      quality: "192",
+      state: { attemptedQualities: ["auto", "256"] },
+    });
+    expect(decidePlaybackFallback(
+      createPlaybackFallbackState("auto"),
+      "http://127.0.0.1/stream/ticket?maxAudioBitrate=192",
+    )).toMatchObject({
+      action: "stop",
+      state: { attemptedQualities: ["auto", "192"] },
+    });
+  });
+
+  it("only descends below an explicitly selected transcode quality", () => {
+    expect(decidePlaybackFallback(createPlaybackFallbackState("320"), "")).toMatchObject({
+      action: "retry",
+      quality: "256",
+    });
+    expect(decidePlaybackFallback(createPlaybackFallbackState("256"), "")).toMatchObject({
+      action: "retry",
+      quality: "192",
+    });
+    expect(decidePlaybackFallback(createPlaybackFallbackState("192"), "")).toMatchObject({
+      action: "stop",
+      state: { attemptedQualities: ["192"] },
+    });
+  });
+
+  it("always reaches stop without yielding a duplicate fallback quality", () => {
+    for (const requestedQuality of ["auto", "original", "320", "256", "192"] as const) {
+      let state = createPlaybackFallbackState(requestedQuality);
+      const retries: string[] = [];
+      for (let step = 0; step < 4; step += 1) {
+        const decision = decidePlaybackFallback(state, "");
+        state = decision.state;
+        if (decision.action === "stop") break;
+        expect(decision.action).toBe("retry");
+        if (decision.action !== "retry") throw new Error("unexpected pending retry");
+        retries.push(decision.quality);
+        state = activatePlaybackFallback(decision.state, decision.quality);
+      }
+      expect(new Set(retries).size).toBe(retries.length);
+      expect(retries.length).toBeLessThanOrEqual(3);
+      expect(decidePlaybackFallback(state, "").action).toBe("stop");
+    }
   });
 });
 

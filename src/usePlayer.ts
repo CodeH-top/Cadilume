@@ -493,6 +493,30 @@ const samePreparation = (left: AudioPreparation, right: AudioPreparation): boole
 
 type MediaErrorDetails = Pick<MediaError, "code" | "message">;
 
+export type FallbackStreamQuality = Exclude<StreamQuality, "auto" | "original">;
+
+export interface PlaybackFallbackState {
+  /** The setting that produced the current source. */
+  requestedQuality: StreamQuality;
+  /** The quality requested for the source currently assigned to Audio. */
+  activeQuality: StreamQuality;
+  /** Every logical/effective quality that has already failed. */
+  attemptedQualities: StreamQuality[];
+  /** A stream URL request that is already in flight. */
+  pendingQuality?: FallbackStreamQuality;
+}
+
+export type PlaybackFallbackDecision =
+  | { action: "retry"; quality: FallbackStreamQuality; state: PlaybackFallbackState }
+  | { action: "wait"; state: PlaybackFallbackState }
+  | { action: "stop"; state: PlaybackFallbackState };
+
+export interface PlaybackFailure {
+  message: string;
+  technicalDetails: string;
+  attemptedQualities: StreamQuality[];
+}
+
 const MEDIA_ERROR_LABELS: Readonly<Record<number, string>> = {
   1: "播放被中止",
   2: "网络读取失败",
@@ -520,20 +544,111 @@ export function formatMediaError(error: MediaErrorDetails | null | undefined): s
 }
 
 export function sourceAlreadyUses320Kbps(source: string): boolean {
-  if (!source) return false;
+  return sourceStreamQuality(source) === "320";
+}
+
+function sourceStreamQuality(source: string): FallbackStreamQuality | undefined {
+  if (!source) return undefined;
   try {
     const url = new URL(source, "http://localhost");
     for (const [name, value] of url.searchParams) {
-      if (name.toLowerCase() === "maxaudiobitrate") return value === "320";
+      if (name.toLowerCase() === "maxaudiobitrate" && ["320", "256", "192"].includes(value)) {
+        return value as FallbackStreamQuality;
+      }
     }
   } catch {
-    // An invalid media URL cannot be identified as the known 320 kbps fallback.
+    // An invalid media URL cannot expose a trustworthy public quality marker.
   }
-  return false;
+  return undefined;
 }
 
-export function shouldFallbackTo320(quality: StreamQuality, source: string): boolean {
-  return (quality === "auto" || quality === "original") && !sourceAlreadyUses320Kbps(source);
+const FALLBACK_QUALITY_ORDER: readonly FallbackStreamQuality[] = ["320", "256", "192"];
+
+export function createPlaybackFallbackState(requestedQuality: StreamQuality): PlaybackFallbackState {
+  return {
+    requestedQuality,
+    activeQuality: requestedQuality,
+    attemptedQualities: [],
+  };
+}
+
+function appendAttemptedQualities(
+  attempted: readonly StreamQuality[],
+  ...qualities: Array<StreamQuality | undefined>
+): StreamQuality[] {
+  const result = [...attempted];
+  for (const quality of qualities) {
+    if (quality && !result.includes(quality)) result.push(quality);
+  }
+  return result;
+}
+
+function fallbackCandidates(
+  state: PlaybackFallbackState,
+  sourceQuality: FallbackStreamQuality | undefined,
+): readonly FallbackStreamQuality[] {
+  const activeQuality = sourceQuality
+    ?? (FALLBACK_QUALITY_ORDER.includes(state.activeQuality as FallbackStreamQuality)
+      ? state.activeQuality as FallbackStreamQuality
+      : undefined);
+  if (activeQuality) {
+    const activeIndex = FALLBACK_QUALITY_ORDER.indexOf(activeQuality);
+    return activeIndex < 0 ? [] : FALLBACK_QUALITY_ORDER.slice(activeIndex + 1);
+  }
+  return state.requestedQuality === "auto" || state.requestedQuality === "original"
+    ? FALLBACK_QUALITY_ORDER
+    : [];
+}
+
+/**
+ * Select the next strictly bounded compatibility source. The source marker is
+ * important for `auto`: a remote auto stream can already resolve to 320 kbps,
+ * so retrying 320 would only issue a fresh ticket for the same source.
+ */
+export function decidePlaybackFallback(
+  state: PlaybackFallbackState,
+  source: string,
+): PlaybackFallbackDecision {
+  if (state.pendingQuality) return { action: "wait", state };
+
+  const sourceQuality = sourceStreamQuality(source);
+  const attemptedQualities = appendAttemptedQualities(
+    state.attemptedQualities,
+    state.activeQuality,
+    sourceQuality,
+  );
+  const quality = fallbackCandidates(state, sourceQuality)
+    .find((candidate) => !attemptedQualities.includes(candidate));
+  if (!quality) {
+    return { action: "stop", state: { ...state, attemptedQualities } };
+  }
+  return {
+    action: "retry",
+    quality,
+    state: { ...state, attemptedQualities, pendingQuality: quality },
+  };
+}
+
+/** Mark a resolved fallback URL as the active source before asking Audio to play it. */
+export function activatePlaybackFallback(
+  state: PlaybackFallbackState,
+  quality: FallbackStreamQuality,
+): PlaybackFallbackState {
+  if (state.pendingQuality !== quality) return state;
+  return { ...state, activeQuality: quality, pendingQuality: undefined };
+}
+
+/** A URL request can fail before Audio receives a source; consume it once and continue downward. */
+export function rejectPendingPlaybackFallback(
+  state: PlaybackFallbackState,
+  quality: FallbackStreamQuality,
+): PlaybackFallbackState {
+  if (state.pendingQuality !== quality) return state;
+  return {
+    ...state,
+    attemptedQualities: appendAttemptedQualities(state.attemptedQualities, quality),
+    pendingQuality: undefined,
+  };
 }
 
 function formatPlaybackFailure(reason: unknown): string {
@@ -764,7 +879,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const endedRef = useRef<() => void>(() => undefined);
   const progressRef = useRef(0);
   const scrobbledRef = useRef(new Set<string>());
-  const fallbackAttemptedRef = useRef(false);
+  const playbackFallbackRef = useRef<PlaybackFallbackState>(createPlaybackFallbackState(quality));
+  const playbackFailureHandlerRef = useRef<(diagnostic: string, source: string) => boolean>(() => false);
   const loadRequestRef = useRef(0);
   const prebufferRequestRef = useRef(0);
   const outputSinkRequestRef = useRef(0);
@@ -793,6 +909,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const [outputSinkId, setOutputSinkIdState] = useState(storedOutputSinkId);
   const [airPlayActive, setAirPlayActive] = useState(false);
   const [error, setError] = useState<string>();
+  const [playbackFailure, setPlaybackFailure] = useState<PlaybackFailure>();
   const volumeRef = useRef(volume);
   const mutedRef = useRef(muted);
   const shuffleRef = useRef(shuffle);
@@ -870,7 +987,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     progressRef.current = resumeSeconds;
     setDuration((track.duration || 0) / 1000);
     setError(undefined);
-    fallbackAttemptedRef.current = false;
+    setPlaybackFailure(undefined);
+    playbackFallbackRef.current = createPlaybackFallbackState(quality);
     queueServerIdRef.current = serverId;
     schedulePersistedSession(true);
 
@@ -888,6 +1006,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     };
     const pool = audioPoolRef.current;
 
+    let assignedSource = "";
     try {
       if (airPlayActiveRef.current) {
         const preparedUrl = pool?.takePreparedUrl(preparation);
@@ -896,6 +1015,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           audioRef.current = audio;
           audio.pause();
           audio.src = preparedUrl;
+          assignedSource = preparedUrl;
           audio.load();
           await seekAfterMetadata(audio, () => resumeProgressRef.current ?? progressRef.current);
           if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
@@ -910,6 +1030,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         const preparedAudio = pool?.takePrepared(preparation);
         if (preparedAudio) {
           audioRef.current = preparedAudio;
+          assignedSource = preparedAudio.currentSrc || preparedAudio.src;
           const wireless = Boolean(preparedAudio.webkitCurrentPlaybackTargetIsWireless);
           airPlayActiveRef.current = wireless;
           setAirPlayActive(wireless);
@@ -931,6 +1052,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       const url = await streamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       audio.src = url;
+      assignedSource = url;
       audio.load();
       await seekAfterMetadata(audio, () => resumeProgressRef.current ?? progressRef.current);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
@@ -938,8 +1060,16 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       if (autoplay) await audio.play();
     } catch (reason) {
       if (requestId !== loadRequestRef.current) return;
-      setPlaying(false);
-      setError(formatPlaybackFailure(reason));
+      const audio = audioRef.current;
+      const diagnostic = assignedSource && audio?.error
+        ? formatMediaError(audio.error)
+        : formatPlaybackFailure(reason);
+      if (!playbackFailureHandlerRef.current(diagnostic, assignedSource)) {
+        const message = `音频无法播放（${diagnostic}）。`;
+        setPlaying(false);
+        setError(message);
+        setPlaybackFailure({ message, technicalDetails: diagnostic, attemptedQualities: [quality] });
+      }
     }
   }, [quality, schedulePersistedSession, serverId]);
 
@@ -1145,7 +1275,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       resumeProgressRef.current = null;
       shuffleNavigationRef.current = createShuffleNavigationState(0, -1);
       scrobbledRef.current.clear();
-      fallbackAttemptedRef.current = false;
+      playbackFallbackRef.current = createPlaybackFallbackState(qualityRef.current);
       const pool = audioPoolRef.current;
       pool?.clearSources();
       if (pool) audioRef.current = pool.active;
@@ -1157,6 +1287,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       setPlaying(false);
       setAirPlayActive(false);
       setError(undefined);
+      setPlaybackFailure(undefined);
     }
 
     if (!serverId) {
@@ -1195,6 +1326,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     setShuffleState(persisted.shuffle);
     setRepeatState(persisted.repeat);
     setError(undefined);
+    setPlaybackFailure(undefined);
   }, [flushPlaybackSession, serverId]);
 
   useEffect(() => {
@@ -1214,6 +1346,105 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     pool.setGain(volumeRef.current, mutedRef.current);
     let disposed = false;
 
+    const isRetryCurrent = (
+      audio: RoutableAudioElement,
+      requestId: number,
+      activeServerId: string,
+      ratingKey: string,
+    ) => (
+      !disposed
+      && audioPoolRef.current === pool
+      && pool.isActive(audio)
+      && loadRequestRef.current === requestId
+      && queueServerIdRef.current === activeServerId
+      && queueRef.current[indexRef.current]?.ratingKey === ratingKey
+    );
+
+    const handlePlaybackFailure = (
+      audio: RoutableAudioElement,
+      diagnostic: string,
+      source: string,
+    ): boolean => {
+      if (disposed || audioPoolRef.current !== pool || !pool.isActive(audio)) return false;
+      const track = queueRef.current[indexRef.current];
+      const activeServerId = queueServerIdRef.current;
+      if (!track || !activeServerId) return false;
+
+      const decision = decidePlaybackFallback(playbackFallbackRef.current, source);
+      playbackFallbackRef.current = decision.state;
+      if (decision.action === "wait") return true;
+
+      if (decision.action === "stop") {
+        const attemptedQualities = decision.state.attemptedQualities;
+        const attemptedLabel = attemptedQualities
+          .map((attemptedQuality) => {
+            if (attemptedQuality === "auto") return "自动源";
+            if (attemptedQuality === "original") return "原始质量";
+            return `${attemptedQuality} kbps`;
+          })
+          .join("、");
+        const message = `音频无法播放（${diagnostic}）。${attemptedLabel ? `已尝试 ${attemptedLabel}；` : ""}请检查远程连接或服务器转码状态。`;
+        setPlaying(false);
+        schedulePersistedSession(true);
+        setError(message);
+        setPlaybackFailure({ message, technicalDetails: diagnostic, attemptedQualities });
+        return true;
+      }
+
+      setPlaying(false);
+      setPlaybackFailure(undefined);
+      setError(`音频播放失败（${diagnostic}），正在自动切换到 ${decision.quality} kbps 兼容串流…`);
+      const ratingKey = track.ratingKey;
+      const retryLoadRequest = loadRequestRef.current;
+      const fallbackQuality = decision.quality;
+      let fallbackAssigned = false;
+      const isActiveFallback = () => {
+        const fallbackState = playbackFallbackRef.current;
+        return isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)
+          && fallbackState.activeQuality === fallbackQuality
+          && fallbackState.pendingQuality === undefined;
+      };
+      void streamUrl(activeServerId, track, fallbackQuality)
+        .then(async (url) => {
+          if (!isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)) return;
+          if (playbackFallbackRef.current.pendingQuality !== fallbackQuality) return;
+          audio.src = url;
+          fallbackAssigned = true;
+          playbackFallbackRef.current = activatePlaybackFallback(playbackFallbackRef.current, fallbackQuality);
+          audio.load();
+          await seekAfterMetadata(audio, () => resumeProgressRef.current ?? progressRef.current);
+          if (!isActiveFallback()) return;
+          resumeProgressRef.current = null;
+          await audio.play();
+          if (!isActiveFallback()) return;
+          setError(undefined);
+          setPlaybackFailure(undefined);
+        })
+        .catch((reason) => {
+          if (!isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)) return;
+          if (!fallbackAssigned) {
+            playbackFallbackRef.current = rejectPendingPlaybackFallback(
+              playbackFallbackRef.current,
+              fallbackQuality,
+            );
+          }
+          const retryDiagnostic = fallbackAssigned && audio.error
+            ? formatMediaError(audio.error)
+            : formatPlaybackFailure(reason);
+          handlePlaybackFailure(
+            audio,
+            retryDiagnostic,
+            fallbackAssigned ? audio.currentSrc || audio.src : "",
+          );
+        });
+      return true;
+    };
+
+    const dispatchPlaybackFailure = (diagnostic: string, source: string): boolean => (
+      handlePlaybackFailure(pool.active, diagnostic, source)
+    );
+    playbackFailureHandlerRef.current = dispatchPlaybackFailure;
+
     const bindEvents = (audio: RoutableAudioElement) => {
       const isCurrent = () => audioPoolRef.current === pool && pool.isActive(audio);
       const updateTime = () => {
@@ -1231,7 +1462,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         }
       };
       const onPlay = () => {
-        if (isCurrent()) setPlaying(true);
+        if (isCurrent()) {
+          setPlaying(true);
+          setError(undefined);
+          setPlaybackFailure(undefined);
+        }
       };
       const onPause = () => {
         if (isCurrent()) {
@@ -1253,56 +1488,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           pool.discardPreparedAudio(audio);
           return;
         }
-        const diagnostic = formatMediaError(audio.error);
-        const track = queueRef.current[indexRef.current];
-        const activeServerId = queueServerIdRef.current;
-        const activeQuality = qualityRef.current;
-        const source = audio.currentSrc || audio.src;
-        const alreadyAt320 = sourceAlreadyUses320Kbps(source);
-        const canFallback = track && activeServerId && !fallbackAttemptedRef.current && shouldFallbackTo320(activeQuality, source);
-        if (!canFallback) {
-          setPlaying(false);
-          schedulePersistedSession(true);
-          const nextStep = alreadyAt320
-            ? "当前音源已经是 320 kbps 串流，不再重复切换；请检查远程连接或服务器转码状态。"
-            : "请检查远程连接，或在设置中选择较低码率。";
-          setError(`音频无法播放（${diagnostic}）。${nextStep}`);
-          return;
-        }
-        fallbackAttemptedRef.current = true;
-        setError(`音频播放失败（${diagnostic}），正在自动切换到 320 kbps 串流…`);
-        const ratingKey = track.ratingKey;
-        const fallbackLoadRequest = loadRequestRef.current;
-        void streamUrl(activeServerId, track, "320")
-          .then(async (url) => {
-            if (
-              !isCurrent()
-              || loadRequestRef.current !== fallbackLoadRequest
-              || queueServerIdRef.current !== activeServerId
-              || queueRef.current[indexRef.current]?.ratingKey !== ratingKey
-            ) return;
-            audio.src = url;
-            audio.load();
-            await seekAfterMetadata(audio, () => resumeProgressRef.current ?? progressRef.current);
-            if (
-              !isCurrent()
-              || loadRequestRef.current !== fallbackLoadRequest
-              || queueServerIdRef.current !== activeServerId
-              || queueRef.current[indexRef.current]?.ratingKey !== ratingKey
-            ) return;
-            resumeProgressRef.current = null;
-            await audio.play();
-            if (isCurrent()) setError(undefined);
-          })
-          .catch((reason) => {
-            if (!isCurrent() || loadRequestRef.current !== fallbackLoadRequest || queueServerIdRef.current !== activeServerId) return;
-            setPlaying(false);
-            schedulePersistedSession(true);
-            const fallbackDiagnostic = audio.error
-              ? formatMediaError(audio.error)
-              : formatPlaybackFailure(reason);
-            setError(`320 kbps 串流仍无法播放（${fallbackDiagnostic}）。`);
-          });
+        handlePlaybackFailure(audio, formatMediaError(audio.error), audio.currentSrc || audio.src);
       };
 
       audio.addEventListener("timeupdate", updateTime);
@@ -1340,6 +1526,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       prebufferRequestRef.current += 1;
       outputSinkRequestRef.current += 1;
       flushPlaybackSession();
+      if (playbackFailureHandlerRef.current === dispatchPlaybackFailure) {
+        playbackFailureHandlerRef.current = () => false;
+      }
       for (const dispose of disposeEvents) dispose();
       pool.destroy();
       if (audioPoolRef.current === pool) audioPoolRef.current = null;
@@ -1520,6 +1709,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     outputSinkId,
     airPlayActive,
     error,
+    playbackFailure,
     playContext,
     toggle,
     next,
@@ -1535,5 +1725,5 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     removeFromQueue,
     flushPlaybackSession,
     discardPlaybackSession,
-  }), [airPlayActive, current, currentIndex, discardPlaybackSession, duration, error, flushPlaybackSession, muted, next, outputSinkId, playContext, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, seek, setOutputSinkId, setPrebufferNext, setVolume, showAirPlayPicker, shuffle, toggle, volume]);
+  }), [airPlayActive, current, currentIndex, discardPlaybackSession, duration, error, flushPlaybackSession, muted, next, outputSinkId, playContext, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, seek, setOutputSinkId, setPrebufferNext, setVolume, showAirPlayPicker, shuffle, toggle, volume]);
 }

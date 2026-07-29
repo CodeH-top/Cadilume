@@ -85,7 +85,7 @@ impl StreamTarget {
             return Err(anyhow!("无效的音频质量"));
         }
 
-        let public_bitrate_marker = (quality == "320").then_some(320);
+        let public_bitrate_marker = public_bitrate_marker(&quality);
         Ok(Self {
             server_id,
             metadata_key: sanitize_internal_path(&metadata_key, "/library/metadata/")?,
@@ -261,11 +261,10 @@ impl StreamProxy {
     }
 
     fn issue(&self, target: StreamTarget) -> Result<String> {
-        let quality_marker = if target.public_bitrate_marker == Some(320) {
-            "?maxAudioBitrate=320"
-        } else {
-            ""
-        };
+        let quality_marker = target
+            .public_bitrate_marker
+            .map(|bitrate| format!("?maxAudioBitrate={bitrate}"))
+            .unwrap_or_default();
         let ticket = self
             .audio_tickets
             .lock()
@@ -336,7 +335,7 @@ pub fn stream_url(
         return Err("服务器没有可用连接".to_string());
     }
     target.public_bitrate_marker =
-        (effective_quality(&target.quality, &server.connections[0]) == "320").then_some(320);
+        public_bitrate_marker(&effective_quality(&target.quality, &server.connections[0]));
     proxy.issue(target).map_err(|error| error.to_string())
 }
 
@@ -751,6 +750,15 @@ fn effective_quality(quality: &str, connection: &StreamConnectionSnapshot) -> St
     }
 }
 
+fn public_bitrate_marker(quality: &str) -> Option<u16> {
+    match quality {
+        "320" => Some(320),
+        "256" => Some(256),
+        "192" => Some(192),
+        _ => None,
+    }
+}
+
 fn valid_ticket(ticket: &str) -> bool {
     ticket.len() == 64
         && ticket
@@ -771,6 +779,8 @@ fn valid_proxy_query(uri: &Uri, target: &StreamTarget) -> bool {
     match uri.query() {
         None => true,
         Some("maxAudioBitrate=320") => target.public_bitrate_marker == Some(320),
+        Some("maxAudioBitrate=256") => target.public_bitrate_marker == Some(256),
+        Some("maxAudioBitrate=192") => target.public_bitrate_marker == Some(192),
         Some(_) => false,
     }
 }
@@ -943,6 +953,16 @@ mod tests {
         let parsed = Url::parse(&url).unwrap();
         let ticket = parsed.path().trim_start_matches("/stream/");
         assert!(valid_ticket(ticket));
+
+        assert!(proxy
+            .issue(target("256"))
+            .unwrap()
+            .ends_with("?maxAudioBitrate=256"));
+        assert!(proxy
+            .issue(target("192"))
+            .unwrap()
+            .ends_with("?maxAudioBitrate=192"));
+        assert!(!proxy.issue(target("original")).unwrap().contains('?'));
     }
 
     #[test]
@@ -1136,6 +1156,27 @@ mod tests {
             effective_quality("auto", &connection("https://relay.test", false, true)),
             "192"
         );
+        assert_eq!(
+            public_bitrate_marker(&effective_quality(
+                "auto",
+                &connection("https://remote.test", false, false)
+            )),
+            Some(320)
+        );
+        assert_eq!(
+            public_bitrate_marker(&effective_quality(
+                "auto",
+                &connection("https://relay.test", false, true)
+            )),
+            Some(192)
+        );
+        assert_eq!(
+            public_bitrate_marker(&effective_quality(
+                "auto",
+                &connection("https://local.test", true, false)
+            )),
+            None
+        );
     }
 
     #[test]
@@ -1259,6 +1300,20 @@ mod tests {
         assert!(valid_proxy_query(
             &"/stream/x?maxAudioBitrate=320".parse().unwrap(),
             &fallback
+        ));
+        let fallback_256 = target("256");
+        assert!(valid_proxy_query(
+            &"/stream/x?maxAudioBitrate=256".parse().unwrap(),
+            &fallback_256
+        ));
+        assert!(!valid_proxy_query(
+            &"/stream/x?maxAudioBitrate=192".parse().unwrap(),
+            &fallback_256
+        ));
+        let fallback_192 = target("192");
+        assert!(valid_proxy_query(
+            &"/stream/x?maxAudioBitrate=192".parse().unwrap(),
+            &fallback_192
         ));
         assert!(valid_artwork_query(&"/artwork/x".parse().unwrap()));
         assert!(!valid_artwork_query(&"/artwork/x?".parse().unwrap()));
