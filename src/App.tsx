@@ -6,7 +6,6 @@ import {
   Check,
   CircleUserRound,
   Database,
-  HardDrive,
   Headphones,
   Home,
   Laptop,
@@ -680,7 +679,6 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         <QueuePanel
           queue={player.queue}
           currentIndex={player.currentIndex}
-          onClose={() => setSidePanel(null)}
           onSelect={(track) => player.playContext(track, player.queue)}
           onRemove={player.removeFromQueue}
         />
@@ -690,7 +688,6 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         <LyricsPanel
           track={player.current}
           lyrics={nowPlayingLyrics}
-          onClose={() => setSidePanel(null)}
           onSeek={player.seek}
         />
       )}
@@ -863,7 +860,6 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
     <nav className="sidebar-playlists" aria-label="歌单">
       <div className="sidebar-playlists-heading">
         <span>歌单</span>
-        {!loading && !error && <small>{playlists.length}</small>}
       </div>
       <div className="sidebar-playlist-list" aria-busy={loading || undefined}>
         {loading ? (
@@ -900,18 +896,10 @@ function ContentView(props: ContentViewProps) {
   if (props.view === "settings") return <SettingsView {...props} />;
   if (props.detail) return <DetailView detail={props.detail} onBack={props.onBack} onPlay={props.onPlayDetail} onShuffle={props.onShuffleDetail} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "search") return <SearchResults hubs={props.hubs} query={props.searchText} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
-  if (props.view === "tracks") return <TrackTable title="歌曲" subtitle={`${props.items.length} 首已载入`} tracks={props.items} onPlay={props.onPlayTrack} />;
-  if (props.view === "artists") return <CardCollection title="艺术家" subtitle="按名字浏览资料库" items={props.items} round onOpen={props.onOpen} />;
-  if (props.view === "albums") return <CardCollection title="专辑" subtitle="资料库中的全部专辑" items={props.items} onOpen={props.onOpen} />;
-  return (
-    <>
-      <div className="page-heading home-heading">
-        <div><h1>{greeting()}，{props.account.title || props.account.username}</h1><p>正在浏览“{props.section?.title || "音乐资料库"}”；可从最近加入的专辑开始，或使用顶部搜索。</p></div>
-        <div className="library-stat"><HardDrive size={18} /><span><strong>{props.server?.name || "Plex Server"}</strong><small>{props.server?.owned ? "你拥有的服务器" : sharedSourceLabel(props.server?.sourceTitle)}</small></span></div>
-      </div>
-      <CardCollection title="最近加入" subtitle="服务器中最新的音乐" items={props.items} onOpen={props.onOpen} compact />
-    </>
-  );
+  if (props.view === "tracks") return <TrackTable title="歌曲" tracks={props.items} onPlay={props.onPlayTrack} />;
+  if (props.view === "artists") return <CardCollection title="艺术家" items={props.items} round onOpen={props.onOpen} />;
+  if (props.view === "albums") return <CardCollection title="专辑" items={props.items} onOpen={props.onOpen} />;
+  return <CardCollection title="最近加入" items={props.items} onOpen={props.onOpen} compact />;
 }
 
 function PlaylistDetailView({ playlist, tracks, loading, error, onBack, onRetry, onPlay, onShuffle, onPlayTrack }: {
@@ -934,8 +922,7 @@ function PlaylistDetailView({ playlist, tracks, loading, error, onBack, onRetry,
         <Artwork item={playlist} size="hero" />
         <div>
           <h1>{playlist.title}</h1>
-          <p>{kind} · {trackCount} 首歌曲{playlist.summary ? ` · ${playlist.summary}` : ""}</p>
-          {playlist.smart && <small className="playlist-dynamic-note"><Sparkles size={13} />每次打开都会读取当前动态结果</small>}
+          <p>{kind} · {trackCount} 首歌曲</p>
           <div className="detail-actions">
             <button className="primary-button" type="button" disabled={loading || Boolean(error) || !tracks.length} onClick={onPlay}><Play size={17} fill="currentColor" />播放全部</button>
             <button className="secondary-button" type="button" disabled={loading || Boolean(error) || !tracks.length} onClick={onShuffle}><Shuffle size={16} />随机播放</button>
@@ -947,16 +934,16 @@ function PlaylistDetailView({ playlist, tracks, loading, error, onBack, onRetry,
       ) : error ? (
         <div className="playlist-detail-state is-error" role="alert"><TriangleAlert size={24} /><strong>无法读取这个歌单</strong><span>{error}</span><button className="secondary-button" type="button" onClick={onRetry}><RefreshCw size={15} />重试</button></div>
       ) : tracks.length ? (
-        <TrackTable title="曲目" subtitle={`${tracks.length} 首歌曲`} tracks={tracks} onPlay={onPlayTrack} />
+        <TrackTable title="曲目" tracks={tracks} onPlay={onPlayTrack} />
       ) : <EmptyState title="这个歌单还没有歌曲" description={playlist.smart ? "Plex 当前没有返回符合智能规则的曲目。" : "可以稍后从歌曲菜单向普通可写歌单添加内容。"} icon={<ListMusic size={28} />} />}
     </>
   );
 }
 
-function CardCollection({ title, subtitle, items, round = false, compact = false, onOpen }: { title: string; subtitle: string; items: PlexItem[]; round?: boolean; compact?: boolean; onOpen: (item: PlexItem) => void }) {
+function CardCollection({ title, items, round = false, compact = false, onOpen }: { title: string; items: PlexItem[]; round?: boolean; compact?: boolean; onOpen: (item: PlexItem) => void }) {
   return (
     <section className="collection-section">
-      <div className="section-heading"><div><h1>{title}</h1><p>{subtitle}</p></div><span>{items.length} 项</span></div>
+      <div className="section-heading"><h1>{title}</h1></div>
       {items.length ? (
         <div className={`card-grid ${compact ? "compact" : ""}`}>
           {items.map((item) => (
@@ -976,24 +963,24 @@ function DetailView({ detail, onBack, onPlay, onShuffle, onOpen, onPlayTrack }: 
   const tracks = detail.children.filter((item) => item.type === "track");
   const albums = detail.children.filter((item) => item.type === "album");
   const typeLabel = detail.source.type === "artist" ? "艺术家" : "专辑";
-  const description = detail.source.parentTitle || detail.source.summary || `${detail.children.length} 项内容`;
+  const detailMeta = detail.source.parentTitle ? `${typeLabel} · ${detail.source.parentTitle}` : typeLabel;
   return (
     <>
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} />返回</button>
       <header className="detail-hero">
         <Artwork item={detail.source} size="hero" className={detail.source.type === "artist" ? "round" : ""} />
-        <div><h1>{detail.source.title}</h1><p>{typeLabel} · {description}</p>{tracks.length > 0 && <div className="detail-actions"><button className="primary-button" onClick={onPlay}><Play size={17} fill="currentColor" />播放</button>{detail.source.type === "album" && <button className="secondary-button" onClick={onShuffle}><Shuffle size={16} />随机播放</button>}</div>}</div>
+        <div><h1>{detail.source.title}</h1><p>{detailMeta}</p>{tracks.length > 0 && <div className="detail-actions"><button className="primary-button" onClick={onPlay}><Play size={17} fill="currentColor" />播放</button>{detail.source.type === "album" && <button className="secondary-button" onClick={onShuffle}><Shuffle size={16} />随机播放</button>}</div>}</div>
       </header>
       {tracks.length > 0 && <TrackTable title="曲目" tracks={tracks} onPlay={onPlayTrack} />}
-      {albums.length > 0 && <CardCollection title="专辑" subtitle={`${detail.source.title} 的作品`} items={albums} onOpen={onOpen} />}
+      {albums.length > 0 && <CardCollection title="专辑" items={albums} onOpen={onOpen} />}
     </>
   );
 }
 
-function TrackTable({ title, subtitle, tracks, onPlay }: { title: string; subtitle?: string; tracks: PlexItem[]; onPlay: (track: PlexItem, context: PlexItem[]) => void }) {
+function TrackTable({ title, tracks, onPlay }: { title: string; tracks: PlexItem[]; onPlay: (track: PlexItem, context: PlexItem[]) => void }) {
   return (
     <section className="track-section">
-      <div className="section-heading"><div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div></div>
+      <div className="section-heading"><h1>{title}</h1></div>
       <div className="track-table" role="table" aria-label={title}>
         <div className="track-row table-head" role="row"><span>#</span><span>标题</span><span>专辑</span><span>格式</span><span>时长</span></div>
         {tracks.map((track, index) => (
@@ -1019,7 +1006,7 @@ function SearchResults({ hubs, query, onOpen, onPlayTrack }: { hubs: PlexHub[]; 
       <div className="page-heading"><div><h1>“{query}”的搜索结果</h1><p>共找到 {total} 项内容</p></div></div>
       {hubs.map((hub, index) => hub.type === "track"
         ? <TrackTable key={`${hub.title}-${index}`} title={hub.title} tracks={hub.items} onPlay={onPlayTrack} />
-        : <CardCollection key={`${hub.title}-${index}`} title={hub.title} subtitle="" items={hub.items} round={hub.type === "artist"} compact onOpen={onOpen} />)}
+        : <CardCollection key={`${hub.title}-${index}`} title={hub.title} items={hub.items} round={hub.type === "artist"} compact onOpen={onOpen} />)}
     </>
   );
 }
@@ -1027,47 +1014,47 @@ function SearchResults({ hubs, query, onOpen, onPlayTrack }: { hubs: PlexHub[]; 
 function SettingsView(props: ContentViewProps) {
   return (
     <div className="settings-page">
-      <div className="page-heading"><div><h1>设置</h1><p>桌面窗口、播放、缓存和账号。</p></div></div>
-      <SettingsGroup icon={<Minimize2 size={18} />} title="关闭主窗口时" description="无论选择哪一种，菜单栏或通知区域都会提供明确的退出入口。">
+      <div className="page-heading"><h1>设置</h1></div>
+      <SettingsGroup icon={<Minimize2 size={18} />} title="关闭主窗口时">
         <div className="choice-grid">
-          <ChoiceCard active={props.closeBehavior === "tray"} title="最小化到托盘 / 菜单栏" description="继续后台播放，通过状态图标再次打开或退出。" icon={<Radio size={21} />} onClick={() => props.onCloseBehavior("tray")} />
-          <ChoiceCard active={props.closeBehavior === "quit"} title="退出程序" description="点击系统关闭按钮后停止播放并结束进程。" icon={<Power size={21} />} onClick={() => props.onCloseBehavior("quit")} />
+          <ChoiceCard active={props.closeBehavior === "tray"} title="最小化到托盘 / 菜单栏" icon={<Radio size={20} />} onClick={() => props.onCloseBehavior("tray")} />
+          <ChoiceCard active={props.closeBehavior === "quit"} title="退出程序" icon={<Power size={20} />} onClick={() => props.onCloseBehavior("quit")} />
         </div>
       </SettingsGroup>
-      <SettingsGroup icon={<Sun size={18} />} title="外观" description="主窗口会统一使用所选主题；跟随系统会响应 macOS 或 Windows 的外观变化。">
+      <SettingsGroup icon={<Sun size={18} />} title="外观">
         <div className="choice-grid three-columns">
-          <ChoiceCard active={props.themeMode === "system"} title="跟随系统" description="自动切换浅色与深色。" icon={<Monitor size={21} />} onClick={() => props.onThemeMode("system")} />
-          <ChoiceCard active={props.themeMode === "light"} title="浅色" description="明亮、柔和的资料库界面。" icon={<Sun size={21} />} onClick={() => props.onThemeMode("light")} />
-          <ChoiceCard active={props.themeMode === "dark"} title="深色" description="适合夜间与低光环境。" icon={<Moon size={21} />} onClick={() => props.onThemeMode("dark")} />
+          <ChoiceCard active={props.themeMode === "system"} title="跟随系统" icon={<Monitor size={20} />} onClick={() => props.onThemeMode("system")} />
+          <ChoiceCard active={props.themeMode === "light"} title="浅色" icon={<Sun size={20} />} onClick={() => props.onThemeMode("light")} />
+          <ChoiceCard active={props.themeMode === "dark"} title="深色" icon={<Moon size={20} />} onClick={() => props.onThemeMode("dark")} />
         </div>
       </SettingsGroup>
-      <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放质量" description="优先直放原始音频；需要格式兼容或限码率时由 Plex Media Server 转码，Cadilume 本地不转码。">
+      <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放" description="需要兼容时由 Plex 服务器转码；Cadilume 不在本地转码。">
         <div className="settings-stack">
           <label className="field-row"><span>音频质量</span><select value={props.quality} onChange={(event) => props.onQuality(event.target.value as StreamQuality)}><option value="auto">自动（优先直放 / PMS 兼容转码）</option><option value="original">始终原始质量</option><option value="320">320 kbps</option><option value="256">256 kbps</option><option value="192">192 kbps</option></select></label>
           <label className="toggle-row">
-            <span><strong>预缓冲下一首</strong><small>空闲时只提前加载队列中的下一首，减少远程串流切歌等待；随机播放时不预测。</small></span>
+            <span><strong>预缓冲下一首</strong><small>提前加载队列中的下一首。</small></span>
             <input type="checkbox" checked={props.prebufferNext} onChange={(event) => props.onPrebufferNext(event.target.checked)} />
             <span className="toggle-control" aria-hidden="true" />
           </label>
         </div>
       </SettingsGroup>
-      <SettingsGroup icon={<Database size={18} />} title="封面缓存" description="可视区域附近的封面会提前读取并安全缓存到本机，Plex token 不写入图片地址。">
+      <SettingsGroup icon={<Database size={18} />} title="封面缓存">
         <div className="cache-row">
           <span><strong>{props.cacheStatus ? formatBytes(props.cacheStatus.sizeBytes) : "正在统计…"}</strong><small>{props.cacheStatus ? `${props.cacheStatus.fileCount} 个缓存文件` : "读取缓存状态"}</small></span>
           <button className="secondary-button" type="button" disabled={props.cacheBusy || !props.cacheStatus?.fileCount} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
         </div>
       </SettingsGroup>
-      <SettingsGroup icon={<Server size={18} />} title="音乐来源" description="在这里选择 Cadilume 浏览和播放使用的服务器与音乐资料库；共享服务器始终使用当前账号的专属访问令牌。">
+      <SettingsGroup icon={<Server size={18} />} title="音乐来源">
         <div className="settings-stack">
           <label className="field-row">
-            <span><strong>服务器</strong><small>当前账号有权访问的 Plex Media Server</small></span>
+            <strong>服务器</strong>
             <select aria-label="Plex 服务器" value={props.serverId || ""} disabled={!props.servers.length} onChange={(event) => props.onServerChange(event.target.value)}>
               {!props.servers.length && <option value="">未发现服务器</option>}
               {props.servers.map((server) => <option value={server.id} key={server.id}>{server.name}</option>)}
             </select>
           </label>
           <label className="field-row">
-            <span><strong>音乐资料库</strong><small>只显示服务器向当前账号开放的 Music 类型资料库</small></span>
+            <strong>音乐资料库</strong>
             <select aria-label="音乐资料库" value={props.sectionKey || ""} disabled={!props.sections.length} onChange={(event) => props.onSectionChange(event.target.value)}>
               {!props.sections.length && <option value="">未发现音乐资料库</option>}
               {props.sections.map((section) => <option value={section.key} key={section.key}>{section.title}</option>)}
@@ -1079,26 +1066,25 @@ function SettingsView(props: ContentViewProps) {
           </div>
         </div>
       </SettingsGroup>
-      <SettingsGroup icon={<CircleUserRound size={18} />} title="Plex 账号" description={`${props.account.email} · 账号凭据保存在系统钥匙串，不写入浏览器存储。`}>
-        <div className="settings-actions"><button className="danger-button" onClick={props.onLogout}><LogOut size={16} />退出账号</button></div>
+      <SettingsGroup icon={<CircleUserRound size={18} />} title="Plex 账号">
+        <div className="account-settings-row"><span>{props.account.email || props.account.username}</span><button className="danger-button" onClick={props.onLogout}><LogOut size={16} />退出账号</button></div>
       </SettingsGroup>
-      <p className="legal-note">Cadilume 是独立客户端原型，与 Plex, Inc. 无隶属关系；只访问服务器已授予当前账号的内容。</p>
     </div>
   );
 }
 
-function SettingsGroup({ id, icon, title, description, children }: { id?: string; icon: ReactNode; title: string; description: string; children: ReactNode }) {
-  return <section id={id} className="settings-group"><header><span className="settings-icon">{icon}</span><div><h2>{title}</h2><p>{description}</p></div></header><div className="settings-body">{children}</div></section>;
+function SettingsGroup({ id, icon, title, description, children }: { id?: string; icon: ReactNode; title: string; description?: string; children: ReactNode }) {
+  return <section id={id} className="settings-group"><header><span className="settings-icon">{icon}</span><div><h2>{title}</h2>{description && <p>{description}</p>}</div></header><div className="settings-body">{children}</div></section>;
 }
 
-function ChoiceCard({ active, title, description, icon, onClick }: { active: boolean; title: string; description: string; icon: ReactNode; onClick: () => void }) {
-  return <button className={`choice-card ${active ? "active" : ""}`} onClick={onClick}>{icon}<span><strong>{title}</strong><small>{description}</small></span>{active && <Check className="choice-check" size={16} />}</button>;
+function ChoiceCard({ active, title, icon, onClick }: { active: boolean; title: string; icon: ReactNode; onClick: () => void }) {
+  return <button className={`choice-card ${active ? "active" : ""}`} onClick={onClick}>{icon}<strong>{title}</strong>{active && <Check className="choice-check" size={16} />}</button>;
 }
 
-function QueuePanel({ queue, currentIndex, onClose, onSelect, onRemove }: { queue: PlexItem[]; currentIndex: number; onClose: () => void; onSelect: (track: PlexItem) => void; onRemove: (index: number) => void }) {
+function QueuePanel({ queue, currentIndex, onSelect, onRemove }: { queue: PlexItem[]; currentIndex: number; onSelect: (track: PlexItem) => void; onRemove: (index: number) => void }) {
   return (
     <aside className="queue-panel" aria-label="播放队列">
-      <header><h2>接下来播放</h2><IconButton label="关闭队列" onClick={onClose}><X size={18} /></IconButton></header>
+      <header><h2>接下来播放</h2></header>
       <div className="queue-list">
         {queue.length ? queue.map((track, index) => (
           <div className={`queue-item ${index === currentIndex ? "active" : ""}`} key={`${track.ratingKey}-${index}`}>
@@ -1111,10 +1097,9 @@ function QueuePanel({ queue, currentIndex, onClose, onSelect, onRemove }: { queu
   );
 }
 
-function LyricsPanel({ track, lyrics, onClose, onSeek }: {
+function LyricsPanel({ track, lyrics, onSeek }: {
   track?: PlexItem;
   lyrics: NowPlayingLyricsState;
-  onClose: () => void;
   onSeek: (seconds: number) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
@@ -1156,10 +1141,7 @@ function LyricsPanel({ track, lyrics, onClose, onSeek }: {
 
   return (
     <aside className="lyrics-panel" aria-label="歌词">
-      <header>
-        <h2>歌词</h2>
-        <IconButton label="关闭歌词" onClick={onClose}><X size={18} /></IconButton>
-      </header>
+      <header><h2>歌词</h2></header>
       <div className="lyrics-context">
         <strong>{track?.title || "尚未播放"}</strong>
         <small>{track ? `${trackArtist(track)} · ${trackAlbum(track)}` : "从资料库选择一首音乐"}</small>
@@ -1197,12 +1179,6 @@ function LyricsPanel({ track, lyrics, onClose, onSeek }: {
           );
         })}
       </div>
-      {lyrics.document && (
-        <footer className="lyrics-attribution">
-          <span>{lyrics.document.timed ? "时间轴歌词" : "纯文本歌词"}</span>
-          <small>{lyrics.document.by || lyrics.document.author || lyrics.document.provider || "Plex 服务器"}</small>
-        </footer>
-      )}
     </aside>
   );
 }
@@ -1732,19 +1708,6 @@ function useThemeMode(): [ThemeMode, (mode: ThemeMode) => void] {
   }, []);
 
   return [mode, update];
-}
-
-function greeting(): string {
-  const hour = new Date().getHours();
-  if (hour < 6) return "夜深了";
-  if (hour < 12) return "早上好";
-  if (hour < 18) return "下午好";
-  return "晚上好";
-}
-
-function sharedSourceLabel(sourceTitle?: string): string {
-  if (!sourceTitle) return "家庭 / 共享访问";
-  return sourceTitle.includes("共享") ? sourceTitle : `${sourceTitle} 共享`;
 }
 
 function formatBytes(bytes: number): string {
