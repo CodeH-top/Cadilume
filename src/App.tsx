@@ -745,7 +745,6 @@ function CardCollection({ title, subtitle, items, round = false, compact = false
           {items.map((item) => (
             <button className="media-card" key={item.ratingKey} onClick={() => onOpen(item)}>
               <Artwork item={item} className={round ? "round" : ""} size="large" />
-              <span className="card-play"><Play size={18} fill="currentColor" /></span>
               <strong>{item.title}</strong>
               <small>{item.parentTitle || (item.type === "artist" ? "艺术家" : item.year || "专辑")}</small>
             </button>
