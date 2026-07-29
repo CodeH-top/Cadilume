@@ -18,7 +18,7 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import type { LyricLine, LyricsDocument } from "./lyrics";
 import type { PlexMedia } from "./types";
 import "./NowPlayingView.css";
@@ -118,6 +118,35 @@ export function getLyricProgress(line: LyricLine, positionMs: number): number {
   return clampUnit((positionMs - start) / (end - start));
 }
 
+export interface LyricsScrollMetrics {
+  scrollTop: number;
+  viewportHeight: number;
+  contentHeight: number;
+  targetTop: number;
+  targetHeight: number;
+}
+
+/**
+ * Calculate the scroll position that centers one lyric inside its own list.
+ * `targetTop` is measured from the list's visible top edge, so this helper does
+ * not depend on the target's offsetParent and never needs to scroll an ancestor.
+ */
+export function getCenteredLyricsScrollTop({
+  scrollTop,
+  viewportHeight,
+  contentHeight,
+  targetTop,
+  targetHeight,
+}: LyricsScrollMetrics): number {
+  const current = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
+  const viewport = Number.isFinite(viewportHeight) ? Math.max(0, viewportHeight) : 0;
+  const content = Number.isFinite(contentHeight) ? Math.max(viewport, contentHeight) : viewport;
+  const offset = Number.isFinite(targetTop) ? targetTop : 0;
+  const height = Number.isFinite(targetHeight) ? Math.max(0, targetHeight) : 0;
+  const centered = current + offset + (height / 2) - (viewport / 2);
+  return Math.min(Math.max(0, content - viewport), Math.max(0, centered));
+}
+
 function clampUnit(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
@@ -171,6 +200,7 @@ export function NowPlayingView({
 }: NowPlayingViewProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLElement>(null);
+  const lyricsListRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const addToPlaylistButtonRef = useRef<HTMLButtonElement>(null);
   const lyricRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -199,6 +229,10 @@ export function NowPlayingView({
   const stateLabel = playing ? "正在播放" : "已暂停";
   const themeAttribute = theme === "system" ? undefined : theme;
   const modeClass = displayMode === "artwork" ? "is-artwork-mode" : "is-vinyl-mode";
+  const trackIdentity = track
+    ? String(track.ratingKey ?? track.key ?? `${track.title}\u0000${track.duration ?? track.durationMs ?? ""}`)
+    : "";
+  const previousTrackIdentityRef = useRef(trackIdentity);
   escapeEnabledRef.current = escapeEnabled;
 
   useEffect(() => {
@@ -227,14 +261,34 @@ export function NowPlayingView({
     return () => window.cancelAnimationFrame(frame);
   }, [escapeEnabled, visible]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!visible) return;
+    const list = lyricsListRef.current;
+    if (!list) return;
+
+    if (previousTrackIdentityRef.current !== trackIdentity) {
+      previousTrackIdentityRef.current = trackIdentity;
+      list.scrollTop = 0;
+      return;
+    }
+
     const activeLine = lines[activeIndex];
     if (!activeLine || activeLine.clear) return;
     const node = lyricRefs.current[activeLine.id];
-    if (!node || typeof node.scrollIntoView !== "function") return;
-    node.scrollIntoView({ block: "center", behavior: reducedMotion ? "auto" : "smooth" });
-  }, [activeIndex, lines, reducedMotion, visible]);
+    if (!node || typeof list.scrollTo !== "function") return;
+    const listRect = list.getBoundingClientRect();
+    const nodeRect = node.getBoundingClientRect();
+    list.scrollTo({
+      top: getCenteredLyricsScrollTop({
+        scrollTop: list.scrollTop,
+        viewportHeight: list.clientHeight,
+        contentHeight: list.scrollHeight,
+        targetTop: nodeRect.top - listRect.top,
+        targetHeight: nodeRect.height,
+      }),
+      behavior: reducedMotion ? "auto" : "smooth",
+    });
+  }, [activeIndex, lines, reducedMotion, trackIdentity, visible]);
 
   useEffect(() => {
     if (!visible) return;
@@ -426,6 +480,7 @@ export function NowPlayingView({
               <span className="now-playing-lyrics-count" aria-live="polite">{lineCountLabel}</span>
             </div>
             <div
+              ref={lyricsListRef}
               className="now-playing-lyrics-list"
               aria-live="polite"
               aria-busy={lyrics.loading || undefined}

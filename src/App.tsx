@@ -169,6 +169,34 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const player = usePlayer(serverId, quality);
   const outputDevices = useOutputDevices(player.setOutputSinkId);
   const lyrics = useLyrics(serverId, player.current, player.progress, player.duration);
+  const previewLyricsCountParam = import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get("now-playing-preview-lines")
+    : null;
+  const parsedPreviewLyricsCount = previewLyricsCountParam === null
+    ? null
+    : Number.parseInt(previewLyricsCountParam, 10);
+  const previewLyricsCount = parsedPreviewLyricsCount === null || !Number.isFinite(parsedPreviewLyricsCount)
+    ? null
+    : Math.min(120, Math.max(0, parsedPreviewLyricsCount));
+  const nowPlayingLyrics = previewLyricsCount === null ? lyrics : {
+    document: {
+      format: "plain" as const,
+      timed: true,
+      offsetMs: 0,
+      provider: "Cadilume 布局预览",
+      lines: Array.from({ length: previewLyricsCount }, (_, index) => ({
+        id: `layout-preview-${index}`,
+        startMs: index * 2_000,
+        endMs: (index + 1) * 2_000,
+        texts: [`布局预览歌词第 ${index + 1} 行${index % 4 === 0 ? "，用于验证长文本与独立滚动" : ""}`],
+      })),
+    },
+    loading: false,
+    error: undefined,
+    activeIndex: previewLyricsCount > 0
+      ? Math.min(previewLyricsCount - 1, Math.max(0, Math.floor(player.progress / 2)))
+      : -1,
+  };
   const hasCurrentTrack = Boolean(player.current);
   const hasQueue = hasCurrentTrack && player.queue.length > 0;
   const expandedPlayerOpen = nowPlayingOpen && hasCurrentTrack;
@@ -626,7 +654,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         onModeChange={changeNowPlayingMode}
         track={player.current}
         playing={player.playing}
-        lyrics={lyrics}
+        lyrics={nowPlayingLyrics}
         artwork={<Artwork item={player.current} size="immersive" />}
         backgroundArtwork={<Artwork item={player.current} size="backdrop" preferArt />}
         progressSeconds={player.progress}
