@@ -1224,7 +1224,7 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOp
         <div className="transport-controls">
           <IconButton label={player.shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"} active={player.shuffle} onClick={() => player.setShuffle(!player.shuffle)}><Shuffle size={16} /></IconButton>
           <IconButton label="上一首" onClick={player.previous}><SkipBack size={19} fill="currentColor" /></IconButton>
-          <button className="play-button" aria-label={player.playing ? "暂停" : "播放"} onClick={player.toggle} disabled={!player.current}>{player.playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button>
+          <button className="play-button" aria-label={player.playing ? "暂停" : "播放"} onClick={player.toggle} disabled={!player.current}>{player.playing ? <Pause className="pause-icon" size={19} fill="currentColor" aria-hidden="true" /> : <Play className="play-icon" size={19} fill="currentColor" aria-hidden="true" />}</button>
           <IconButton label="下一首" onClick={player.next}><SkipForward size={19} fill="currentColor" /></IconButton>
           <IconButton label={player.repeat === "one" ? "单曲循环" : player.repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止"} active={player.repeat !== "off"} onClick={cycleRepeat}>{player.repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}</IconButton>
         </div>

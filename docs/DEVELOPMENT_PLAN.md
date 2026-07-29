@@ -155,7 +155,7 @@
 ### PLAY-003：播放按钮配色、hover 与光学居中
 
 - 方案：底栏主播放键使用主题色、清晰 hover/focus/disabled 状态；播放三角形做 1px 光学校正，暂停图标保持几何居中。
-- 状态：待实现。
+- 状态：已完成主题色、hover/focus/active/disabled 状态、播放三角 1px 光学校正和暂停图标居中，并通过深浅主题最小尺寸实测。
 
 ### PLAY-004：播放失败提示错误且过小
 
@@ -323,3 +323,14 @@
 - Web UI：只使用 Codex 内部浏览器，新建标签并固定 `960×640`。切歌后进度为 `0%`，播放中由 0 增长到 `16.85%`、`29.21%` 和 `35.39%`；静音后音量 `72% → 0%`，取消静音恢复 `72%`。
 - 双主题：浅色使用 `accent=#b95d19`、剩余轨道 `#c5c1ba`，深色使用 `accent=#f0a15d`、剩余轨道 `#3a3d3e`，截图中两段轨道均清楚可辨。底栏始终 `y=548`，无横向溢出，干净标签页 warning/error 为 0。
 - 结论：PLAY-002 通过，可以进入 PLAY-003 底栏主播放键校准。
+
+### 2026-07-29 — PLAY-003：底栏主播放键校准
+
+- 配色：删除底栏旧的黑/白 `--play-surface/hover/ink` 专用 token，主播放键直接使用双主题 `--accent/--accent-ink`，并增加与主题色一致的柔和阴影。hover 提亮并增强阴影，active 压低亮度和阴影，disabled 降低透明度/饱和度并移除阴影。
+- 可访问状态：补充 170ms filter/box-shadow/opacity 过渡；`focus-visible` 使用 2px 主题色轮廓、3px offset 和双层主题阴影，`prefers-reduced-motion` 下取消 transition。按钮尺寸仍为 `32×32`，不增加布局位移。
+- 光学校正：只给 Lucide 播放三角添加 `.play-icon { transform: translateX(1px) }`；暂停图标使用独立 `.pause-icon` 且保持 `transform:none`，两个 SVG 均设为 `aria-hidden`，按钮可访问名称继续由“播放/暂停”提供。
+- 自动验证：`pnpm check` 通过；`pnpm test` 8 个文件、73 项测试通过；`pnpm build` 与 `git diff --check` 通过。
+- Web UI：只使用 Codex 内部浏览器，新建标签并固定 `960×640`。深色播放态背景为 `rgb(240,161,93)`、反色图标为 `rgb(24,17,11)`；浅色为 `rgb(185,93,25)` 与白色图标。两主题均有非空主题阴影，过渡为 170ms。
+- 居中与状态实测：播放态图标 transform 为 `translateX(1px)`，切换暂停后为 `none`；按钮切换前后均为 `(463.99,568.5)–(495.99,600.5)`，坐标和尺寸漂移为 0。浏览器实际焦点后出现 2px outline 和双层 focus 阴影；CSSOM 确认 hover、active、focus-visible、disabled 规则均已加载。
+- 稳定性：底栏保持 `y=548`，无横向溢出，干净标签页 warning/error 为 0。
+- 结论：PLAY-003 通过，可以进入 UI-002 全局禁止文本选择。
