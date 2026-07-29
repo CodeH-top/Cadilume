@@ -6,32 +6,40 @@
 
 ```text
 React / Tauri WebView
-  ├─ Music 资料库、搜索、普通音频歌单写入、队列与设置
+  ├─ Music 资料库、搜索、普通/智能/只读音频歌单、队列与设置
   ├─ DualAudioPool + Media Session + 独立音量
-  ├─ 两种展开播放器、歌词进度同步与桌面歌词事件
+  ├─ 两种展开播放器、主窗口右侧歌词与进度同步
   └─ macOS AirPlay / Windows Audio Output Devices 适配
           │ typed Tauri commands / events
 Rust / Tauri
   ├─ Plex PIN、Keychain / Credential Manager 与 resources 发现
-  ├─ per-server token、PMS 白名单请求、歌单写入与连接重试
+  ├─ per-server token、PMS 白名单请求、歌单读写与连接重试
   ├─ 歌词读取、授权隔离的封面磁盘缓存
   ├─ 127.0.0.1 高熵票据流代理、timeline 与 scrobble
-  └─ 原生窗口、托盘/菜单栏、桌面歌词与明确退出
+  └─ 原生窗口、Dock/托盘恢复与原生菜单退出
 ```
 
-该阶段优先保证共享账号访问、仅暴露 Music 类资料库、普通音频歌单写入、桌面播放与窗口生命周期。浏览器开发模式使用演示数据，账号和 PMS 请求只在 Tauri 桌面运行时生效。
+该阶段优先保证共享账号访问、仅暴露 Music 类资料库、普通/智能/只读音频歌单读取与播放、普通可写歌单写入、桌面播放与窗口生命周期。浏览器开发模式使用演示数据，账号和 PMS 请求只在 Tauri 桌面运行时生效。
 
 ## Plex 数据与权限边界
 
 - Plex PIN 原始响应只在 Rust 中解析。`poll_pin` 将 `authToken` 写入 macOS Keychain 或 Windows Credential Manager 后，IPC 只返回 `id`、`code`、`expiresIn` 和 `authenticated`；React / WebView 不接收账号 token。
 - `/api/v2/resources` 返回的每台服务器专属 `accessToken` 仅保存在 Rust 状态中；`owned:false` 家庭/共享服务器使用它自己的 token，不错误复用账号 token。
 - Section 列表只接受 `type=artist`，因此 UI 只暴露 Plex 的音乐类型资料库；电影、剧集和照片库不会进入导航或查询链路。
+- 服务器和 Music Section 只在设置页选择；侧栏不重复放置来源选择器，而是在主导航与账号卡之间常驻当前账号可读的音频歌单。
 - PMS 数据请求只允许预定义的库、搜索、歌单和播放状态等路径，并尝试已发现的本地、远程直连或 Relay 连接。
-- 客户端只列出非智能的普通音频歌单，并通过 `PUT /playlists/{playlistId}/items` 添加曲目。写入仍由 PMS 检查 ACL；共享账号权限不足时 UI 给出提示，不会伪装写入成功。
+- 客户端列出普通、智能和只读音频歌单，并通过固定的 `/playlists/{id}/items` 路径读取曲目；智能歌单每次打开都重新读取 PMS 当前结果。只有普通且非只读歌单进入写入选择器，并通过 `PUT /playlists/{playlistId}/items` 添加曲目。写入仍由 PMS 检查 ACL；共享账号权限不足时 UI 给出提示，不会伪装写入成功。
 - 客户端不依据 `subscription.active` 阻止基础音乐访问，但仍服从服务器 ACL、HTTP 错误和功能级订阅限制。
 - 本项目是非官方 Plex 互操作客户端；支持普通账号访问已经授权的 Music 库，不等于绕过 Plex Pass、服务器 ACL 或媒体所有权边界。
 
 ## 播放管线
+
+### 连接分类与选择
+
+- 连接拓扑与媒体决策是两个独立维度：“本地直连 / 远程直连 / Relay”描述 Cadilume 如何到达 PMS；“原始直放 / PMS 转码”描述 PMS 返回何种媒体流。不能从本地直连推导出“需要客户端本地转码”，也不能从远程连接推导出“一定不能原始直放”。
+- Plex `/api/v2/resources` 为每条连接提供 `local` 与 `relay` 标记。Cadilume 将 `local=true` 识别为本地直连，将 `relay=true` 识别为 Plex Relay，其余可达连接显示为远程直连。
+- Rust 优先排列本地、安全直连，并降低 Relay 优先级，再通过 `/identity` 探测把实际可达的连接提到首位。上游请求失败时仍会在同一服务器的候选连接间回退。
+- UI 顶部显示的是服务器发现阶段的当前首选连接类型。WebView 看到的媒体地址始终是 `127.0.0.1` loopback 票据地址，因此不能根据该 URL 判断 PMS 是本地还是远程。
 
 ### 双 Audio 下一首预缓冲
 
@@ -51,7 +59,7 @@ Rust / Tauri
 - AirPlay 路由绑定具体媒体元素。检测到无线目标后，切歌保留 active Audio，仅复用预取 URL，避免交换元素导致路由丢失。
 - 这是一项降低切歌等待的 WebView 优化，不是严格 gapless、crossfade 或音频磁盘缓存。
 
-### 音频地址与安全边界
+### 媒体决策与安全代理
 
 `stream_url` 不再返回 PMS 直连地址，而是在 Rust 状态中保留服务器、媒体路径、质量和短期会话，向 WebView 只发放本机 URL：
 
@@ -66,6 +74,8 @@ HTMLAudioElement
 - 代理同时支持 GET 和 HEAD，转发单段 bytes Range / If-Range，并保留 `Content-Range`、`Accept-Ranges`、ETag 等媒体响应头。
 - 每次上游请求按 Rust 缓存的连接顺序尝试本地、远程直连与 Relay；固定码率转码还会在现代 universal endpoint 之间回退。
 - WebView URL 不包含 PMS 主机、库路径或 token；票据有数量、未使用时间、活跃空闲和绝对寿命限制，登出会立即撤销全部票据。
+- Cadilume 客户端在任何连接拓扑下都不做音频转码。loopback 只做 Host/票据校验、鉴权隔离、Range 转发和连接回退，不解码、不重新编码。原始质量读取 PMS Part；需要兼容转换或降码率时，由 PMS 的 universal transcode endpoint 生成 320/256/192 kbps MP3，Cadilume 只转发响应。即使 PMS 与 Cadilume 位于同一台 Mac，这仍然是 PMS 服务端转码，而不是客户端转码。
+- 自动质量在本地连接使用原始流，远程直连请求 PMS 生成 320 kbps，Relay 请求 PMS 生成 192 kbps。遇到播放兼容失败时，客户端根据当前有效质量向下请求 320 → 256 → 192，不重复同一档位，也不会反向升档。
 - 这一层是授权隔离和 WebView 流式播放边界，当前不是音频离线缓存或 Range 磁盘缓存。
 
 ### 当前队列、随机与会话
@@ -79,7 +89,7 @@ HTMLAudioElement
 ### macOS AirPlay
 
 - 两个 Audio 都设置 `x-webkit-airplay="allow"`。
-- 播放设备浮层调用 active Audio 的 `webkitShowPlaybackTargetPicker()`，并监听 `webkitcurrentplaybacktargetiswirelesschanged` 更新状态。
+- 单击底栏 AirPlay 按钮就直接调用 active Audio 的 `webkitShowPlaybackTargetPicker()`，不经过应用内二次设备面板；`webkitcurrentplaybacktargetiswirelesschanged` 负责更新无线目标状态。
 - WKWebView 未暴露选择器、调用失败或用户希望系统统一管理时，UI 引导到 macOS“控制中心 → 声音”。
 - AirPlay 选择与实际路由由 macOS 管理；同网段真实接收器、切歌、睡眠唤醒和路由恢复仍需 macOS 真机验收。
 
@@ -91,14 +101,14 @@ HTMLAudioElement
 - 不支持 `setSinkId()` 时仍提供 `ms-settings:apps-volume`，让用户在 Windows 音量合成器中单独指定 Cadilume 输出。
 - 这不是 Rust 原生 WASAPI 设备管理；USB、蓝牙、HDMI、默认设备切换、热插拔和不同 WebView2 版本必须在 Windows 真机验收。
 
-## 歌词与桌面歌词
+## 歌词界面
 
 - Rust 从曲目 metadata 中寻找歌词流，使用每台服务器 token 拉取并解析 Plex JSON/XML 响应或返回原始歌词文本。
 - React 继续解析 LRC、SRT、VTT 与纯文本并归一成时间轴；播放进度更新 active 行，歌词面板自动滚动，用户可点击有时间戳的行 Seek。
 - 无时间轴的纯文本歌词可阅读，但不会伪造自动步进。
-- 主窗口通过 Tauri 事件把当前行、下一行、播放状态和曲目信息同步到独立 always-on-top 桌面歌词窗口。
+- 底栏歌词按钮直接切换主窗口右侧歌词栏；右栏拥有独立滚动容器，切歌时复位，不会带动主内容或播放器骨架滚动。
 - 底部播放栏可向上展开完整播放器：“黑胶 + 专辑封面 + 滚动歌词”与“全屏专辑背景 + 歌词”两种模式可切换并记忆，歌词行可点击 Seek。
-- 桌面歌词可从展开播放器或托盘/菜单栏显示、隐藏；它使用透明 always-on-top 窗口、卡拉 OK 扫色和本地插值，悬停时显示玻璃控制条，支持拖动与固定位置。“固定”只禁止拖动，不伪装系统 click-through；关闭只隐藏该窗口，不结束主程序。
+- 当前不创建独立桌面歌词窗口，也不在托盘/菜单栏保留桌面歌词入口。
 
 ## 封面缓存
 
@@ -123,11 +133,12 @@ HTMLAudioElement
 
 ## 窗口、托盘与主题
 
-- 主窗口保留系统原生装饰。关闭行为持久化为 `tray` 或 `quit`；`tray` 模式拦截关闭并隐藏主窗口，`quit` 模式进入统一的原生退出流程。
-- 从窗口关闭、托盘/菜单栏或设置退出时，Rust 先向主窗口发送 `app://before-exit`；React 立即刷新播放会话并回送确认，Rust 在收到确认或 750 ms 超时后结束进程。
-- macOS 菜单栏 / Windows 通知区域菜单提供显示主窗口、播放/暂停、显示/隐藏桌面歌词和退出。
-- 设置页始终有明确退出按钮，避免只能通过强制结束进程退出。
-- 主题支持跟随系统、浅色和深色，并通过共享 CSS token 同步主窗口与桌面歌词窗口。
+- 主窗口保留系统原生装饰，默认尺寸和最小尺寸都固定为 `960×640`，不允许继续缩小。
+- 关闭行为持久化为 `tray` 或 `quit`；`tray` 模式拦截关闭并隐藏主窗口，`quit` 模式进入统一的原生退出流程。macOS 的 Dock Reopen 事件与托盘/菜单栏“显示 Cadilume”都会显示、取消最小化并聚焦主窗口。
+- 从窗口关闭或托盘/菜单栏退出时，Rust 先向主窗口发送 `app://before-exit`；React 立即刷新播放会话并回送确认，Rust 在收到确认或 750 ms 超时后结束进程。
+- macOS 菜单栏 / Windows 通知区域菜单提供显示主窗口、播放/暂停和退出。设置页只配置关闭行为并提供危险色“退出账号”，不再重复提供退出应用按钮。
+- 主侧栏按“品牌与主导航 → 独立滚动的歌单区 → 固定账号卡”组织；歌单滚动不会移动主导航、账号卡或固定播放器。
+- 主题支持跟随系统、浅色和深色，并通过共享 CSS token 保持同一信息层级。
 
 ## v0.2 原生播放核心
 
@@ -163,6 +174,6 @@ PlaybackCoordinator (Rust, state authority)
 
 ## 平台发布与验收
 
-- macOS：arm64 + x86_64，Universal DMG，Developer ID 签名与 notarize；使用真实 AirPlay 接收器验证选择、连续切歌、暂停恢复和系统路由切换。
+- macOS：arm64 + x86_64，Universal DMG，Developer ID 签名与 notarize；使用真实 AirPlay 接收器验证选择、连续切歌、暂停恢复和系统路由切换。专用 DMG 脚本在成功、失败或可捕获中断后都清理 `bundle/macos/Cadilume.app`，避免构建中间包继续被系统检索，只保留 DMG。
 - Windows：Windows 10/11 x64 原生 CI 构建 NSIS，使用系统 WebView2 bootstrapper，Authenticode 签名；验证 `setSinkId`、音量合成器、USB/蓝牙/HDMI、热插拔、休眠恢复和系统媒体键。
 - 两个平台都要验证本地直连、远程直连与 Relay，并使用 `owned:false` 的授权 Music 库进行共享账号回归。

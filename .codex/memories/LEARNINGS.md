@@ -1,10 +1,17 @@
 # LEARNINGS
 
+## 2026-07-29 — 连接拓扑与媒体转码边界
+
+- `local=true`、远程直连和 `relay=true` 只表示 Cadilume 到 PMS 的连接拓扑，不表示媒体是否转码。
+- 原始直放由 PMS Part endpoint 返回，Cadilume 的 `127.0.0.1` 高熵 URL 只是票据/鉴权隔离与 Range 转发；客户端没有 FFmpeg 或其他音频转码链路。
+- WebView 解码是播放所必需的本地解码，不等于转码。需要格式兼容或降码率时，统一请求 PMS universal transcode；即使 PMS 与 Cadilume 在同一台 Mac 上，执行转换的也仍是 PMS 服务端进程。
+- UI 的连接标签只能说明发现阶段的首选链路；若要显示某一首曲目回退后真正成功的链路，需要额外的 Rust 运行态事件，不能从 WebView 的 loopback URL 推断。
+
 ## 2026-07-28 — Artwork loopback tickets
 
 - Validate and atomically persist an authorized Plex image before issuing its URL. Store only the private disk cache key behind a 64-hex loopback ticket, then read and revalidate the cache entry when `/artwork/{ticket}` is requested; this removes long-lived base64 IPC payloads without exposing the PMS host, image path, cache key, or token.
 - Keep artwork and audio in independent bounded ticket registries so a large album grid cannot evict active playback URLs. Account change/logout revokes both; explicit artwork-cache clearing revokes artwork tickets before deleting disk entries.
-- Disk LRU eviction or ticket expiry can race a lazy `<img>` load. Delete the frontend promise cache and request one replacement ticket on the first image error, then fall back after the second failure; allow only strict loopback artwork tickets or explicit `data:image` values in the desktop-lyrics payload.
+- Disk LRU eviction or ticket expiry can race a lazy `<img>` load. Delete the frontend promise cache and request one replacement ticket on the first image error, then fall back after the second failure; allow only strict loopback artwork tickets or explicit `data:image` values in explicitly supported in-window payloads.
 
 ## 2026-07-28 — Expanded-player modal and nested-dialog focus
 
@@ -22,12 +29,6 @@
 - Persist only a versioned, sanitized queue snapshot (relative Plex metadata/part paths, never resolved stream URLs or tokens), cap it at 500 tracks, expire it after 30 days, and treat localStorage failures as a non-fatal degradation.
 - Restoring a track should restore queue/index/progress without autoplay; resolve the media source only on the user's first Play and seek after `loadedmetadata`, because early `currentTime` writes can be ignored by WebKit/Chromium.
 - Keep natural `ended` separate from manual navigation: repeat-one replays only on natural completion, while manual Next/Previous continues inside the current queue; shuffle consumes a per-round bag and uses history for Previous.
-
-## 2026-07-28 — Transparent desktop karaoke overlay
-
-- Tauri transparent lyrics windows need both `transparent: true`/an alpha-zero background and `app.macOSPrivateApi: true` on macOS; the latter enables Tauri's private transparent-window API and is unsuitable for App Store distribution.
-- Keep lock semantics cross-platform as position-fixed/no-drag rather than OS click-through: click-through prevents hover controls and makes unlock impossible. Persist only the non-sensitive lock preference in localStorage.
-- A smooth karaoke sweep can interpolate `positionMs` between coarse player events when payloads include active-line start/end (or an explicit 0..1 progress), while the Rust/native layer remains authoritative for playback.
 
 ## 2026-07-28 — Plex shared-music access
 

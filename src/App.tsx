@@ -1032,9 +1032,9 @@ function SettingsView(props: ContentViewProps) {
           <ChoiceCard active={props.themeMode === "dark"} title="深色" description="适合夜间与低光环境。" icon={<Moon size={21} />} onClick={() => props.onThemeMode("dark")} />
         </div>
       </SettingsGroup>
-      <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放质量" description="直放保留原始音质；遇到不兼容格式或 Relay 带宽限制时可转码。">
+      <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放质量" description="优先直放原始音频；需要格式兼容或限码率时由 Plex Media Server 转码，Cadilume 本地不转码。">
         <div className="settings-stack">
-          <label className="field-row"><span>音频质量</span><select value={props.quality} onChange={(event) => props.onQuality(event.target.value as StreamQuality)}><option value="auto">自动（本地直放 / 远程转码）</option><option value="original">始终原始质量</option><option value="320">320 kbps</option><option value="256">256 kbps</option><option value="192">192 kbps</option></select></label>
+          <label className="field-row"><span>音频质量</span><select value={props.quality} onChange={(event) => props.onQuality(event.target.value as StreamQuality)}><option value="auto">自动（优先直放 / PMS 兼容转码）</option><option value="original">始终原始质量</option><option value="320">320 kbps</option><option value="256">256 kbps</option><option value="192">192 kbps</option></select></label>
           <label className="toggle-row">
             <span><strong>预缓冲下一首</strong><small>空闲时只提前加载队列中的下一首，减少远程串流切歌等待；随机播放时不预测。</small></span>
             <input type="checkbox" checked={props.prebufferNext} onChange={(event) => props.onPrebufferNext(event.target.checked)} />

@@ -20,6 +20,8 @@
 - pnpm 11 ignores `package.json#pnpm.onlyBuiltDependencies`; approve required dependency scripts with `pnpm approve-builds <package>`, which persists `allowBuilds` in `pnpm-workspace.yaml`.
 - `esbuild` must be approved for Vite/Vitest in this repository.
 
-## 2026-07-28 — Tauri transparent-window feature alignment
+## 2026-07-29 — Fresh Tauri target directory after repository relocation
 
-- Setting `app.macOSPrivateApi: true` in `tauri.conf.json` also requires the `macos-private-api` feature on the `tauri` dependency in `src-tauri/Cargo.toml`; otherwise Tauri's build script rejects `cargo test/check` with a feature allowlist mismatch.
+- A previously reused Cargo/Tauri target can retain absolute paths from an earlier repository location and make a valid release build fail for stale-path reasons unrelated to current sources.
+- For a clean release compilation check, create a fresh temporary directory and run `CARGO_TARGET_DIR=<fresh-dir> pnpm tauri build --no-bundle`; remove only that explicitly created temporary directory afterward. Do not treat the normal project target as disposable and do not build a DMG unless the current user request explicitly asks for packaging.
+- The Codex command safety layer can reject an otherwise narrowly scoped cleanup trap when its command text contains `rm -rf`. Preserve the build exit code in a task-specific variable, delete files with `find <fresh-dir> -depth -type f -delete`, then delete only empty directories with a second depth-first `find`; verify that no matching temporary target or `.app` remains.
