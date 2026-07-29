@@ -706,7 +706,6 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         onModeChange={changeNowPlayingMode}
         track={player.current}
         playing={player.playing}
-        lyrics={nowPlayingLyrics}
         artwork={<Artwork item={player.current} size="immersive" />}
         backgroundArtwork={<Artwork item={player.current} size="backdrop" preferArt />}
         progressSeconds={player.progress}
@@ -726,11 +725,6 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         onVolumeChange={player.setVolume}
         onClose={closeNowPlaying}
         escapeEnabled={!playlistTrack && !activePlaybackFailure}
-        onOpenLyrics={() => {
-          setNowPlayingOpen(false);
-          setPlaylistTrack(undefined);
-          setSidePanel("lyrics");
-        }}
         onAddToPlaylist={() => {
           if (!player.current) return;
           setSidePanel(null);

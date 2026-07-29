@@ -1,10 +1,8 @@
 import {
-  Captions,
   ChevronDown,
   Clock3,
   Disc3,
   ListPlus,
-  LoaderCircle,
   Music2,
   Pause,
   Play,
@@ -17,7 +15,7 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import type { LyricLine, LyricsDocument } from "./lyrics";
 import type { PlexMedia } from "./types";
 import "./NowPlayingView.css";
@@ -78,10 +76,9 @@ export interface NowPlayingViewProps {
   muted?: boolean;
   /** Independent player gain in the inclusive range 0...1. */
   volume?: number;
-  lyrics?: NowPlayingLyricsState;
   /** The parent owns artwork loading/caching and may pass an image or fallback node. */
   artwork?: ReactNode;
-  /** Optional full-bleed artwork used by `mode="artwork"`; falls back to `artwork`. */
+  /** Optional ambient background used by `mode="artwork"`; the foreground cover stays sharp. */
   backgroundArtwork?: ReactNode;
   /** Optional timeline values are in seconds, matching usePlayer's public API. */
   progressSeconds?: number;
@@ -98,11 +95,8 @@ export interface NowPlayingViewProps {
   onClose: () => void;
   /** Disable this dialog's keyboard/focus handling while a nested dialog is open. */
   escapeEnabled?: boolean;
-  onOpenLyrics?: () => void;
   onAddToPlaylist?: (track: NowPlayingTrack) => void;
 }
-
-const EMPTY_LYRICS: NowPlayingLyricsState = { activeIndex: -1 };
 
 /**
  * Return the karaoke fill for one timed lyric line at a playback position.
@@ -164,10 +158,6 @@ function formatSeconds(value: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-function lyricLabel(line: LyricLine): string {
-  return line.texts.join(" / ") || "音乐间奏";
-}
-
 export function NowPlayingView({
   open = true,
   mode = "vinyl",
@@ -178,7 +168,6 @@ export function NowPlayingView({
   repeat = "off",
   muted = false,
   volume = 1,
-  lyrics = EMPTY_LYRICS,
   artwork,
   backgroundArtwork,
   progressSeconds,
@@ -194,23 +183,17 @@ export function NowPlayingView({
   onVolumeChange,
   onClose,
   escapeEnabled = true,
-  onOpenLyrics,
   onAddToPlaylist,
 }: NowPlayingViewProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLElement>(null);
-  const lyricsListRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const addToPlaylistButtonRef = useRef<HTMLButtonElement>(null);
-  const lyricRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const escapeEnabledRef = useRef(escapeEnabled);
   const previousEscapeEnabledRef = useRef(escapeEnabled);
-  const [reducedMotion, setReducedMotion] = useState(false);
   const [internalMode, setInternalMode] = useState<NowPlayingMode>(mode);
   const visible = Boolean(open && track);
   const displayMode = onModeChange ? mode : internalMode;
-  const lines = lyrics.document?.lines ?? [];
-  const activeIndex = lyrics.activeIndex ?? -1;
   const artist = trackArtist(track);
   const album = trackAlbum(track);
   const normalizedDuration = durationSeconds ?? durationFromTrack(track);
@@ -228,24 +211,11 @@ export function NowPlayingView({
   const stateLabel = playing ? "正在播放" : "已暂停";
   const themeAttribute = theme === "system" ? undefined : theme;
   const modeClass = displayMode === "artwork" ? "is-artwork-mode" : "is-vinyl-mode";
-  const trackIdentity = track
-    ? String(track.ratingKey ?? track.key ?? `${track.title}\u0000${track.duration ?? track.durationMs ?? ""}`)
-    : "";
-  const previousTrackIdentityRef = useRef(trackIdentity);
   escapeEnabledRef.current = escapeEnabled;
 
   useEffect(() => {
     setInternalMode(mode);
   }, [mode]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => setReducedMotion(media.matches);
-    update();
-    media.addEventListener?.("change", update);
-    return () => media.removeEventListener?.("change", update);
-  }, []);
 
   useEffect(() => {
     if (!visible || !escapeEnabledRef.current) return;
@@ -259,35 +229,6 @@ export function NowPlayingView({
     const frame = window.requestAnimationFrame(() => addToPlaylistButtonRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
   }, [escapeEnabled, visible]);
-
-  useLayoutEffect(() => {
-    if (!visible) return;
-    const list = lyricsListRef.current;
-    if (!list) return;
-
-    if (previousTrackIdentityRef.current !== trackIdentity) {
-      previousTrackIdentityRef.current = trackIdentity;
-      list.scrollTop = 0;
-      return;
-    }
-
-    const activeLine = lines[activeIndex];
-    if (!activeLine || activeLine.clear) return;
-    const node = lyricRefs.current[activeLine.id];
-    if (!node || typeof list.scrollTo !== "function") return;
-    const listRect = list.getBoundingClientRect();
-    const nodeRect = node.getBoundingClientRect();
-    list.scrollTo({
-      top: getCenteredLyricsScrollTop({
-        scrollTop: list.scrollTop,
-        viewportHeight: list.clientHeight,
-        contentHeight: list.scrollHeight,
-        targetTop: nodeRect.top - listRect.top,
-        targetHeight: nodeRect.height,
-      }),
-      behavior: reducedMotion ? "auto" : "smooth",
-    });
-  }, [activeIndex, lines, reducedMotion, trackIdentity, visible]);
 
   useEffect(() => {
     if (!visible) return;
@@ -331,20 +272,8 @@ export function NowPlayingView({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose, visible]);
 
-  const lineCountLabel = useMemo(() => {
-    if (lyrics.loading) return "正在读取歌词";
-    if (lyrics.error) return "歌词加载失败";
-    if (!lines.length) return "暂无歌词";
-    return lyrics.document?.timed ? `${lines.length} 行时间轴歌词` : `${lines.length} 行歌词`;
-  }, [lines.length, lyrics.document?.timed, lyrics.error, lyrics.loading]);
-
   const handleBackdropMouseDown = (event: MouseEvent<HTMLElement>) => {
     if (visible && event.target === event.currentTarget) onClose();
-  };
-
-  const handleLyricSeek = (line: LyricLine) => {
-    if (line.startMs === null || !Number.isFinite(line.startMs)) return;
-    onSeek(Math.max(0, line.startMs) / 1000);
   };
 
   const handleModeChange = (nextMode: NowPlayingMode) => {
@@ -423,16 +352,6 @@ export function NowPlayingView({
               </button>
             </div>
             <button
-              className="now-playing-action-button"
-              type="button"
-              disabled={!track || !onOpenLyrics}
-              aria-label="打开右侧歌词"
-              onClick={() => track && onOpenLyrics?.()}
-            >
-              <Captions size={17} strokeWidth={1.8} aria-hidden="true" />
-              <span>右侧歌词</span>
-            </button>
-            <button
               ref={addToPlaylistButtonRef}
               className="now-playing-action-button"
               type="button"
@@ -447,18 +366,24 @@ export function NowPlayingView({
         </header>
 
         <div className="now-playing-content">
-          <section className="now-playing-art-column" aria-label="专辑封面与唱片">
-            <div className={`now-playing-record-stage ${playing ? "is-playing" : "is-paused"}`}>
-              <div className="now-playing-tonearm" aria-hidden="true"><span /></div>
-              <div className="now-playing-record" aria-label={`${track?.title || "尚未播放"} 黑胶唱片`} role="img">
-                <div className="now-playing-record-grooves" aria-hidden="true" />
-                <div className="now-playing-record-label">
-                  <div className="now-playing-artwork">{artwork || <Disc3 size={38} strokeWidth={1.4} aria-hidden="true" />}</div>
-                  <span className="now-playing-spindle" aria-hidden="true" />
+          <section className="now-playing-art-column" aria-label="播放视觉与曲目信息">
+            {displayMode === "vinyl" ? (
+              <div className={`now-playing-record-stage ${playing ? "is-playing" : "is-paused"}`}>
+                <div className="now-playing-tonearm" aria-hidden="true"><span /></div>
+                <div className="now-playing-record" aria-label={`${track?.title || "尚未播放"} 黑胶唱片`} role="img">
+                  <div className="now-playing-record-grooves" aria-hidden="true" />
+                  <div className="now-playing-record-label">
+                    <div className="now-playing-artwork">{artwork || <Disc3 size={38} strokeWidth={1.4} aria-hidden="true" />}</div>
+                    <span className="now-playing-spindle" aria-hidden="true" />
+                  </div>
+                  <span className="now-playing-record-hole" aria-hidden="true" />
                 </div>
-                <span className="now-playing-record-hole" aria-hidden="true" />
               </div>
-            </div>
+            ) : (
+              <div className="now-playing-cover-stage">
+                <div className="now-playing-cover-artwork">{artwork || <Music2 size={64} strokeWidth={1.2} aria-hidden="true" />}</div>
+              </div>
+            )}
             <div className="now-playing-track-meta">
               <div className="now-playing-track-heading">
                 <h1 id={titleId}>{track?.title || "尚未播放"}</h1>
@@ -467,57 +392,6 @@ export function NowPlayingView({
               <p>{artist}</p>
               <small>{album}{track?.year ? ` · ${track.year}` : ""}</small>
             </div>
-          </section>
-
-          <section className="now-playing-lyrics-column" aria-label="同步歌词">
-            <div className="now-playing-lyrics-heading">
-              <h2>歌词</h2>
-              <span className="now-playing-lyrics-count" aria-live="polite">{lineCountLabel}</span>
-            </div>
-            <div
-              ref={lyricsListRef}
-              className="now-playing-lyrics-list"
-              aria-live="polite"
-              aria-busy={lyrics.loading || undefined}
-              tabIndex={0}
-            >
-              {lyrics.loading ? (
-                <div className="now-playing-lyrics-message"><LoaderCircle className="now-playing-spin" size={22} aria-hidden="true" /><span>正在读取歌词…</span></div>
-              ) : lyrics.error ? (
-                <div className="now-playing-lyrics-message is-error"><Captions size={28} strokeWidth={1.5} aria-hidden="true" /><strong>歌词加载失败</strong><small>{lyrics.error}</small></div>
-              ) : !track ? (
-                <div className="now-playing-lyrics-message"><Music2 size={28} strokeWidth={1.5} aria-hidden="true" /><strong>播放歌曲后显示歌词</strong><small>从资料库选择一首音乐开始。</small></div>
-              ) : !lines.length ? (
-                <div className="now-playing-lyrics-message"><Captions size={28} strokeWidth={1.5} aria-hidden="true" /><strong>这首歌暂无可用歌词</strong><small>只显示 Plex 服务器授权返回的歌词。</small></div>
-              ) : (
-                lines.map((line, index) => {
-                  if (line.clear) return <div className="now-playing-lyric-gap" key={line.id} aria-hidden="true" />;
-                  const active = lyrics.document?.timed === true && index === activeIndex;
-                  const timed = line.startMs !== null && lyrics.document?.timed === true;
-                  return (
-                    <button
-                      ref={(node) => { lyricRefs.current[line.id] = node; }}
-                      className={`now-playing-lyric-line ${active ? "is-active" : ""} ${timed ? "is-timed" : "is-static"}`}
-                      key={line.id}
-                      type="button"
-                      disabled={!timed}
-                      aria-current={active ? "true" : undefined}
-                      aria-label={timed ? `${lyricLabel(line)}，跳转到 ${formatSeconds((line.startMs || 0) / 1000)}` : lyricLabel(line)}
-                      onClick={() => handleLyricSeek(line)}
-                    >
-                      <span className="now-playing-lyric-text">{line.texts.join(" · ")}</span>
-                      <span className="now-playing-lyric-marker" aria-hidden="true" />
-                    </button>
-                  );
-                })
-              )}
-            </div>
-            {lyrics.document && (
-              <footer className="now-playing-lyrics-footer">
-                <span>{lyrics.document.timed ? "时间轴歌词" : "纯文本歌词"}</span>
-                <small>{lyrics.document.by || lyrics.document.author || lyrics.document.provider || "Plex 服务器"}</small>
-              </footer>
-            )}
           </section>
         </div>
 
