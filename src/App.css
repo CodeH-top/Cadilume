@@ -190,9 +190,6 @@ kbd { border: 1px solid var(--border-strong); border-radius: 5px; padding: 1px 5
 .devices-panel { position: fixed; z-index: var(--z-side-panel); right: 16px; bottom: calc(var(--player-height) + 12px); width: min(330px, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: min(560px, calc(100vh - var(--player-height) - 28px)); min-width: 0; min-height: 0; display: grid; grid-template-rows: 72px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--side-panel); box-shadow: 0 22px 60px rgba(0, 0, 0, 0.42); }
 .queue-panel > header, .lyrics-panel > header, .devices-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 18px; border-bottom: 1px solid var(--border); }
 .queue-panel h2, .lyrics-panel h2, .devices-panel h2 { margin: 0; font-size: 20px; letter-spacing: -0.03em; }
-.panel-actions { display: flex; align-items: center; gap: 5px; }
-.desktop-lyrics-button { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--muted-strong); font-size: 12px; transition: color 160ms ease, background 160ms ease, border-color 160ms ease; }
-.desktop-lyrics-button:hover { color: var(--text); background: var(--panel-hover); border-color: var(--border-strong); }
 .queue-list { min-height: 0; overflow: auto; padding: 10px; }
 .queue-item { display: grid; grid-template-columns: minmax(0, 1fr) 30px; align-items: center; border-radius: 7px; }
 .queue-item.active { background: var(--accent-soft); }
@@ -371,19 +368,6 @@ input[type="range"]:hover::-webkit-slider-thumb, input[type="range"]:focus-visib
 .splash-progress .spin { color: var(--accent); }
 .fatal-screen h1 { margin: 10px 0 0; font-size: 26px; }
 .fatal-screen p { color: var(--muted); font-size: 13px; }
-
-.desktop-lyrics-window { width: 100%; height: 100%; display: grid; grid-template-rows: 40px minmax(0, 1fr); padding: 12px 16px 14px; overflow: hidden; user-select: none; background: radial-gradient(circle at 12% 0%, var(--accent-soft), transparent 38%), var(--side-panel); border: 1px solid var(--border-strong); }
-.desktop-lyrics-window > header { min-width: 0; display: grid; grid-template-columns: 31px minmax(0, 1fr) 8px 32px; align-items: center; gap: 9px; cursor: move; }
-.desktop-track { min-width: 0; display: grid; gap: 1px; }
-.desktop-track strong, .desktop-track small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.desktop-track strong { font-size: 12px; }
-.desktop-track small { color: var(--muted); font-size: 12px; }
-.desktop-playback-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted-faint); }
-.desktop-playback-dot.playing { background: #70c692; box-shadow: 0 0 0 3px rgba(112, 198, 146, 0.1); }
-.desktop-lyric-copy { min-width: 0; display: grid; align-content: center; gap: 5px; padding-left: 40px; }
-.desktop-lyric-copy p, .desktop-lyric-copy small { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre-line; }
-.desktop-lyric-copy p { color: var(--accent); font-size: clamp(18px, 3.2vw, 27px); font-weight: 750; line-height: 1.08; letter-spacing: -0.025em; }
-.desktop-lyric-copy small { color: var(--muted); font-size: 12px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 1120px) {

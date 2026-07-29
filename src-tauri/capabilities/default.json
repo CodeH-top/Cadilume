@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main player and desktop lyrics windows",
-  "windows": ["main", "desktop-lyrics"],
+  "description": "Capability for the main player window",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

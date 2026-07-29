@@ -5,7 +5,6 @@ import {
   Disc3,
   ListPlus,
   LoaderCircle,
-  MonitorUp,
   Music2,
   Pause,
   Play,
@@ -99,7 +98,7 @@ export interface NowPlayingViewProps {
   onClose: () => void;
   /** Disable this dialog's keyboard/focus handling while a nested dialog is open. */
   escapeEnabled?: boolean;
-  onOpenDesktop?: () => void;
+  onOpenLyrics?: () => void;
   onAddToPlaylist?: (track: NowPlayingTrack) => void;
 }
 
@@ -195,7 +194,7 @@ export function NowPlayingView({
   onVolumeChange,
   onClose,
   escapeEnabled = true,
-  onOpenDesktop,
+  onOpenLyrics,
   onAddToPlaylist,
 }: NowPlayingViewProps) {
   const titleId = useId();
@@ -427,12 +426,12 @@ export function NowPlayingView({
             <button
               className="now-playing-action-button"
               type="button"
-              disabled={!track || !onOpenDesktop}
-              aria-label="打开桌面歌词"
-              onClick={() => track && onOpenDesktop?.()}
+              disabled={!track || !onOpenLyrics}
+              aria-label="打开右侧歌词"
+              onClick={() => track && onOpenLyrics?.()}
             >
-              <MonitorUp size={17} strokeWidth={1.8} aria-hidden="true" />
-              <span>桌面歌词</span>
+              <Captions size={17} strokeWidth={1.8} aria-hidden="true" />
+              <span>右侧歌词</span>
             </button>
             <button
               ref={addToPlaylistButtonRef}

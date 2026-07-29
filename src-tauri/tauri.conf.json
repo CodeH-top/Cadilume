@@ -10,7 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -23,26 +22,6 @@
         "resizable": true,
         "decorations": true,
         "backgroundThrottling": "disabled",
-        "fullscreen": false
-      },
-      {
-        "label": "desktop-lyrics",
-        "title": "Cadilume 桌面歌词",
-        "url": "index.html#/desktop-lyrics",
-        "width": 820,
-        "height": 168,
-        "center": true,
-        "resizable": false,
-        "minimizable": false,
-        "maximizable": false,
-        "decorations": false,
-        "transparent": true,
-        "backgroundColor": "#00000000",
-        "shadow": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "visible": false,
-        "focus": false,
         "fullscreen": false
       }
     ],

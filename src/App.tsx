@@ -40,7 +40,6 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import { listen } from "@tauri-apps/api/event";
 import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
   artworkUrl,
@@ -62,10 +61,7 @@ import {
   showMainWindow,
 } from "./api";
 import "./App.css";
-import { DesktopLyricsWindow as DesktopLyricsOverlay } from "./DesktopLyricsWindow";
-import { DESKTOP_LYRICS_VISIBILITY_EVENT, desktopLyricProgress, hideDesktopLyrics, publishDesktopLyrics, showDesktopLyrics } from "./desktopLyrics";
-import type { LyricsDocument } from "./lyrics";
-import { NowPlayingView, type NowPlayingMode } from "./NowPlayingView";
+import { getCenteredLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
 import type {
   BootstrapResponse,
   CacheStatus,
@@ -103,7 +99,6 @@ const PLAYBACK_SETTINGS_ID = "playback-settings";
 
 function App() {
   const [themeMode, setThemeMode] = useThemeMode();
-  if (window.location.hash === "#/desktop-lyrics") return <DesktopLyricsOverlay />;
   return <MainApplication themeMode={themeMode} onThemeMode={setThemeMode} />;
 }
 
@@ -147,11 +142,9 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const [searchText, setSearchText] = useState("");
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<string>();
-  const [sidePanel, setSidePanel] = useState<"queue" | "devices" | null>(null);
+  const [sidePanel, setSidePanel] = useState<"queue" | "lyrics" | "devices" | null>(null);
   const [nowPlayingOpen, setNowPlayingOpen] = useState(false);
   const [nowPlayingMode, setNowPlayingMode] = useState<NowPlayingMode>(readNowPlayingMode);
-  const [desktopLyricsVisible, setDesktopLyricsVisible] = useState(false);
-  const [desktopArtworkUrl, setDesktopArtworkUrl] = useState<string>();
   const [playlistTrack, setPlaylistTrack] = useState<PlexItem>();
   const [detail, setDetail] = useState<{ source: PlexItem; children: PlexItem[] }>();
   const [closeBehavior, setCloseBehavior] = useState<CloseBehavior>(initialSession.closeBehavior);
@@ -201,25 +194,13 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const hasQueue = hasCurrentTrack && player.queue.length > 0;
   const expandedPlayerOpen = nowPlayingOpen && hasCurrentTrack;
   const queuePanelOpen = sidePanel === "queue" && hasQueue;
+  const lyricsPanelOpen = sidePanel === "lyrics";
   const previewPlaybackFailure = import.meta.env.DEV
     && new URLSearchParams(window.location.search).has("playback-error-preview");
   const activePlaybackFailure = player.playbackFailure ?? playbackFailurePreview;
 
   const selectedServer = servers.find((server) => server.id === serverId);
   const selectedSection = sections.find((section) => section.key === sectionKey);
-  const currentLyricText = lyricText(lyrics.document, lyrics.activeIndex);
-  const nextLyricText = followingLyricText(lyrics.document, lyrics.activeIndex);
-  const currentLyricLine = lyrics.document?.timed && lyrics.activeIndex >= 0
-    ? lyrics.document.lines[lyrics.activeIndex]
-    : undefined;
-  const desktopClockSecond = Math.floor(player.progress);
-  const desktopPositionMs = desktopClockSecond * 1000;
-  const desktopLineProgress = desktopLyricProgress({
-    positionMs: desktopPositionMs,
-    currentStartMs: currentLyricLine?.startMs,
-    currentEndMs: currentLyricLine?.endMs,
-  });
-
   useEffect(() => {
     if (!previewPlaybackFailure || !player.current) {
       setPlaybackFailurePreview(undefined);
@@ -248,92 +229,11 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   }, [playbackSettingsRequest, view]);
 
   useEffect(() => {
-    let cancelled = false;
-    const path = player.current?.thumb || player.current?.art;
-    setDesktopArtworkUrl(player.current?.imageUrl);
-    if (!path || !serverId) {
-      return () => { cancelled = true; };
-    }
-    if (!isDesktopRuntime()) {
-      setDesktopArtworkUrl(player.current?.imageUrl || path);
-      return () => { cancelled = true; };
-    }
-    void artworkUrl(serverId, path, 192)
-      .then((url) => { if (!cancelled) setDesktopArtworkUrl(url); })
-      .catch(() => { if (!cancelled) setDesktopArtworkUrl(undefined); });
-    return () => { cancelled = true; };
-  }, [player.current?.art, player.current?.imageUrl, player.current?.ratingKey, player.current?.thumb, serverId]);
-
-  const syncDesktopLyrics = useCallback(async () => {
-    await publishDesktopLyrics({
-      trackId: player.current?.ratingKey,
-      title: player.current?.title || "尚未播放",
-      artist: player.current ? trackArtist(player.current) : "从资料库选择音乐",
-      album: player.current ? trackAlbum(player.current) : undefined,
-      artworkUrl: desktopArtworkUrl,
-      currentText: currentLyricText,
-      nextText: nextLyricText,
-      timed: lyrics.document?.timed ?? false,
-      playing: player.playing,
-      positionMs: desktopPositionMs,
-      currentStartMs: currentLyricLine?.startMs,
-      currentEndMs: currentLyricLine?.endMs,
-      lineProgress: desktopLineProgress,
-    });
-  }, [currentLyricLine?.endMs, currentLyricLine?.startMs, currentLyricText, desktopArtworkUrl, desktopLineProgress, desktopPositionMs, lyrics.document?.timed, nextLyricText, player.current, player.playing]);
-
-  useEffect(() => {
-    void syncDesktopLyrics().catch(() => undefined);
-  }, [syncDesktopLyrics]);
-
-  const openDesktopLyrics = useCallback(async () => {
-    if (!hasCurrentTrack) return;
-    try {
-      setDesktopLyricsVisible(await showDesktopLyrics());
-      await syncDesktopLyrics();
-    } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : String(reason));
-    }
-  }, [hasCurrentTrack, syncDesktopLyrics]);
-
-  const toggleDesktopLyrics = useCallback(async () => {
-    if (!hasCurrentTrack) return;
-    try {
-      if (desktopLyricsVisible) {
-        setDesktopLyricsVisible(await hideDesktopLyrics());
-      } else {
-        await openDesktopLyrics();
-      }
-    } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : String(reason));
-    }
-  }, [desktopLyricsVisible, hasCurrentTrack, openDesktopLyrics]);
-
-  useEffect(() => {
-    if (!isDesktopRuntime()) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void listen<boolean>(DESKTOP_LYRICS_VISIBILITY_EVENT, (event) => {
-      if (!disposed) setDesktopLyricsVisible(event.payload);
-    }).then((dispose) => {
-      if (disposed) dispose();
-      else unlisten = dispose;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
-  useEffect(() => {
     if (player.current) return;
     setNowPlayingOpen(false);
     setPlaylistTrack(undefined);
-    setSidePanel((value) => value === "queue" ? null : value);
-    if (!desktopLyricsVisible) return;
-    setDesktopLyricsVisible(false);
-    void hideDesktopLyrics().catch(() => undefined);
-  }, [desktopLyricsVisible, player.current]);
+    setSidePanel((value) => value === "queue" || value === "lyrics" ? null : value);
+  }, [player.current]);
 
   const changeNowPlayingMode = useCallback((mode: NowPlayingMode) => {
     setNowPlayingMode(mode);
@@ -557,7 +457,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
 
   return (
     <ArtworkServerContext.Provider value={serverId}>
-    <div className={`app-shell ${queuePanelOpen ? "side-panel-visible" : ""}`}>
+    <div className={`app-shell ${queuePanelOpen || lyricsPanelOpen ? "side-panel-visible" : ""}`}>
       <a className="skip-link" href="#main-content" aria-hidden={expandedPlayerOpen || undefined} tabIndex={expandedPlayerOpen ? -1 : undefined}>跳到主要内容</a>
       <aside className="sidebar" aria-label="主导航" aria-hidden={expandedPlayerOpen || undefined} inert={expandedPlayerOpen || undefined}>
         <div className="brand"><span className="brand-mark"><BrandIcon /></span><span>Cadilume</span></div>
@@ -640,6 +540,15 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         />
       )}
 
+      {lyricsPanelOpen && (
+        <LyricsPanel
+          track={player.current}
+          lyrics={nowPlayingLyrics}
+          onClose={() => setSidePanel(null)}
+          onSeek={player.seek}
+        />
+      )}
+
       {sidePanel === "devices" && (
         <DevicesPanel
           output={outputDevices}
@@ -674,7 +583,11 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         onVolumeChange={player.setVolume}
         onClose={closeNowPlaying}
         escapeEnabled={!playlistTrack && !activePlaybackFailure}
-        onOpenDesktop={() => void openDesktopLyrics()}
+        onOpenLyrics={() => {
+          setNowPlayingOpen(false);
+          setPlaylistTrack(undefined);
+          setSidePanel("lyrics");
+        }}
         onAddToPlaylist={() => {
           if (!player.current) return;
           setSidePanel(null);
@@ -709,12 +622,12 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         nowPlayingTriggerRef={nowPlayingTriggerRef}
         expanded={expandedPlayerOpen}
         queueOpen={queuePanelOpen}
-        desktopLyricsVisible={desktopLyricsVisible}
+        lyricsOpen={lyricsPanelOpen}
         devicesOpen={sidePanel === "devices"}
         outputPlatform={outputDevices.platform}
         canOpenNowPlaying={hasCurrentTrack}
         canToggleQueue={hasQueue}
-        canToggleDesktopLyrics={hasCurrentTrack}
+        canToggleLyrics={hasCurrentTrack}
         onOpenNowPlaying={() => {
           if (!player.current) return;
           setSidePanel(null);
@@ -727,9 +640,11 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
           setPlaylistTrack(undefined);
           setSidePanel((value) => value === "queue" ? null : "queue");
         }}
-        onToggleDesktopLyrics={() => {
+        onToggleLyrics={() => {
           if (!player.current) return;
-          void toggleDesktopLyrics();
+          setNowPlayingOpen(false);
+          setPlaylistTrack(undefined);
+          setSidePanel((value) => value === "lyrics" ? null : "lyrics");
         }}
         onOutputAction={() => {
           const result = activateOutputControl(
@@ -887,7 +802,7 @@ function SettingsView(props: ContentViewProps) {
           <ChoiceCard active={props.closeBehavior === "quit"} title="退出程序" description="点击系统关闭按钮后停止播放并结束进程。" icon={<Power size={21} />} onClick={() => props.onCloseBehavior("quit")} />
         </div>
       </SettingsGroup>
-      <SettingsGroup icon={<Sun size={18} />} title="外观" description="所有主窗口与桌面歌词共用主题；跟随系统会响应 macOS 或 Windows 的外观变化。">
+      <SettingsGroup icon={<Sun size={18} />} title="外观" description="主窗口会统一使用所选主题；跟随系统会响应 macOS 或 Windows 的外观变化。">
         <div className="choice-grid three-columns">
           <ChoiceCard active={props.themeMode === "system"} title="跟随系统" description="自动切换浅色与深色。" icon={<Monitor size={21} />} onClick={() => props.onThemeMode("system")} />
           <ChoiceCard active={props.themeMode === "light"} title="浅色" description="明亮、柔和的资料库界面。" icon={<Sun size={21} />} onClick={() => props.onThemeMode("light")} />
@@ -960,6 +875,102 @@ function QueuePanel({ queue, currentIndex, onClose, onSelect, onRemove }: { queu
           </div>
         )) : <EmptyState title="队列为空" description="选择一首歌曲开始播放。" icon={<ListMusic size={25} />} />}
       </div>
+    </aside>
+  );
+}
+
+function LyricsPanel({ track, lyrics, onClose, onSeek }: {
+  track?: PlexItem;
+  lyrics: NowPlayingLyricsState;
+  onClose: () => void;
+  onSeek: (seconds: number) => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const lineRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const trackIdentity = track?.ratingKey || track?.key || track?.title || "";
+  const previousTrackIdentityRef = useRef(trackIdentity);
+  const lines = lyrics.document?.lines ?? [];
+  const activeIndex = lyrics.activeIndex ?? -1;
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+
+    if (previousTrackIdentityRef.current !== trackIdentity) {
+      previousTrackIdentityRef.current = trackIdentity;
+      lineRefs.current = {};
+      list.scrollTop = 0;
+      return;
+    }
+
+    if (!lyrics.document?.timed) return;
+    const activeLine = lines[activeIndex];
+    if (!activeLine || activeLine.clear) return;
+    const node = lineRefs.current[activeLine.id];
+    if (!node || typeof list.scrollTo !== "function") return;
+    const listRect = list.getBoundingClientRect();
+    const nodeRect = node.getBoundingClientRect();
+    list.scrollTo({
+      top: getCenteredLyricsScrollTop({
+        scrollTop: list.scrollTop,
+        viewportHeight: list.clientHeight,
+        contentHeight: list.scrollHeight,
+        targetTop: nodeRect.top - listRect.top,
+        targetHeight: nodeRect.height,
+      }),
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+  }, [activeIndex, lines, lyrics.document?.timed, trackIdentity]);
+
+  return (
+    <aside className="lyrics-panel" aria-label="歌词">
+      <header>
+        <div><p className="eyebrow">正在播放</p><h2>歌词</h2></div>
+        <IconButton label="关闭歌词" onClick={onClose}><X size={18} /></IconButton>
+      </header>
+      <div className="lyrics-context">
+        <strong>{track?.title || "尚未播放"}</strong>
+        <small>{track ? `${trackArtist(track)} · ${trackAlbum(track)}` : "从资料库选择一首音乐"}</small>
+      </div>
+      <div
+        ref={listRef}
+        className="lyrics-list"
+        aria-live="polite"
+        aria-busy={lyrics.loading || undefined}
+      >
+        {lyrics.loading ? (
+          <div className="lyrics-message" role="status"><LoaderCircle className="spin" size={22} /><span>正在读取歌词…</span></div>
+        ) : lyrics.error ? (
+          <div className="lyrics-message error" role="alert"><Captions size={24} /><span>歌词加载失败</span><small>{lyrics.error}</small></div>
+        ) : !track ? (
+          <div className="lyrics-message"><Music2 size={24} /><span>播放歌曲后显示歌词</span><small>从资料库选择一首音乐开始。</small></div>
+        ) : !lyrics.document || !lines.length ? (
+          <div className="lyrics-message"><Captions size={24} /><span>这首歌暂无可用歌词</span><small>只显示服务器授权返回的歌词。</small></div>
+        ) : lines.map((line, index) => {
+          if (line.clear || !line.texts.length) return <div className="lyric-gap" key={line.id} aria-hidden="true" />;
+          const timed = lyrics.document?.timed === true && line.startMs !== null;
+          const active = timed && index === activeIndex;
+          return (
+            <button
+              ref={(node) => { lineRefs.current[line.id] = node; }}
+              className={`lyric-line ${active ? "active" : ""}`}
+              key={line.id}
+              type="button"
+              disabled={!timed}
+              aria-current={active ? "true" : undefined}
+              onClick={() => timed && onSeek((line.startMs || 0) / 1000)}
+            >
+              {line.texts.map((text, textIndex) => <span key={`${line.id}-${textIndex}`}>{text}</span>)}
+            </button>
+          );
+        })}
+      </div>
+      {lyrics.document && (
+        <footer className="lyrics-attribution">
+          <span>{lyrics.document.timed ? "时间轴歌词" : "纯文本歌词"}</span>
+          <small>{lyrics.document.by || lyrics.document.author || lyrics.document.provider || "Plex 服务器"}</small>
+        </footer>
+      )}
     </aside>
   );
 }
@@ -1168,20 +1179,20 @@ function PlaylistPicker({ serverId, track, onClose, onAdded }: {
   );
 }
 
-function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, desktopLyricsVisible, devicesOpen, outputPlatform, canOpenNowPlaying, canToggleQueue, canToggleDesktopLyrics, onOpenNowPlaying, onToggleQueue, onToggleDesktopLyrics, onOutputAction }: {
+function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOpen, devicesOpen, outputPlatform, canOpenNowPlaying, canToggleQueue, canToggleLyrics, onOpenNowPlaying, onToggleQueue, onToggleLyrics, onOutputAction }: {
   player: ReturnType<typeof usePlayer>;
   nowPlayingTriggerRef: RefObject<HTMLButtonElement | null>;
   expanded: boolean;
   queueOpen: boolean;
-  desktopLyricsVisible: boolean;
+  lyricsOpen: boolean;
   devicesOpen: boolean;
   outputPlatform: ReturnType<typeof useOutputDevices>["platform"];
   canOpenNowPlaying: boolean;
   canToggleQueue: boolean;
-  canToggleDesktopLyrics: boolean;
+  canToggleLyrics: boolean;
   onOpenNowPlaying: () => void;
   onToggleQueue: () => void;
-  onToggleDesktopLyrics: () => void;
+  onToggleLyrics: () => void;
   onOutputAction: () => void;
 }) {
   const volumeIcon = player.muted || player.volume === 0 ? <VolumeX size={18} /> : player.volume < 0.5 ? <Volume1 size={18} /> : <Volume2 size={18} />;
@@ -1203,7 +1214,7 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, desktopL
         <div className="progress-row"><span>{formatDuration(player.progress * 1000)}</span><input aria-label="播放进度" type="range" min="0" max={Math.max(1, player.duration)} step="1" value={Math.min(player.progress, player.duration || 0)} onChange={(event) => player.seek(Number(event.target.value))} /><span>{formatDuration(player.duration * 1000)}</span></div>
       </div>
       <div className="player-extras">
-        <IconButton label={desktopLyricsVisible ? "隐藏桌面歌词" : "显示桌面歌词"} active={desktopLyricsVisible} disabled={!canToggleDesktopLyrics} onClick={onToggleDesktopLyrics}><Captions size={19} /></IconButton>
+        <IconButton label={lyricsOpen ? "关闭歌词" : "打开歌词"} active={lyricsOpen} disabled={!canToggleLyrics} onClick={onToggleLyrics}><Captions size={19} /></IconButton>
         <IconButton label="播放队列" active={queueOpen} disabled={!canToggleQueue} onClick={onToggleQueue}><ListMusic size={19} /></IconButton>
         <IconButton label={outputPlatform === "macos" ? "选择 AirPlay 设备" : "播放设备"} active={outputPlatform === "macos" ? player.airPlayActive : devicesOpen} onClick={onOutputAction}>{outputPlatform === "macos" ? <Airplay size={19} /> : <Speaker size={18} />}</IconButton>
         <div className="volume-control">
@@ -1407,19 +1418,6 @@ function SplashScreen() {
 
 function FatalError({ message, retry }: { message: string; retry: () => void }) {
   return <main className="fatal-screen"><span className="brand-mark large"><BrandIcon size={28} /></span><h1>无法启动 Cadilume</h1><p>{message}</p><button className="primary-button" onClick={retry}><RefreshCw size={17} />重试</button></main>;
-}
-
-function lyricText(document: LyricsDocument | undefined, activeIndex: number): string {
-  if (!document?.lines.length) return "";
-  const index = document.timed ? activeIndex : document.lines.findIndex((line) => line.texts.length > 0);
-  if (index < 0) return "";
-  return document.lines[index].texts.join("\n");
-}
-
-function followingLyricText(document: LyricsDocument | undefined, activeIndex: number): string {
-  if (!document?.lines.length) return "";
-  const start = document.timed ? activeIndex + 1 : Math.max(1, document.lines.findIndex((line) => line.texts.length > 0) + 1);
-  return document.lines.slice(Math.max(0, start)).find((line) => line.texts.length > 0)?.texts.join("\n") || "";
 }
 
 function readNowPlayingMode(): NowPlayingMode {

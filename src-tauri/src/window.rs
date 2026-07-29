@@ -16,8 +16,6 @@ use crate::plex::PlexState;
 
 const TRAY_ID: &str = "cadilume-tray";
 const MAIN_WINDOW_LABEL: &str = "main";
-const DESKTOP_LYRICS_WINDOW_LABEL: &str = "desktop-lyrics";
-const DESKTOP_LYRICS_VISIBILITY_EVENT: &str = "desktop-lyrics://visibility";
 const APP_BEFORE_EXIT_EVENT: &str = "app://before-exit";
 const EXIT_ACK_TIMEOUT: Duration = Duration::from_millis(750);
 
@@ -70,8 +68,8 @@ fn main_close_action(close_to_tray: bool) -> MainCloseAction {
 
 #[cfg(target_os = "macos")]
 fn should_reveal_main_window_on_reopen(_has_visible_windows: bool) -> bool {
-    // A visible auxiliary window (for example desktop lyrics) must not prevent
-    // a Dock click from bringing the hidden main window back.
+    // A Dock click must always bring the main window back, even if macOS reports
+    // another visible application window.
     true
 }
 
@@ -95,7 +93,6 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
         .text("show", "显示 Cadilume")
         .text("play-pause", "播放 / 暂停")
-        .text("toggle-desktop-lyrics", "显示 / 隐藏桌面歌词")
         .separator()
         .text("quit", "退出 Cadilume")
         .build()?;
@@ -110,9 +107,6 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
             "play-pause" => {
                 let _ = app.emit("tray-player-toggle", ());
-            }
-            "toggle-desktop-lyrics" => {
-                let _ = toggle_desktop_lyrics_window(app);
             }
             "quit" => request_app_quit(app),
             _ => {}
@@ -129,15 +123,6 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
     let WindowEvent::CloseRequested { api, .. } = event else {
         return;
     };
-
-    if window.label() == DESKTOP_LYRICS_WINDOW_LABEL {
-        api.prevent_close();
-        let _ = window.hide();
-        let _ = window
-            .app_handle()
-            .emit(DESKTOP_LYRICS_VISIBILITY_EVENT, false);
-        return;
-    }
 
     if window.label() != MAIN_WINDOW_LABEL {
         return;
@@ -164,58 +149,9 @@ pub(crate) fn reveal_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Resul
     Ok(())
 }
 
-fn show_desktop_lyrics_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<bool> {
-    if let Some(window) = app.get_webview_window(DESKTOP_LYRICS_WINDOW_LABEL) {
-        window.show()?;
-        window.unminimize()?;
-        app.emit(DESKTOP_LYRICS_VISIBILITY_EVENT, true)?;
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-fn hide_desktop_lyrics_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<bool> {
-    if let Some(window) = app.get_webview_window(DESKTOP_LYRICS_WINDOW_LABEL) {
-        window.hide()?;
-    }
-    app.emit(DESKTOP_LYRICS_VISIBILITY_EVENT, false)?;
-    Ok(false)
-}
-
-fn toggle_desktop_lyrics_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<bool> {
-    if let Some(window) = app.get_webview_window(DESKTOP_LYRICS_WINDOW_LABEL) {
-        if window.is_visible()? {
-            window.hide()?;
-            app.emit(DESKTOP_LYRICS_VISIBILITY_EVENT, false)?;
-            return Ok(false);
-        } else {
-            window.show()?;
-            window.unminimize()?;
-            app.emit(DESKTOP_LYRICS_VISIBILITY_EVENT, true)?;
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 #[tauri::command]
 pub fn show_main_window(app: AppHandle) -> Result<(), String> {
     reveal_main_window(&app).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn show_desktop_lyrics(app: AppHandle) -> Result<bool, String> {
-    show_desktop_lyrics_window(&app).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn toggle_desktop_lyrics(app: AppHandle) -> Result<bool, String> {
-    toggle_desktop_lyrics_window(&app).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn hide_desktop_lyrics(app: AppHandle) -> Result<bool, String> {
-    hide_desktop_lyrics_window(&app).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -273,7 +209,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn dock_reopen_reveals_main_window_even_when_an_auxiliary_window_is_visible() {
+    fn dock_reopen_always_reveals_main_window() {
         assert!(should_reveal_main_window_on_reopen(false));
         assert!(should_reveal_main_window_on_reopen(true));
     }

@@ -42,9 +42,6 @@ pub fn run() {
             plex::scrobble,
             plex::set_close_behavior,
             window::show_main_window,
-            window::show_desktop_lyrics,
-            window::toggle_desktop_lyrics,
-            window::hide_desktop_lyrics,
             window::quit_app,
             window::acknowledge_quit,
         ])
