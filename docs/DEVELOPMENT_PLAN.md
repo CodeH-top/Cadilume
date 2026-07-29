@@ -113,7 +113,7 @@
 
 - 方案：主应用根节点全局设置 `user-select: none` 与 `-webkit-user-select: none`；仅对 `input`、`textarea`、`[contenteditable]` 和明确需要复制的诊断详情恢复 `user-select: text`，不使用 JavaScript 拦截选择事件。
 - 验收：常规文本、卡片和播放器文案不可拖选；搜索框等编辑控件仍可放置光标、选择文字及使用复制/粘贴快捷键；键盘焦点不受影响。
-- 状态：待实现。
+- 状态：已完成纯 CSS 全局禁选与编辑/诊断例外，并通过深浅主题最小尺寸、输入选区和诊断详情实测。
 
 ### UI-003：循环/随机按钮选中态在 hover 时丢失
 
@@ -334,3 +334,13 @@
 - 居中与状态实测：播放态图标 transform 为 `translateX(1px)`，切换暂停后为 `none`；按钮切换前后均为 `(463.99,568.5)–(495.99,600.5)`，坐标和尺寸漂移为 0。浏览器实际焦点后出现 2px outline 和双层 focus 阴影；CSSOM 确认 hover、active、focus-visible、disabled 规则均已加载。
 - 稳定性：底栏保持 `y=548`，无横向溢出，干净标签页 warning/error 为 0。
 - 结论：PLAY-003 通过，可以进入 UI-002 全局禁止文本选择。
+
+### 2026-07-29 — UI-002：全局禁止普通文本选择
+
+- 实现：在 `#root` 同时设置标准与 WebKit `user-select:none`；只为 `input`、`textarea`、可编辑的 `[contenteditable]` 和 `.playback-alert-details code` 恢复 `user-select:text`。没有添加 `selectstart`、mousedown 或其他 JavaScript 事件拦截。
+- 自动验证：`pnpm check` 通过；`pnpm test` 8 个文件、73 项测试通过；`pnpm build` 与 `git diff --check` 通过。
+- Web UI：只使用 Codex 内部浏览器，新建标签并固定 `960×640`。根节点、主页标题、媒体卡片文字和底栏曲目文字的 computed `user-select` 均为 `none`；搜索输入为 `text`。
+- 编辑实测：搜索框输入“Cadilume 选择测试”后使用 `Meta+A`，实际 `selectionStart=0`、`selectionEnd=13` 且焦点仍在输入框，证明键盘选择和编辑未被全局规则破坏。
+- 诊断例外：在开发播放失败预览中展开诊断，提醒标题为 `user-select:none`，技术详情 `<code>` 为 `user-select:text`；提醒宽 640px，仍位于最小窗口内。
+- 双主题与稳定性：浅色、深色均确认根节点为 `none`、搜索框为 `text`，底栏保持 `y=548`，无横向溢出；两个干净标签页 warning/error 为 0。
+- 结论：UI-002 通过，可以进入 UI-004 媒体卡片 hover 与阴影。
