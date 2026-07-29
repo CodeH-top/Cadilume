@@ -20,6 +20,12 @@ export interface LyricsDocument {
   by?: string;
 }
 
+export function hasDisplayableLyrics(document?: LyricsDocument): boolean {
+  return document?.lines.some((line) => (
+    !line.clear && line.texts.some((text) => text.trim().length > 0)
+  )) === true;
+}
+
 const LRC_TIME = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
 
 export function parseLyrics(source: string, formatHint?: string): LyricsDocument {
@@ -93,12 +99,13 @@ export function normalizePlexLyrics(payload: PlexLyricsPayload, durationMs?: num
 
   const grouped = new Map<number, { texts: string[]; endMs: number | null }>();
   for (const line of timedSource) {
-    const startMs = Math.max(0, Math.round(line.startMs as number));
+    const startMs = normalizePlexOffset(line.startMs as number);
     const current = grouped.get(startMs) || { texts: [], endMs: null };
     const text = line.text.trim();
     if (text && !current.texts.includes(text)) current.texts.push(text);
-    if (Number.isFinite(line.endMs) && (line.endMs as number) > startMs) {
-      current.endMs = Math.max(current.endMs || 0, Math.round(line.endMs as number));
+    if (Number.isFinite(line.endMs)) {
+      const endMs = normalizePlexOffset(line.endMs as number);
+      if (endMs > startMs) current.endMs = Math.max(current.endMs || 0, endMs);
     }
     grouped.set(startMs, current);
   }
@@ -126,6 +133,10 @@ export function normalizePlexLyrics(payload: PlexLyricsPayload, durationMs?: num
     author: payload.author,
     by: payload.by,
   };
+}
+
+function normalizePlexOffset(value: number): number {
+  return Math.max(0, Math.round(value));
 }
 
 function detectFormat(source: string, hint?: string): LyricFormat {

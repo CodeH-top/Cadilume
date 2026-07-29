@@ -26,6 +26,7 @@ Rust / Tauri
 - Plex PIN 原始响应只在 Rust 中解析。`poll_pin` 将 `authToken` 写入 macOS Keychain 或 Windows Credential Manager 后，IPC 只返回 `id`、`code`、`expiresIn` 和 `authenticated`；React / WebView 不接收账号 token。
 - `/api/v2/resources` 返回的每台服务器专属 `accessToken` 仅保存在 Rust 状态中；`owned:false` 家庭/共享服务器使用它自己的 token，不错误复用账号 token。
 - Section 列表只接受 `type=artist`，因此 UI 只暴露 Plex 的音乐类型资料库；电影、剧集和照片库不会进入导航或查询链路。
+- 歌手与专辑使用 PMS `sort=titleSort:asc`，以 500 项容器分页读取到 `MediaContainer.totalSize`；React 保留 `titleSort` 并只生成 A–Z/# 导航分组，组内不再进行 locale 排序。曲目页维持单页有界读取。
 - 服务器和 Music Section 只在设置页选择；侧栏不重复放置来源选择器，而是在主导航与账号卡之间常驻当前账号可读的音频歌单。
 - PMS 数据请求只允许预定义的库、搜索、歌单和播放状态等路径，并尝试已发现的本地、远程直连或 Relay 连接。
 - 客户端列出普通、智能和只读音频歌单，并通过固定的 `/playlists/{id}/items` 路径读取曲目；智能歌单每次打开都重新读取 PMS 当前结果。只有普通且非只读歌单进入写入选择器，并通过 `PUT /playlists/{playlistId}/items` 添加曲目。写入仍由 PMS 检查 ACL；共享账号权限不足时 UI 给出提示，不会伪装写入成功。
@@ -103,11 +104,11 @@ HTMLAudioElement
 
 ## 歌词界面
 
-- Rust 从曲目 metadata 中寻找歌词流，使用每台服务器 token 拉取并解析 Plex JSON/XML 响应或返回原始歌词文本。
-- React 继续解析 LRC、SRT、VTT 与纯文本并归一成时间轴；播放进度更新 active 行，歌词面板自动滚动，用户可点击有时间戳的行 Seek。
-- 无时间轴的纯文本歌词可阅读，但不会伪造自动步进。
-- 底栏歌词按钮直接切换主窗口右侧歌词栏；右栏拥有独立滚动容器，切歌时复位，不会带动主内容或播放器骨架滚动。
-- 底部播放栏可向上展开完整播放器：“黑胶 + 专辑封面 + 滚动歌词”与“全屏专辑背景 + 歌词”两种模式可切换并记忆，歌词行可点击 Seek。
+- Rust 按 PMS metadata 中 `Part.Stream` 的原始顺序寻找歌词流，使用每台服务器 token 拉取并解析 Plex JSON/XML 响应或返回原始歌词文本；首条失败时再按服务器顺序尝试下一条，不在客户端重排 provider。
+- React 继续解析 LRC、SRT、VTT 与纯文本并归一成时间轴；PMS `startOffset/endOffset` 的毫秒边界不取整到秒。播放期间以活动 Audio 的 `currentTime` 约每 50ms 发布一次进度，并保留 `timeupdate` 兜底，不加入固定正负 delay。
+- 无时间轴的纯文本歌词可阅读但不会伪造自动步进；确认没有非空歌词行时禁用底栏歌词按钮。切歌通过服务器与 rating key 隔离异步结果，不会短暂显示上一首歌词。
+- 底栏歌词按钮直接切换主窗口右侧歌词栏；右栏拥有独立滚动容器，切歌时复位，不会带动主内容或播放器骨架滚动；切到无歌词曲目后自动收起。
+- 底部播放栏可向上展开“黑胶”或“封面”完整播放器；展开层专注封面与播放控制，不重复渲染右侧歌词。
 - 当前不创建独立桌面歌词窗口，也不在托盘/菜单栏保留桌面歌词入口。
 
 ## 封面缓存
@@ -136,7 +137,7 @@ HTMLAudioElement
 - 主窗口保留系统原生装饰，默认尺寸和最小尺寸都固定为 `1280×820`，不允许继续缩小。
 - 关闭行为持久化为 `tray` 或 `quit`；`tray` 模式拦截关闭并隐藏主窗口，`quit` 模式进入统一的原生退出流程。macOS 的 Dock Reopen 事件与托盘/菜单栏“显示 Cadilume”都会显示、取消最小化并聚焦主窗口。
 - 从窗口关闭或托盘/菜单栏退出时，Rust 先向主窗口发送 `app://before-exit`；React 立即刷新播放会话并回送确认，Rust 在收到确认或 750 ms 超时后结束进程。
-- macOS 菜单栏 / Windows 通知区域菜单提供显示主窗口、播放/暂停和退出。设置页只配置关闭行为并提供危险色“退出账号”，不再重复提供退出应用按钮。
+- macOS 菜单栏使用独立的透明单色 18pt@2x Template 图标，由系统适配浅/深外观；Windows 通知区域继续使用应用默认图标。两端菜单提供显示主窗口、播放/暂停和退出；设置页只配置关闭行为并提供危险色“退出账号”，不再重复提供退出应用按钮。
 - 主侧栏按“品牌与主导航 → 独立滚动的歌单区 → 固定账号卡”组织；歌单滚动不会移动主导航、账号卡或固定播放器。
 - 主题支持跟随系统、浅色和深色，并通过共享 CSS token 保持同一信息层级。
 

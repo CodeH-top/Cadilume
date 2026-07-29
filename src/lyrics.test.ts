@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findActiveLyricIndex, normalizePlexLyrics, parseLyrics } from "./lyrics";
+import { findActiveLyricIndex, hasDisplayableLyrics, normalizePlexLyrics, parseLyrics } from "./lyrics";
 
 describe("lyrics parser", () => {
   it("parses LRC fractions, multiple timestamps and offset", () => {
@@ -36,6 +36,13 @@ describe("lyrics parser", () => {
     expect(document.lines[1].clear).toBe(true);
   });
 
+  it("only enables the lyrics surface when at least one visible line exists", () => {
+    expect(hasDisplayableLyrics()).toBe(false);
+    expect(hasDisplayableLyrics(parseLyrics(""))).toBe(false);
+    expect(hasDisplayableLyrics(parseLyrics("\n\n"))).toBe(false);
+    expect(hasDisplayableLyrics(parseLyrics("Verse one\n\nVerse two"))).toBe(true);
+  });
+
   it("applies a user delay without clamping the query", () => {
     const document = parseLyrics("[00:01.00]Line");
     expect(findActiveLyricIndex(document.lines, 1200, 500)).toBe(-1);
@@ -57,6 +64,23 @@ describe("lyrics parser", () => {
     expect(document.lines).toHaveLength(2);
     expect(document.lines[0]).toMatchObject({ startMs: 1000, endMs: 3000, texts: ["Original", "翻译"] });
     expect(document.lines[1].endMs).toBe(5000);
+  });
+
+  it("preserves PMS millisecond boundaries instead of delaying them to a whole second", () => {
+    const document = normalizePlexLyrics({
+      timed: true,
+      lines: [
+        { startMs: 31_220, endMs: 34_550, text: "原来对你的依赖" },
+        { startMs: 34_550, endMs: 38_780, text: "是隐形的伤口" },
+      ],
+    });
+
+    expect(document.lines.map((line) => [line.startMs, line.endMs])).toEqual([
+      [31_220, 34_550],
+      [34_550, 38_780],
+    ]);
+    expect(findActiveLyricIndex(document.lines, 34_549)).toBe(0);
+    expect(findActiveLyricIndex(document.lines, 34_550)).toBe(1);
   });
 
   it("keeps untimed Plex lyrics as ordinary text", () => {

@@ -120,24 +120,26 @@ export interface LyricsScrollMetrics {
 }
 
 /**
- * Calculate the scroll position that centers one lyric inside its own list.
- * `targetTop` is measured from the list's visible top edge, so this helper does
- * not depend on the target's offsetParent and never needs to scroll an ancestor.
+ * Match Plex Web's stable reading position: keep the list still while any part
+ * of the active line remains visible, then move an offscreen line to the top.
+ * `targetTop` is measured from the list's visible top edge.
  */
-export function getCenteredLyricsScrollTop({
+export function getPlexLyricsScrollTop({
   scrollTop,
   viewportHeight,
   contentHeight,
   targetTop,
   targetHeight,
 }: LyricsScrollMetrics): number {
-  const current = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
   const viewport = Number.isFinite(viewportHeight) ? Math.max(0, viewportHeight) : 0;
   const content = Number.isFinite(contentHeight) ? Math.max(viewport, contentHeight) : viewport;
+  const maximum = Math.max(0, content - viewport);
+  const current = Number.isFinite(scrollTop) ? Math.min(maximum, Math.max(0, scrollTop)) : 0;
   const offset = Number.isFinite(targetTop) ? targetTop : 0;
   const height = Number.isFinite(targetHeight) ? Math.max(0, targetHeight) : 0;
-  const centered = current + offset + (height / 2) - (viewport / 2);
-  return Math.min(Math.max(0, content - viewport), Math.max(0, centered));
+  if (height > 0 && offset + height > 0 && offset < viewport) return current;
+  const alignedTop = current + offset;
+  return Math.min(maximum, Math.max(0, alignedTop));
 }
 
 function clampUnit(value: number): number {

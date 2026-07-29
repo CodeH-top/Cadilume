@@ -13,6 +13,7 @@ export const PLAYBACK_SESSION_VERSION = 1 as const;
 export const PLAYBACK_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const PLAYBACK_SESSION_MAX_QUEUE = 500;
 const PLAYBACK_SESSION_WRITE_THROTTLE_MS = 5_000;
+const PLAYBACK_CLOCK_PUBLISH_INTERVAL_MS = 50;
 
 const STREAM_QUALITY_VALUES: readonly StreamQuality[] = ["auto", "original", "320", "256", "192"];
 
@@ -1582,6 +1583,27 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   useEffect(() => {
     endedRef.current = () => { void advance(true); };
   }, [advance]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime() || !playing || currentIndex < 0) return;
+    let animationFrame = 0;
+    let lastPublishedAt = Number.NEGATIVE_INFINITY;
+    const publishPlaybackClock = (timestamp: number) => {
+      const pool = audioPoolRef.current;
+      const audio = pool?.active;
+      if (audio && pool?.isActive(audio) && timestamp - lastPublishedAt >= PLAYBACK_CLOCK_PUBLISH_INTERVAL_MS) {
+        lastPublishedAt = timestamp;
+        const nextProgress = audio.currentTime;
+        if (Number.isFinite(nextProgress) && Math.abs(nextProgress - progressRef.current) >= 0.01) {
+          progressRef.current = nextProgress;
+          setProgress(nextProgress);
+        }
+      }
+      animationFrame = window.requestAnimationFrame(publishPlaybackClock);
+    };
+    animationFrame = window.requestAnimationFrame(publishPlaybackClock);
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [currentIndex, playing]);
 
   useEffect(() => {
     audioPoolRef.current?.setGain(volume, muted);

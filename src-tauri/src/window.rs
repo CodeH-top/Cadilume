@@ -19,6 +19,14 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const APP_BEFORE_EXIT_EVENT: &str = "app://before-exit";
 const EXIT_ACK_TIMEOUT: Duration = Duration::from_millis(750);
 
+#[cfg(target_os = "macos")]
+const MENU_BAR_ICON_BYTES: &[u8] = include_bytes!("../icons/tray-template.png");
+
+#[cfg(target_os = "macos")]
+fn menu_bar_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    tauri::image::Image::from_bytes(MENU_BAR_ICON_BYTES)
+}
+
 #[derive(Default)]
 pub(crate) struct QuitCoordinator {
     exiting: AtomicBool,
@@ -112,6 +120,11 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             _ => {}
         });
 
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.icon(menu_bar_icon()?).icon_as_template(true);
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon().cloned() {
         builder = builder.icon(icon);
     }
@@ -190,7 +203,7 @@ mod tests {
     use super::{main_close_action, MainCloseAction, QuitCoordinator};
 
     #[cfg(target_os = "macos")]
-    use super::should_reveal_main_window_on_reopen;
+    use super::{menu_bar_icon, should_reveal_main_window_on_reopen};
 
     #[test]
     fn main_window_close_behavior_maps_to_an_explicit_process_action() {
@@ -212,5 +225,33 @@ mod tests {
     fn dock_reopen_always_reveals_main_window() {
         assert!(should_reveal_main_window_on_reopen(false));
         assert!(should_reveal_main_window_on_reopen(true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menu_bar_icon_is_a_large_transparent_monochrome_template() {
+        let icon = menu_bar_icon().expect("menu bar template icon should decode");
+        assert_eq!((icon.width(), icon.height()), (36, 36));
+
+        let mut opaque_bounds = (36_u32, 36_u32, 0_u32, 0_u32);
+        let mut opaque_pixels = 0_u32;
+        for (index, pixel) in icon.rgba().chunks_exact(4).enumerate() {
+            if pixel[3] == 0 {
+                continue;
+            }
+            assert_eq!(&pixel[..3], &[0, 0, 0]);
+            let x = index as u32 % icon.width();
+            let y = index as u32 / icon.width();
+            opaque_bounds.0 = opaque_bounds.0.min(x);
+            opaque_bounds.1 = opaque_bounds.1.min(y);
+            opaque_bounds.2 = opaque_bounds.2.max(x);
+            opaque_bounds.3 = opaque_bounds.3.max(y);
+            opaque_pixels += 1;
+        }
+
+        assert!(opaque_pixels > 250);
+        assert!(opaque_bounds.0 <= 3 && opaque_bounds.1 <= 3);
+        assert!(opaque_bounds.2 >= 32 && opaque_bounds.3 >= 32);
+        assert_eq!(icon.rgba()[3], 0);
     }
 }

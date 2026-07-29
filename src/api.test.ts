@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, getPlaylistItems, getPlaylists, pollPin } from "./api";
+import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, getLibraryItems, getPlaylistItems, getPlaylists, pollPin } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -40,6 +40,57 @@ describe("music metadata helpers", () => {
   it("uses Plex parent hierarchy for labels", () => {
     expect(trackArtist(track)).toBe("Artist");
     expect(trackAlbum(track)).toBe("Album");
+  });
+});
+
+describe("Plex library sorting", () => {
+  it("loads every artist/album page in PMS titleSort order and retains titleSort", async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        MediaContainer: {
+          totalSize: 3,
+          Metadata: [
+            { ratingKey: "1", key: "/library/metadata/1", type: "album", title: "The Album", titleSort: "Album" },
+            { ratingKey: "2", key: "/library/metadata/2", type: "album", title: "Bravo", titleSort: "Bravo" },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({
+        MediaContainer: {
+          totalSize: 3,
+          Metadata: [
+            { ratingKey: "3", key: "/library/metadata/3", type: "album", title: "陈列", titleSort: "Chen Lie" },
+          ],
+        },
+      });
+
+    const albums = await getLibraryItems("server-a", "15", 9);
+
+    expect(albums.map(({ ratingKey, titleSort }) => [ratingKey, titleSort])).toEqual([
+      ["1", "Album"],
+      ["2", "Bravo"],
+      ["3", "Chen Lie"],
+    ]);
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "server_get", {
+      serverId: "server-a",
+      path: "/library/sections/15/all",
+      query: {
+        type: "9",
+        sort: "titleSort:asc",
+        "X-Plex-Container-Start": "0",
+        "X-Plex-Container-Size": "500",
+      },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "server_get", {
+      serverId: "server-a",
+      path: "/library/sections/15/all",
+      query: {
+        type: "9",
+        sort: "titleSort:asc",
+        "X-Plex-Container-Start": "2",
+        "X-Plex-Container-Size": "500",
+      },
+    });
   });
 });
 

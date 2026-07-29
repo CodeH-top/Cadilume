@@ -473,14 +473,6 @@ struct LyricStream {
     timed: bool,
 }
 
-impl LyricStream {
-    fn is_local(&self) -> bool {
-        self.provider
-            .as_deref()
-            .is_some_and(|provider| provider.eq_ignore_ascii_case("com.plexapp.agents.localmedia"))
-    }
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlexLyricLine {
@@ -855,7 +847,7 @@ pub async fn lyrics(
         .json::<Value>()
         .await
         .map_err(display_error)?;
-    let streams = prioritize_lyric_streams(lyric_streams_from_metadata(&metadata));
+    let streams = lyric_streams_from_metadata(&metadata);
     if streams.is_empty() {
         return Ok(None);
     }
@@ -1300,21 +1292,6 @@ fn lyric_streams_from_metadata(value: &Value) -> Vec<LyricStream> {
         }
     }
     streams
-}
-
-fn prioritize_lyric_streams(streams: Vec<LyricStream>) -> Vec<LyricStream> {
-    let mut indexed: Vec<(usize, LyricStream)> = streams.into_iter().enumerate().collect();
-    indexed.sort_by_key(|(index, stream)| {
-        let priority = if stream.is_local() {
-            0
-        } else if stream.timed {
-            1
-        } else {
-            2
-        };
-        (priority, *index)
-    });
-    indexed.into_iter().map(|(_, stream)| stream).collect()
 }
 
 fn parse_lyrics_body(
@@ -2129,41 +2106,35 @@ mod tests {
     }
 
     #[test]
-    fn lyric_stream_priority_prefers_local_then_timed_then_original_order() {
-        let streams = vec![
-            LyricStream {
-                key: "/first.txt".to_string(),
-                provider: Some("other".to_string()),
-                timed: false,
-            },
-            LyricStream {
-                key: "/remote-timed.lrc".to_string(),
-                provider: Some("other".to_string()),
-                timed: true,
-            },
-            LyricStream {
-                key: "/local-plain.txt".to_string(),
-                provider: Some("com.plexapp.agents.localmedia".to_string()),
-                timed: false,
-            },
-            LyricStream {
-                key: "/local-timed.lrc".to_string(),
-                provider: Some("com.plexapp.agents.localmedia".to_string()),
-                timed: true,
-            },
-        ];
+    fn lyric_stream_selection_preserves_pms_order() {
+        let metadata = serde_json::json!({
+            "MediaContainer": {
+                "Metadata": [{
+                    "Media": [{
+                        "Part": [{
+                            "Stream": [
+                                { "streamType": 4, "key": "/first.txt", "provider": "other", "timed": false },
+                                { "streamType": 4, "key": "/remote-timed.lrc", "provider": "other", "timed": true },
+                                { "streamType": 4, "key": "/local-plain.txt", "provider": "com.plexapp.agents.localmedia", "timed": false },
+                                { "streamType": 4, "key": "/local-timed.lrc", "provider": "com.plexapp.agents.localmedia", "timed": true }
+                            ]
+                        }]
+                    }]
+                }]
+            }
+        });
 
-        let keys = prioritize_lyric_streams(streams)
+        let keys = lyric_streams_from_metadata(&metadata)
             .into_iter()
             .map(|stream| stream.key)
             .collect::<Vec<_>>();
         assert_eq!(
             keys,
             vec![
+                "/first.txt".to_string(),
+                "/remote-timed.lrc".to_string(),
                 "/local-plain.txt".to_string(),
                 "/local-timed.lrc".to_string(),
-                "/remote-timed.lrc".to_string(),
-                "/first.txt".to_string(),
             ]
         );
     }

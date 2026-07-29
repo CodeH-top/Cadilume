@@ -74,6 +74,7 @@ export const demoAlbums: PlexItem[] = albumNames.map((title, index) => ({
   key: `/library/metadata/album-${index}/children`,
   type: "album",
   title,
+  titleSort: title,
   parentTitle: artistNames[index],
   year: 2026 - index,
   imageUrl: covers[index],
@@ -86,6 +87,7 @@ export const demoArtists: PlexItem[] = artistNames.map((title, index) => ({
   key: `/library/metadata/artist-${index}/children`,
   type: "artist",
   title,
+  titleSort: title,
   imageUrl: covers[index],
   thumb: covers[index],
 }));

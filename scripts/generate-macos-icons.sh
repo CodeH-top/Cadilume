@@ -5,6 +5,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 icons_dir="$project_root/src-tauri/icons"
 source_icon="$icons_dir/app-icon.svg"
+tray_source="$icons_dir/tray-template.svg"
+tray_icon="$icons_dir/tray-template.png"
 layered_icon="$icons_dir/Cadilume.icon"
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/cadilume-icons.XXXXXX")
 iconset_dir="$work_dir/Cadilume.iconset"
@@ -31,6 +33,13 @@ fi
 
 mkdir -p "$iconset_dir" "$compiled_dir"
 cd "$project_root"
+
+# The menu bar uses a separate 18pt macOS template image. Keep its canvas
+# transparent and render at 2x so AppKit can tint the glyph for either menu bar
+# appearance without inheriting the full-color application icon background.
+sips -s format png -z 36 36 "$tray_source" --out "$tray_icon" >/dev/null
+test "$(sips -g pixelWidth "$tray_icon" | awk '/pixelWidth/ {print $2}')" = "36"
+test "$(sips -g pixelHeight "$tray_icon" | awk '/pixelHeight/ {print $2}')" = "36"
 
 # Generate the Windows and legacy raster assets directly from the SVG master.
 pnpm tauri icon "$source_icon" --output "$icons_dir"
@@ -85,4 +94,4 @@ test "$(plutil -extract CFBundleIconName raw "$partial_plist")" = "Cadilume"
 
 cp "$compiled_dir/Assets.car" "$icons_dir/Assets.car"
 
-echo "Cadilume icons generated from SVG, including the native macOS layered asset."
+echo "Cadilume icons generated from SVG, including the macOS template and layered assets."

@@ -154,14 +154,30 @@ export async function getLibraryItems(serverId: string, sectionKey: string, type
   if (!isDesktopRuntime()) {
     return type === 8 ? demoArtists : type === 9 ? demoAlbums : demoTracks;
   }
-  const query: Record<string, string> = {
-    type: String(type),
-    sort: type === 10 ? "titleSort:asc" : "titleSort:asc",
-    "X-Plex-Container-Start": "0",
-    "X-Plex-Container-Size": type === 10 ? "500" : "120",
-  };
-  const response = await serverGet(serverId, `/library/sections/${sectionKey}/all`, query);
-  return metadata(response);
+  const pageSize = 500;
+  const loadCompleteIndex = type === 8 || type === 9;
+  const items: PlexItem[] = [];
+  let start = 0;
+  let totalSize: number | undefined;
+
+  for (let page = 0; page < 100; page += 1) {
+    const response = await serverGet(serverId, `/library/sections/${sectionKey}/all`, {
+      type: String(type),
+      sort: "titleSort:asc",
+      "X-Plex-Container-Start": String(start),
+      "X-Plex-Container-Size": String(pageSize),
+    });
+    const pageItems = metadata(response);
+    items.push(...pageItems);
+    const root = container(response);
+    totalSize ??= optionalNumber(root.totalSize);
+
+    if (!loadCompleteIndex || !pageItems.length) break;
+    start += pageItems.length;
+    if (totalSize !== undefined ? start >= totalSize : pageItems.length < pageSize) break;
+  }
+
+  return items;
 }
 
 export async function getRecentAlbums(serverId: string, sectionKey: string): Promise<PlexItem[]> {

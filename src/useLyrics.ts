@@ -9,12 +9,15 @@ export function useLyrics(
   playbackSeconds: number,
   durationSeconds: number,
 ) {
+  const sourceKey = serverId && track ? `${serverId}:${track.ratingKey}` : undefined;
   const [document, setDocument] = useState<LyricsDocument>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const [resolvedSourceKey, setResolvedSourceKey] = useState<string>();
 
   useEffect(() => {
     let cancelled = false;
+    setResolvedSourceKey(sourceKey);
     setDocument(undefined);
     setError(undefined);
     if (!serverId || !track) {
@@ -36,12 +39,22 @@ export function useLyrics(
       });
 
     return () => { cancelled = true; };
-  }, [durationSeconds, serverId, track?.duration, track?.ratingKey]);
+  }, [durationSeconds, serverId, sourceKey, track?.duration, track?.ratingKey]);
+
+  const isCurrentSource = resolvedSourceKey === sourceKey;
+  const currentDocument = isCurrentSource ? document : undefined;
+  const currentLoading = isCurrentSource ? loading : Boolean(sourceKey);
+  const currentError = isCurrentSource ? error : undefined;
 
   const activeIndex = useMemo(() => {
-    if (!document?.timed) return -1;
-    return findActiveLyricIndex(document.lines, playbackSeconds * 1000);
-  }, [document, playbackSeconds]);
+    if (!currentDocument?.timed) return -1;
+    return findActiveLyricIndex(currentDocument.lines, playbackSeconds * 1000);
+  }, [currentDocument, playbackSeconds]);
 
-  return { document, activeIndex, loading, error };
+  return {
+    document: currentDocument,
+    activeIndex,
+    loading: currentLoading,
+    error: currentError,
+  };
 }

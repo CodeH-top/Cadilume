@@ -64,6 +64,8 @@ export interface PlexItem {
   key: string;
   type: "artist" | "album" | "track" | string;
   title: string;
+  /** PMS' canonical collation value used by `titleSort:asc`. */
+  titleSort?: string;
   summary?: string;
   thumb?: string;
   art?: string;

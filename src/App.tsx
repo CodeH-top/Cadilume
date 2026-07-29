@@ -64,7 +64,9 @@ import {
 } from "./api";
 import "./App.css";
 import { selectRandomContextPlayback } from "./contextPlayback";
-import { getCenteredLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
+import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
+import { hasDisplayableLyrics } from "./lyrics";
+import { getPlexLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
 import { rangeFillPercent } from "./playerUi";
 import type {
   BootstrapResponse,
@@ -219,9 +221,15 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   };
   const hasCurrentTrack = Boolean(player.current);
   const hasQueue = hasCurrentTrack && player.queue.length > 0;
+  const hasLyrics = hasDisplayableLyrics(nowPlayingLyrics.document);
+  const lyricsUnavailable = hasCurrentTrack
+    && !nowPlayingLyrics.loading
+    && !nowPlayingLyrics.error
+    && !hasLyrics;
+  const canToggleLyrics = hasCurrentTrack && !lyricsUnavailable;
   const expandedPlayerOpen = nowPlayingOpen && hasCurrentTrack;
   const queuePanelOpen = sidePanel === "queue" && hasQueue;
-  const lyricsPanelOpen = sidePanel === "lyrics";
+  const lyricsPanelOpen = sidePanel === "lyrics" && canToggleLyrics;
   const previewPlaybackFailure = import.meta.env.DEV
     && new URLSearchParams(window.location.search).has("playback-error-preview");
   const activePlaybackFailure = player.playbackFailure ?? playbackFailurePreview;
@@ -265,6 +273,11 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     setPlaylistTrack(undefined);
     setSidePanel((value) => value === "queue" || value === "lyrics" ? null : value);
   }, [player.current]);
+
+  useEffect(() => {
+    if (!lyricsUnavailable) return;
+    setSidePanel((value) => value === "lyrics" ? null : value);
+  }, [lyricsUnavailable]);
 
   const changeNowPlayingMode = useCallback((mode: NowPlayingMode) => {
     setNowPlayingMode(mode);
@@ -764,7 +777,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         outputPlatform={outputDevices.platform}
         canOpenNowPlaying={hasCurrentTrack}
         canToggleQueue={hasQueue}
-        canToggleLyrics={hasCurrentTrack}
+        canToggleLyrics={canToggleLyrics}
         onOpenNowPlaying={() => {
           if (!player.current) return;
           setSidePanel(null);
@@ -778,7 +791,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
           setSidePanel((value) => value === "queue" ? null : "queue");
         }}
         onToggleLyrics={() => {
-          if (!player.current) return;
+          if (!canToggleLyrics) return;
           setNowPlayingOpen(false);
           setPlaylistTrack(undefined);
           setSidePanel((value) => value === "lyrics" ? null : "lyrics");
@@ -891,8 +904,8 @@ function ContentView(props: ContentViewProps) {
   if (props.detail) return <DetailView detail={props.detail} onBack={props.onBack} onPlay={props.onPlayDetail} onShuffle={props.onShuffleDetail} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "search") return <SearchResults hubs={props.hubs} query={props.searchText} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "tracks") return <TrackTable title="歌曲" tracks={props.items} onPlay={props.onPlayTrack} />;
-  if (props.view === "artists") return <CardCollection title="艺术家" items={props.items} round onOpen={props.onOpen} />;
-  if (props.view === "albums") return <CardCollection title="专辑" items={props.items} onOpen={props.onOpen} />;
+  if (props.view === "artists") return <CardCollection title="艺术家" items={props.items} round indexed onOpen={props.onOpen} />;
+  if (props.view === "albums") return <CardCollection title="专辑" items={props.items} indexed onOpen={props.onOpen} />;
   return <CardCollection title="最近加入" items={props.items} onOpen={props.onOpen} compact />;
 }
 
@@ -934,22 +947,65 @@ function PlaylistDetailView({ playlist, tracks, loading, error, onBack, onRetry,
   );
 }
 
-function CardCollection({ title, items, round = false, compact = false, onOpen }: { title: string; items: PlexItem[]; round?: boolean; compact?: boolean; onOpen: (item: PlexItem) => void }) {
+function CardCollection({ title, items, round = false, compact = false, indexed = false, onOpen }: { title: string; items: PlexItem[]; round?: boolean; compact?: boolean; indexed?: boolean; onOpen: (item: PlexItem) => void }) {
+  const collectionId = `alphabet-${items[0]?.type || title}`;
+  const alphabetGroups = indexed ? groupPlexItemsByAlphabet(items) : [];
+  const availableBuckets = new Set(alphabetGroups.map(({ bucket }) => bucket));
+  const bucketId = (bucket: PlexAlphabetBucket) => `${collectionId}-${bucket === "#" ? "other" : bucket}`;
+  const jumpToBucket = (bucket: PlexAlphabetBucket) => {
+    const target = document.getElementById(bucketId(bucket));
+    if (!target) return;
+    target.scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+  };
+
   return (
     <section className="collection-section">
       <div className="section-heading"><h1>{title}</h1></div>
       {items.length ? (
-        <div className={`card-grid ${compact ? "compact" : ""}`}>
-          {items.map((item) => (
-            <button className="media-card" key={item.ratingKey} onClick={() => onOpen(item)}>
-              <Artwork item={item} className={round ? "round" : ""} size="large" />
-              <strong>{item.title}</strong>
-              <small>{item.parentTitle || (item.type === "artist" ? "艺术家" : item.year || "专辑")}</small>
-            </button>
-          ))}
-        </div>
+        indexed ? (
+          <div className="indexed-collection-layout">
+            <div className="alphabet-groups">
+              {alphabetGroups.map(({ bucket, items: bucketItems }) => (
+                <section className="alphabet-group" id={bucketId(bucket)} key={bucket} aria-labelledby={`${bucketId(bucket)}-heading`}>
+                  <h2 id={`${bucketId(bucket)}-heading`}>{bucket}</h2>
+                  <MediaCardGrid items={bucketItems} round={round} compact={compact} onOpen={onOpen} />
+                </section>
+              ))}
+            </div>
+            <nav className="alphabet-index" aria-label={`${title}首字母索引`}>
+              {PLEX_ALPHABET_INDEX.map((bucket) => (
+                <button
+                  type="button"
+                  key={bucket}
+                  disabled={!availableBuckets.has(bucket)}
+                  aria-label={`跳到 ${bucket}`}
+                  onClick={() => jumpToBucket(bucket)}
+                >
+                  {bucket}
+                </button>
+              ))}
+            </nav>
+          </div>
+        ) : <MediaCardGrid items={items} round={round} compact={compact} onOpen={onOpen} />
       ) : <EmptyState title={`没有${title}`} description="当前资料库没有返回可显示的内容。" />}
     </section>
+  );
+}
+
+function MediaCardGrid({ items, round, compact, onOpen }: { items: PlexItem[]; round: boolean; compact: boolean; onOpen: (item: PlexItem) => void }) {
+  return (
+    <div className={`card-grid ${compact ? "compact" : ""}`}>
+      {items.map((item) => (
+        <button className="media-card" key={item.ratingKey} onClick={() => onOpen(item)}>
+          <Artwork item={item} className={round ? "round" : ""} size="large" />
+          <strong>{item.title}</strong>
+          <small>{item.parentTitle || (item.type === "artist" ? "艺术家" : item.year || "专辑")}</small>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -1121,14 +1177,16 @@ function LyricsPanel({ track, lyrics, onSeek }: {
     if (!node || typeof list.scrollTo !== "function") return;
     const listRect = list.getBoundingClientRect();
     const nodeRect = node.getBoundingClientRect();
+    const nextScrollTop = getPlexLyricsScrollTop({
+      scrollTop: list.scrollTop,
+      viewportHeight: list.clientHeight,
+      contentHeight: list.scrollHeight,
+      targetTop: nodeRect.top - listRect.top,
+      targetHeight: nodeRect.height,
+    });
+    if (Math.abs(nextScrollTop - list.scrollTop) < 0.5) return;
     list.scrollTo({
-      top: getCenteredLyricsScrollTop({
-        scrollTop: list.scrollTop,
-        viewportHeight: list.clientHeight,
-        contentHeight: list.scrollHeight,
-        targetTop: nodeRect.top - listRect.top,
-        targetHeight: nodeRect.height,
-      }),
+      top: nextScrollTop,
       behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
     });
   }, [activeIndex, lines, lyrics.document?.timed, trackIdentity]);
@@ -1417,7 +1475,14 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOp
         <div className="progress-row"><span>{formatDuration(player.progress * 1000)}</span><input aria-label="播放进度" type="range" min="0" max={Math.max(1, player.duration)} step="1" value={Math.min(player.progress, player.duration || 0)} style={{ "--range-progress": `${progressFill}%` } as CSSProperties} onChange={(event) => player.seek(Number(event.target.value))} /><span>{formatDuration(player.duration * 1000)}</span></div>
       </div>
       <div className="player-extras">
-        <IconButton label={lyricsOpen ? "关闭歌词" : "打开歌词"} active={lyricsOpen} disabled={!canToggleLyrics} onClick={onToggleLyrics}><Captions size={19} /></IconButton>
+        <IconButton
+          label={lyricsOpen ? "关闭歌词" : canToggleLyrics ? "打开歌词" : canOpenNowPlaying ? "这首歌暂无歌词" : "请先播放歌曲"}
+          active={lyricsOpen}
+          disabled={!canToggleLyrics}
+          onClick={onToggleLyrics}
+        >
+          <Captions size={19} />
+        </IconButton>
         <IconButton label="播放队列" active={queueOpen} disabled={!canToggleQueue} onClick={onToggleQueue}><ListMusic size={19} /></IconButton>
         <IconButton label={outputPlatform === "macos" ? "选择 AirPlay 设备" : "播放设备"} active={outputPlatform === "macos" ? player.airPlayActive : devicesOpen} onClick={onOutputAction}>{outputPlatform === "macos" ? <Airplay size={19} /> : <Speaker size={18} />}</IconButton>
         <div className="volume-control">
