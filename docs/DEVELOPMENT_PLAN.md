@@ -400,3 +400,12 @@
 - 稳定性：干净标签控制台 warning/error 为 `[]`，内部浏览器临时 viewport 已恢复并清理测试标签。
 - 文案复测：更新设置说明后再次通过 `pnpm check`、80 项前端测试与 `pnpm build`；内部浏览器 `960×640` 实测说明为 12px、质量选择框宽 224px 且文案完整，无横向溢出，控制台 warning/error 为 `[]`。
 - 状态：DOC-001 及本轮全量回归通过，可以提交。
+
+### 2026-07-29 — PKG-001：重新构建 macOS DMG
+
+- 用户授权：本轮明确要求构建新 DMG，因此执行 `pnpm bundle:macos:dmg`；项目版本保持当前 `0.1.1`，不在未指定新版本号时擅自修改版本。
+- 首次失败与处理：默认 `src-tauri/target` 仍缓存仓库改名前的 `/Users/hoganchou/Documents/Work/Project/AI/plex-music` 绝对路径，Tauri build script 读取旧 permissions 输出失败。确认目标目录仅含可再生编译产物后，执行 `cargo clean --manifest-path src-tauri/Cargo.toml` 清理 38,020 个文件、12.6 GiB，再次打包成功。
+- 制品：`src-tauri/target/release/bundle/dmg/Cadilume_0.1.1_aarch64.dmg`，大小 6,520,406 bytes，SHA-256 为 `84e7fd27a02143ae1ce558243489ff1934bbfe48804e5ea8db2cd08fd636afba`；`hdiutil verify` 判定镜像 checksum 有效。
+- 包内验证：以只读、不可浏览方式临时挂载后，`codesign --verify --deep --strict` 通过；Bundle ID=`top.codeh.cadilume`，短版本/构建版本均为 `0.1.1`，架构为 `arm64`，签名为 ad-hoc。`Assets.car` 存在；应用图标和 DMG volume icon 的 1024×1024 Retina 槽 hash 相同。
+- 清理验证：卸载镜像并移除临时验证目录后，项目内 `find`、项目范围 Spotlight 查询以及 Tauri bundle 目录均未发现 `Cadilume.app`；只保留 DMG。当前包未 notarize，属于本机验收包，不宣称公开分发的 Gatekeeper 信任链。
+- 状态：DMG 构建、验证和 `.app` 清理全部完成。
