@@ -792,7 +792,23 @@ pub async fn get_playlists(
     // lost when the client ignores directory rows. PMS still enforces every
     // shared-server read and write permission attached to that token.
     state
-        .server_response(&server_id, "/playlists", &regular_audio_playlist_query())
+        .server_response(&server_id, "/playlists", &audio_playlist_query())
+        .await
+        .map_err(display_error)?
+        .json::<Value>()
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
+pub async fn get_playlist_items(
+    server_id: String,
+    playlist_id: String,
+    state: State<'_, PlexState>,
+) -> Result<Value, String> {
+    let path = playlist_items_path(&playlist_id).map_err(display_error)?;
+    state
+        .server_response(&server_id, &path, &HashMap::new())
         .await
         .map_err(display_error)?
         .json::<Value>()
@@ -807,11 +823,8 @@ pub async fn add_to_playlist(
     rating_key: String,
     state: State<'_, PlexState>,
 ) -> Result<(), String> {
-    if !valid_plex_identifier(&playlist_id) {
-        return Err("无效的 Plex 歌单标识".to_string());
-    }
     let uri = playlist_item_uri(&server_id, &rating_key).map_err(display_error)?;
-    let path = format!("/playlists/{playlist_id}/items");
+    let path = playlist_items_path(&playlist_id).map_err(display_error)?;
     let query = HashMap::from([("uri".to_string(), uri)]);
     state
         .server_request_response(&server_id, Method::PUT, &path, &query)
@@ -1904,12 +1917,18 @@ fn allowed_server_path(path: &str) -> bool {
             || path.starts_with("/:/"))
 }
 
-fn regular_audio_playlist_query() -> HashMap<String, String> {
+fn audio_playlist_query() -> HashMap<String, String> {
     HashMap::from([
         ("type".to_string(), "15".to_string()),
         ("playlistType".to_string(), "audio".to_string()),
-        ("smart".to_string(), "0".to_string()),
     ])
+}
+
+fn playlist_items_path(playlist_id: &str) -> Result<String> {
+    if !valid_plex_identifier(playlist_id) {
+        return Err(anyhow!("无效的 Plex 歌单标识"));
+    }
+    Ok(format!("/playlists/{playlist_id}/items"))
 }
 
 fn playlist_item_uri(server_id: &str, rating_key: &str) -> Result<String> {
@@ -1992,13 +2011,25 @@ mod tests {
     }
 
     #[test]
-    fn account_playlist_query_is_flat_audio_and_non_smart() {
-        let query = regular_audio_playlist_query();
+    fn account_playlist_query_is_flat_and_includes_all_audio_playlists() {
+        let query = audio_playlist_query();
 
-        assert_eq!(query.len(), 3);
+        assert_eq!(query.len(), 2);
         assert_eq!(query.get("type").map(String::as_str), Some("15"));
         assert_eq!(query.get("playlistType").map(String::as_str), Some("audio"));
-        assert_eq!(query.get("smart").map(String::as_str), Some("0"));
+        assert!(!query.contains_key("smart"));
+    }
+
+    #[test]
+    fn playlist_items_path_accepts_only_clean_identifiers() {
+        assert_eq!(
+            playlist_items_path("playlist_A-42").unwrap(),
+            "/playlists/playlist_A-42/items"
+        );
+        for invalid in ["", "../42", "42/items", "42?x=1", "42#items", "42 items"] {
+            assert!(playlist_items_path(invalid).is_err());
+        }
+        assert!(playlist_items_path("a".repeat(257).as_str()).is_err());
     }
 
     #[test]

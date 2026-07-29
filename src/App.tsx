@@ -45,6 +45,7 @@ import {
   artworkUrl,
   addTrackToPlaylist,
   bootstrap,
+  canWritePlaylist,
   clearArtworkCache,
   discoverServers,
   getCacheStatus,
@@ -1086,7 +1087,7 @@ function PlaylistPicker({ serverId, track, onClose, onAdded }: {
     setLoading(true);
     setError(undefined);
     void getPlaylists(serverId)
-      .then((result) => { if (!cancelled) setPlaylists(result); })
+      .then((result) => { if (!cancelled) setPlaylists(result.filter(canWritePlaylist)); })
       .catch((reason) => { if (!cancelled) setError(playlistErrorMessage(reason)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };

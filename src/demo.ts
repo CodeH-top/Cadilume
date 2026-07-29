@@ -1,4 +1,4 @@
-import type { BootstrapResponse, LibrarySection, PlexItem, PlexServer } from "./types";
+import type { BootstrapResponse, LibrarySection, PlexItem, PlexPlaylist, PlexServer } from "./types";
 
 const albumNames = ["Night Drive", "Soft Focus", "City After Rain", "In Between", "Northbound", "Quiet Hours"];
 const artistNames = ["The Paper Moons", "Mira Lin", "Coastal Lines", "Sunday Club", "Atlas Park", "June & Harbor"];
@@ -108,3 +108,55 @@ export const demoTracks: PlexItem[] = Array.from({ length: 18 }, (_, index) => {
     Media: [{ audioCodec: index % 2 ? "flac" : "aac", container: index % 2 ? "flac" : "m4a", bitrate: index % 2 ? 941 : 256, Part: [{ key: `/library/parts/${index}/file.${index % 2 ? "flac" : "m4a"}` }] }],
   };
 });
+
+interface DemoPlaylistDefinition {
+  id: string;
+  title: string;
+  summary: string;
+  smart: boolean;
+  readOnly: boolean;
+  trackIndexes: number[];
+}
+
+const demoPlaylistDefinitions: DemoPlaylistDefinition[] = [
+  { id: "playlist-morning", title: "晨间慢醒", summary: "适合清晨的柔和节奏", smart: false, readOnly: false, trackIndexes: [0, 1, 6, 7, 12, 13] },
+  { id: "playlist-commute", title: "通勤路线", summary: "城市移动中的熟悉旋律", smart: false, readOnly: false, trackIndexes: [2, 3, 8, 9, 14, 15] },
+  { id: "playlist-focus", title: "安静专注", summary: "留给工作与阅读的空间", smart: false, readOnly: false, trackIndexes: [4, 5, 10, 11, 16, 17] },
+  { id: "playlist-night", title: "深夜驾驶", summary: "夜色、公路与低亮度灯光", smart: false, readOnly: false, trackIndexes: [0, 3, 6, 9, 12, 15] },
+  { id: "playlist-weekend", title: "周末客厅", summary: "无需跳过的轻松播放顺序", smart: false, readOnly: false, trackIndexes: [1, 4, 7, 10, 13, 16] },
+  { id: "playlist-favorites", title: "长久收藏", summary: "反复回到的私人收藏", smart: false, readOnly: false, trackIndexes: [2, 5, 8, 11, 14, 17] },
+  { id: "playlist-rain", title: "雨天窗边", summary: "适合阴雨天气的温和歌单", smart: false, readOnly: false, trackIndexes: [0, 4, 8, 12, 16] },
+  { id: "playlist-road", title: "远途播放", summary: "为一段更长的旅程准备", smart: false, readOnly: false, trackIndexes: [1, 5, 9, 13, 17] },
+  { id: "playlist-smart-recent", title: "最近加入", summary: "自动收录最近进入媒体库的歌曲", smart: true, readOnly: false, trackIndexes: [12, 13, 14, 15, 16, 17] },
+  { id: "playlist-smart-unheard", title: "还没听过", summary: "自动寻找尚未播放的歌曲", smart: true, readOnly: false, trackIndexes: [6, 7, 8, 9, 10, 11] },
+  { id: "playlist-smart-flac", title: "无损音频", summary: "自动聚合媒体库中的 FLAC", smart: true, readOnly: false, trackIndexes: [1, 3, 5, 7, 9, 11] },
+  { id: "playlist-smart-often", title: "近期常听", summary: "根据最近播放动态更新", smart: true, readOnly: false, trackIndexes: [0, 2, 4, 6, 8, 10] },
+  { id: "playlist-shared-family", title: "家庭共享", summary: "由家庭服务器管理员共享", smart: false, readOnly: true, trackIndexes: [2, 4, 6, 8, 10, 12] },
+  { id: "playlist-shared-friends", title: "朋友的精选", summary: "只读的共享音乐清单", smart: false, readOnly: true, trackIndexes: [3, 5, 7, 9, 11, 13] },
+  { id: "playlist-shared-archive", title: "旧日存档", summary: "来自共享服务器的只读存档", smart: false, readOnly: true, trackIndexes: [0, 5, 10, 15] },
+];
+
+export const demoPlaylists: PlexPlaylist[] = demoPlaylistDefinitions.map((definition, index) => {
+  const items = definition.trackIndexes.map((trackIndex) => demoTracks[trackIndex]);
+  return {
+    ratingKey: definition.id,
+    key: `/playlists/${definition.id}/items`,
+    type: "playlist",
+    title: definition.title,
+    summary: definition.summary,
+    playlistType: "audio",
+    smart: definition.smart,
+    readOnly: definition.readOnly,
+    composite: covers[index % covers.length],
+    leafCount: items.length,
+    duration: items.reduce((total, track) => total + (track.duration ?? 0), 0),
+    addedAt: Date.now() / 1000 - index * 43_200,
+  };
+});
+
+export const demoPlaylistItems: Readonly<Record<string, PlexItem[]>> = Object.fromEntries(
+  demoPlaylistDefinitions.map((definition) => [
+    definition.id,
+    definition.trackIndexes.map((trackIndex) => demoTracks[trackIndex]),
+  ]),
+);

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { demoAlbums, demoArtists, demoBootstrap, demoSections, demoServers, demoTracks } from "./demo";
+import { demoAlbums, demoArtists, demoBootstrap, demoPlaylistItems, demoPlaylists, demoSections, demoServers, demoTracks } from "./demo";
 import type { BootstrapResponse, CacheStatus, CloseBehavior, LibrarySection, PlexHub, PlexItem, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
 
 const artworkQueue: Array<() => void> = [];
@@ -66,15 +66,24 @@ function optionalBooleanFlag(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function normalizedBooleanFlag(value: unknown): boolean | undefined {
+  return value === undefined ? false : optionalBooleanFlag(value);
+}
+
+function isCleanPlexIdentifier(value: string): boolean {
+  return value.length > 0 && value.length <= 256 && /^[A-Za-z0-9_-]+$/.test(value);
+}
+
 function normalizePlaylist(value: Record<string, unknown>): PlexPlaylist | undefined {
   const ratingKey = optionalString(value.ratingKey);
   const title = optionalString(value.title);
-  if (!ratingKey || !title) return undefined;
+  if (!ratingKey || !isCleanPlexIdentifier(ratingKey) || !title) return undefined;
   const playlistType = optionalString(value.playlistType)?.toLowerCase();
   if (!playlistType) return undefined;
   const type = (optionalString(value.type) || "playlist").toLowerCase();
-  const smart = optionalBooleanFlag(value.smart);
-  if (type !== "playlist" || smart === undefined) return undefined;
+  const smart = normalizedBooleanFlag(value.smart);
+  const readOnly = normalizedBooleanFlag(value.readOnly);
+  if (type !== "playlist" || smart === undefined || readOnly === undefined) return undefined;
   return {
     ratingKey,
     key: optionalString(value.key) || `/playlists/${ratingKey}/items`,
@@ -83,7 +92,7 @@ function normalizePlaylist(value: Record<string, unknown>): PlexPlaylist | undef
     summary: optionalString(value.summary),
     playlistType,
     smart,
-    readOnly: optionalBooleanFlag(value.readOnly) ?? false,
+    readOnly,
     thumb: optionalString(value.thumb),
     art: optionalString(value.art),
     composite: optionalString(value.composite),
@@ -166,23 +175,34 @@ export async function getRecentAlbums(serverId: string, sectionKey: string): Pro
   return metadata(response);
 }
 
-/**
- * Return writable regular audio playlists associated with the account behind
- * the selected server token. Rust requests a flat `type=15` list so playlists
- * nested under PMS playlist folders remain visible; this mapper still rejects
- * smart, read-only, and malformed rows before they can become write targets.
- */
+/** Return all readable audio playlists visible to the selected server token. */
 export async function getPlaylists(serverId: string): Promise<PlexPlaylist[]> {
-  if (!isDesktopRuntime()) return [];
+  if (!isDesktopRuntime()) return [...demoPlaylists];
   const response = await invoke<unknown>("get_playlists", { serverId });
   return playlistRecords(response)
     .map(normalizePlaylist)
     .filter((playlist): playlist is PlexPlaylist => (
       playlist !== undefined
       && playlist.playlistType === "audio"
-      && !playlist.smart
-      && !playlist.readOnly
     ));
+}
+
+/** PMS remains authoritative, but smart and read-only playlists are never write targets. */
+export function canWritePlaylist(playlist: PlexPlaylist): boolean {
+  return playlist.type === "playlist"
+    && playlist.playlistType === "audio"
+    && !playlist.smart
+    && !playlist.readOnly;
+}
+
+/** Read a playlist by its clean identifier instead of trusting the server-supplied `key`. */
+export async function getPlaylistItems(serverId: string, playlistId: string): Promise<PlexItem[]> {
+  if (!isCleanPlexIdentifier(serverId) || !isCleanPlexIdentifier(playlistId)) {
+    throw new Error("无效的 Plex 歌单标识");
+  }
+  if (!isDesktopRuntime()) return [...(demoPlaylistItems[playlistId] ?? [])];
+  const response = await invoke<unknown>("get_playlist_items", { serverId, playlistId });
+  return metadata(response).filter((item) => item?.type === "track");
 }
 
 export async function getChildren(serverId: string, ratingKey: string): Promise<PlexItem[]> {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, createPin, getPlaylists, pollPin } from "./api";
+import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, getPlaylistItems, getPlaylists, pollPin } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -44,7 +44,7 @@ describe("music metadata helpers", () => {
 });
 
 describe("Plex audio playlists", () => {
-  it("keeps only writable regular audio playlists from the account-scoped response", async () => {
+  it("normalizes boolean variants and keeps all readable audio playlists", async () => {
     invokeMock.mockResolvedValueOnce({
       MediaContainer: {
         Metadata: [
@@ -55,6 +55,7 @@ describe("Plex audio playlists", () => {
             title: "通勤音乐",
             playlistType: "audio",
             smart: "0",
+            readOnly: false,
             leafCount: "12",
             duration: "185000",
           },
@@ -64,67 +65,161 @@ describe("Plex audio playlists", () => {
             type: "playlist",
             title: "智能推荐",
             playlistType: "audio",
-            smart: "1",
+            smart: 1,
+            readOnly: 0,
           },
           {
             ratingKey: "44",
             key: "/playlists/44/items",
             type: "playlist",
-            title: "电影片单",
-            playlistType: "video",
+            title: "只读收藏",
+            playlistType: "audio",
             smart: "0",
+            readOnly: "1",
           },
           {
             ratingKey: "45",
             key: "/playlists/45/items",
             type: "playlist",
-            title: "别人分享的歌单",
+            title: "动态推荐",
             playlistType: "audio",
-            smart: false,
-            readOnly: true,
+            smart: "true",
+            readOnly: "false",
           },
           {
             ratingKey: "46",
             key: "/playlists/46/items",
+            type: "playlist",
+            title: "数字标志",
+            playlistType: "AUDIO",
+            smart: 0,
+            readOnly: "0",
+          },
+          {
+            ratingKey: "47",
+            type: "playlist",
+            title: "省略可选标志",
+            playlistType: "audio",
+          },
+          {
+            ratingKey: "48",
+            key: "/playlists/48/items",
+            type: "playlist",
+            title: "数字只读标志",
+            playlistType: "audio",
+            smart: false,
+            readOnly: 1,
+          },
+          {
+            ratingKey: "video-49",
+            type: "playlist",
+            title: "电影片单",
+            playlistType: "video",
+            smart: false,
+          },
+          {
+            ratingKey: "folder-50",
             type: "playlistfolder",
             title: "歌单目录",
             playlistType: "audio",
             smart: false,
           },
           {
-            ratingKey: "47",
-            key: "/playlists/47/items",
+            ratingKey: "invalid-51",
             type: "playlist",
-            title: "属性不完整的歌单",
+            title: "无效智能标志",
             playlistType: "audio",
+            smart: "sometimes",
+          },
+          {
+            ratingKey: "invalid-52",
+            type: "playlist",
+            title: "无效只读标志",
+            playlistType: "audio",
+            smart: false,
+            readOnly: 2,
+          },
+          {
+            ratingKey: "../invalid-53",
+            type: "playlist",
+            title: "无效歌单标识",
+            playlistType: "audio",
+            smart: false,
+            readOnly: false,
           },
         ],
       },
     });
 
-    const playlist = await getPlaylists("server-a");
-    expect(playlist).toHaveLength(1);
-    expect(playlist[0]).toMatchObject({
-      ratingKey: "42",
-      title: "通勤音乐",
-      playlistType: "audio",
-      smart: false,
-      readOnly: false,
-      leafCount: 12,
-      duration: 185000,
-    });
+    const playlists = await getPlaylists("server-a");
+    expect(playlists.map(({ ratingKey, smart, readOnly }) => ({ ratingKey, smart, readOnly }))).toEqual([
+      { ratingKey: "42", smart: false, readOnly: false },
+      { ratingKey: "43", smart: true, readOnly: false },
+      { ratingKey: "44", smart: false, readOnly: true },
+      { ratingKey: "45", smart: true, readOnly: false },
+      { ratingKey: "46", smart: false, readOnly: false },
+      { ratingKey: "47", smart: false, readOnly: false },
+      { ratingKey: "48", smart: false, readOnly: true },
+    ]);
+    expect(playlists[0]).toMatchObject({ leafCount: 12, duration: 185000 });
+    expect(playlists[4].playlistType).toBe("audio");
+    expect(playlists[5].key).toBe("/playlists/47/items");
+    expect(playlists.filter(canWritePlaylist).map((playlist) => playlist.ratingKey)).toEqual(["42", "46", "47"]);
     expect(invokeMock).toHaveBeenCalledWith("get_playlists", {
       serverId: "server-a",
     });
   });
 
-  it("does not invoke Tauri in the browser demo runtime", async () => {
+  it("requests items by clean identifier and ignores non-track rows", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        Metadata: [
+          { ratingKey: "track-1", key: "/library/metadata/track-1", type: "track", title: "One" },
+          { ratingKey: "album-1", key: "/library/metadata/album-1", type: "album", title: "Album" },
+          null,
+          { ratingKey: "track-2", key: "/library/metadata/track-2", type: "track", title: "Two" },
+        ],
+      },
+    });
+
+    const items = await getPlaylistItems("server-a", "playlist_42-1");
+
+    expect(items.map((item) => item.ratingKey)).toEqual(["track-1", "track-2"]);
+    expect(invokeMock).toHaveBeenCalledWith("get_playlist_items", {
+      serverId: "server-a",
+      playlistId: "playlist_42-1",
+    });
+  });
+
+  it("rejects malformed identifiers before invoking Tauri", async () => {
+    for (const playlistId of ["", "../42", "42/items", "42?x=1", "42#items", "42 items", "a".repeat(257)]) {
+      await expect(getPlaylistItems("server-a", playlistId)).rejects.toThrow("无效的 Plex 歌单标识");
+    }
+    await expect(getPlaylistItems("../server", "playlist-42")).rejects.toThrow("无效的 Plex 歌单标识");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("provides scroll-sized regular, smart, and read-only demo playlists without invoking Tauri", async () => {
     Object.defineProperty(globalThis, "window", {
       configurable: true,
       value: {},
     });
 
-    await expect(getPlaylists("demo-server")).resolves.toEqual([]);
+    const playlists = await getPlaylists("demo-server");
+    expect(playlists.length).toBeGreaterThan(10);
+
+    const regular = playlists.find(canWritePlaylist);
+    const smart = playlists.find((playlist) => playlist.smart);
+    const readOnly = playlists.find((playlist) => playlist.readOnly);
+    expect(regular).toBeDefined();
+    expect(smart).toBeDefined();
+    expect(readOnly).toBeDefined();
+
+    for (const playlist of [regular, smart, readOnly]) {
+      const items = await getPlaylistItems("demo-server", playlist!.ratingKey);
+      expect(items.length).toBeGreaterThan(0);
+      expect(items.every((item) => item.type === "track")).toBe(true);
+    }
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
