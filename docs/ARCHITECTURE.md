@@ -6,20 +6,20 @@
 
 ```text
 React / Tauri WebView
-  ├─ Music 资料库、搜索、普通/智能/只读音频歌单、队列与设置
+  ├─ Music 资料库、搜索、普通/智能/只读音频播放列表、队列与设置
   ├─ DualAudioPool + Media Session + 独立音量
   ├─ 两种展开播放器、主窗口右侧歌词与进度同步
-  └─ macOS AirPlay / Windows Audio Output Devices 适配
+  └─ Windows Audio Output Devices 适配；macOS 输出交给系统
           │ typed Tauri commands / events
 Rust / Tauri
   ├─ Plex PIN、Keychain / Credential Manager 与 resources 发现
-  ├─ per-server token、PMS 白名单请求、歌单读写与连接重试
+  ├─ per-server token、PMS 白名单请求、播放列表读写与连接重试
   ├─ 歌词读取、授权隔离的封面磁盘缓存
   ├─ 127.0.0.1 高熵票据流代理、timeline 与 scrobble
   └─ 原生窗口、Dock/托盘恢复与原生菜单退出
 ```
 
-该阶段优先保证共享账号访问、仅暴露 Music 类资料库、普通/智能/只读音频歌单读取与播放、普通可写歌单写入、桌面播放与窗口生命周期。浏览器开发模式使用演示数据，账号和 PMS 请求只在 Tauri 桌面运行时生效。
+该阶段优先保证共享账号访问、仅暴露 Music 类资料库、普通/智能/只读音频播放列表读取与播放、普通可写播放列表创建与写入、桌面播放与窗口生命周期。浏览器开发模式使用演示数据，账号和 PMS 请求只在 Tauri 桌面运行时生效。
 
 ## Plex 数据与权限边界
 
@@ -27,9 +27,10 @@ Rust / Tauri
 - `/api/v2/resources` 返回的每台服务器专属 `accessToken` 仅保存在 Rust 状态中；`owned:false` 家庭/共享服务器使用它自己的 token，不错误复用账号 token。
 - Section 列表只接受 `type=artist`，因此 UI 只暴露 Plex 的音乐类型资料库；电影、剧集和照片库不会进入导航或查询链路。
 - 歌手与专辑使用 PMS `sort=titleSort:asc`，以 500 项容器分页读取到 `MediaContainer.totalSize`；React 保留 `titleSort` 并只生成 A–Z/# 导航分组，组内不再进行 locale 排序。曲目页维持单页有界读取。
-- 服务器和 Music Section 只在设置页选择；侧栏不重复放置来源选择器，而是在主导航与账号卡之间常驻当前账号可读的音频歌单。
-- PMS 数据请求只允许预定义的库、搜索、歌单和播放状态等路径，并尝试已发现的本地、远程直连或 Relay 连接。
-- 客户端列出普通、智能和只读音频歌单，并通过固定的 `/playlists/{id}/items` 路径读取曲目；智能歌单每次打开都重新读取 PMS 当前结果。只有普通且非只读歌单进入写入选择器，并通过 `PUT /playlists/{playlistId}/items` 添加曲目。写入仍由 PMS 检查 ACL；共享账号权限不足时 UI 给出提示，不会伪装写入成功。
+- 艺术家详情的歌曲标签调用 `/library/metadata/{artist}/allLeaves`，请求排序固定为 `parentTitleSort:asc,parentIndex:asc,index:asc`，每页 50 首；前端保留 PMS 顺序并按 `ratingKey` 过滤页间及页内重复。后续页失败不清空已加载数据，也不推进起点，用户重试时只重新请求失败页。
+- 服务器和 Music Section 只在设置页选择；侧栏不重复放置来源选择器，而是在主导航下方常驻当前账号可读的音频播放列表，账号入口位于顶部工具区。
+- PMS 数据请求只允许预定义的库、搜索、播放列表和播放状态等路径，并尝试已发现的本地、远程直连或 Relay 连接。
+- 客户端列出普通、智能和只读音频播放列表，并通过固定的 `/playlists/{id}/items` 路径读取曲目；智能播放列表每次打开都重新读取 PMS 当前结果。侧栏创建入口调用专用 Tauri command，以当前服务器 token 向 PMS `POST /playlists` 创建空白普通音频播放列表；只有普通且非只读播放列表进入写入选择器，并通过 `PUT /playlists/{playlistId}/items` 添加曲目。创建与写入仍由 PMS 检查 ACL；共享账号权限不足时 UI 给出提示，不会伪装成功。
 - 客户端不依据 `subscription.active` 阻止基础音乐访问，但仍服从服务器 ACL、HTTP 错误和功能级订阅限制。
 - 本项目是非官方 Plex 互操作客户端；支持普通账号访问已经授权的 Music 库，不等于绕过 Plex Pass、服务器 ACL 或媒体所有权边界。
 
@@ -44,20 +45,19 @@ Rust / Tauri
 
 ### 双 Audio 下一首预缓冲
 
-`DualAudioPool` 始终拥有两个 `HTMLAudioElement`：一个是当前 active，另一个是 standby。两个元素共享独立音量、静音、Windows sink 和 AirPlay 声明。
+`DualAudioPool` 始终拥有两个 `HTMLAudioElement`：一个是当前 active，另一个是 standby。两个元素共享独立音量、静音和 Windows sink。
 
 ```text
 当前曲目 active Audio ── 播放、进度、Media Session、timeline
                          │
 队列预测 ── 获取下一首 URL ── standby Audio preload=auto
                          │
-自然切歌 ────────────────┴─ 复用已准备的 Audio 或 URL
+自然切歌 ────────────────┴─ 复用已准备的 Audio
 ```
 
 - 默认开启下一首预缓冲，可在设置关闭。
 - 顺序队列预测下一项；列表循环末尾可预测队首；单曲循环无需取得另一首的 URL。
 - 随机播放先从 shuffle bag 选出稳定的 pending 候选供 standby Audio 预缓冲，但不提前消费该候选；只有实际 Next 或自然切歌时才提交到随机历史，因此 Previous 后再 Next 仍可沿原历史前进。
-- AirPlay 路由绑定具体媒体元素。检测到无线目标后，切歌保留 active Audio，仅复用预取 URL，避免交换元素导致路由丢失。
 - 这是一项降低切歌等待的 WebView 优化，不是严格 gapless、crossfade 或音频磁盘缓存。
 
 ### 媒体决策与安全代理
@@ -82,17 +82,15 @@ HTMLAudioElement
 ### 当前队列、随机与会话
 
 - `repeat=off` 时按队列顺序自然播放，到队尾停止；`repeat=all` 只回到当前队列队首；`repeat=one` 只在媒体自然结束时重播当前曲目。手动上一首/下一首仍可在当前队列中导航。
-- 随机播放使用 shuffle bag，同一轮不重复；Previous 按已播放的随机历史回退。随机和循环都不会离开创建当前播放上下文时的队列，不会自动接续另一张专辑或歌单。
+- 随机播放使用 shuffle bag，同一轮不重复；Previous 按已播放的随机历史回退。随机和循环都不会离开创建当前播放上下文时的队列，不会自动接续另一张专辑或播放列表。
 - 本地会话以版本化、最多 500 首的精简形式保存服务器、音质、队列、当前曲目/下标、进度、随机与循环模式；不保存 token、ticket 或已解析的音频 URL。会话 30 天后失效，恢复时不自动播放，登出时删除。
 
 ## 平台输出
 
-### macOS AirPlay
+### macOS 系统输出边界
 
-- 两个 Audio 都设置 `x-webkit-airplay="allow"`。
-- 单击底栏 AirPlay 按钮就直接调用 active Audio 的 `webkitShowPlaybackTargetPicker()`，不经过应用内二次设备面板；`webkitcurrentplaybacktargetiswirelesschanged` 负责更新无线目标状态。
-- WKWebView 未暴露选择器、调用失败或用户希望系统统一管理时，UI 引导到 macOS“控制中心 → 声音”。
-- AirPlay 选择与实际路由由 macOS 管理；同网段真实接收器、切歌、睡眠唤醒和路由恢复仍需 macOS 真机验收。
+- 按当前产品决定，Cadilume 不提供应用内无线输出入口，不调用 WebKit 播放目标选择器，也不维护无线目标状态。
+- macOS 的输出选择与路由恢复完全由系统管理；Cadilume 的双 Audio 池在所有 macOS 输出场景下使用相同的预缓冲、切换、暂停与恢复逻辑。
 
 ### Windows 输出设备
 
@@ -108,7 +106,7 @@ HTMLAudioElement
 - React 继续解析 LRC、SRT、VTT 与纯文本并归一成时间轴；PMS `startOffset/endOffset` 的毫秒边界不取整到秒。播放期间以活动 Audio 的 `currentTime` 约每 50ms 发布一次进度，并保留 `timeupdate` 兜底，不加入固定正负 delay。
 - 无时间轴的纯文本歌词可阅读但不会伪造自动步进；确认没有非空歌词行时禁用底栏歌词按钮。切歌通过服务器与 rating key 隔离异步结果，不会短暂显示上一首歌词。
 - 底栏歌词按钮直接切换主窗口右侧歌词栏；右栏拥有独立滚动容器，切歌时复位，不会带动主内容或播放器骨架滚动；切到无歌词曲目后自动收起。
-- 底部播放栏可向上展开“黑胶”或“封面”完整播放器；展开层专注封面与播放控制，不重复渲染右侧歌词。
+- 底部播放栏可向上展开“黑胶”或“封面”完整播放器；歌词/播放队列使用播放器骨架内的互斥右侧内容分栏，与左侧播放视觉并列，不复用主窗口右栏、不呈现为浮动卡片，也不增加第二个关闭入口。时间轴歌词继续由活动 Audio 的真实进度驱动，纯文本歌词保持静态。
 - 当前不创建独立桌面歌词窗口，也不在托盘/菜单栏保留桌面歌词入口。
 
 ## 封面缓存
@@ -138,12 +136,12 @@ HTMLAudioElement
 - 关闭行为持久化为 `tray` 或 `quit`；`tray` 模式拦截关闭并隐藏主窗口，`quit` 模式进入统一的原生退出流程。macOS 的 Dock Reopen 事件与托盘/菜单栏“显示 Cadilume”都会显示、取消最小化并聚焦主窗口。
 - 从窗口关闭或托盘/菜单栏退出时，Rust 先向主窗口发送 `app://before-exit`；React 立即刷新播放会话并回送确认，Rust 在收到确认或 750 ms 超时后结束进程。
 - macOS 菜单栏使用独立的透明单色 18pt@2x Template 图标，由系统适配浅/深外观；Windows 通知区域继续使用应用默认图标。两端菜单提供显示主窗口、播放/暂停和退出；设置页只配置关闭行为并提供危险色“退出账号”，不再重复提供退出应用按钮。
-- 主侧栏按“品牌与主导航 → 独立滚动的歌单区 → 固定账号卡”组织；歌单滚动不会移动主导航、账号卡或固定播放器。
+- 主侧栏按“品牌与主导航 → 独立滚动的播放列表区”组织；播放列表滚动不会移动主导航、顶部工具区或固定播放器。
 - 主题支持跟随系统、浅色和深色，并通过共享 CSS token 保持同一信息层级。
 
 ## v0.2 原生播放核心
 
-WebView 音频已能提供实用的 AirPlay、Windows sink 选择和下一首预缓冲，但不应被描述为 Windows 正式版的最终播放引擎。窗口隐藏后的调度、严格 gapless、完整系统媒体面板、音频 Range 缓存和设备恢复需要由原生核心掌握。
+WebView 音频已能提供 Windows sink 选择和下一首预缓冲，但不应被描述为正式版的最终播放引擎。窗口隐藏后的调度、严格 gapless、完整系统媒体面板、音频 Range 缓存和设备恢复需要由原生核心掌握。
 
 ```text
 React UI
@@ -175,6 +173,6 @@ PlaybackCoordinator (Rust, state authority)
 
 ## 平台发布与验收
 
-- macOS：arm64 + x86_64，Universal DMG，Developer ID 签名与 notarize；使用真实 AirPlay 接收器验证选择、连续切歌、暂停恢复和系统路由切换。专用 DMG 脚本在成功、失败或可捕获中断后都清理 `bundle/macos/Cadilume.app`，避免构建中间包继续被系统检索，只保留 DMG。
+- macOS：arm64 + x86_64，Universal DMG，Developer ID 签名与 notarize；验证连续切歌、暂停恢复以及系统输出变化后应用播放状态稳定。专用 DMG 脚本在成功、失败或可捕获中断后都清理 `bundle/macos/Cadilume.app`，避免构建中间包继续被系统检索，只保留 DMG。
 - Windows：Windows 10/11 x64 原生 CI 构建 NSIS，使用系统 WebView2 bootstrapper，Authenticode 签名；验证 `setSinkId`、音量合成器、USB/蓝牙/HDMI、热插拔、休眠恢复和系统媒体键。
 - 两个平台都要验证本地直连、远程直连与 Relay，并使用 `owned:false` 的授权 Music 库进行共享账号回归。

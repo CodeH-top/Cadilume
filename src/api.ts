@@ -1,11 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { demoAlbums, demoArtists, demoBootstrap, demoPlaylistItems, demoPlaylists, demoSections, demoServers, demoTracks } from "./demo";
-import type { BootstrapResponse, CacheStatus, CloseBehavior, LibrarySection, PlexHub, PlexItem, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
+import { demoAlbums, demoArtists, demoBootstrap, demoPlaylistItems, demoPlaylists, demoRecommendationHubs, demoSections, demoServers, demoTracks } from "./demo";
+import type { BootstrapResponse, CacheStatus, CloseBehavior, LibrarySection, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
 
 const artworkQueue: Array<() => void> = [];
 let activeArtworkRequests = 0;
+let demoArtistTrackFailureKey: string | undefined;
+let demoPlaylistSequence = 0;
+const demoCreatedPlaylists: PlexPlaylist[] = [];
 const MAX_ARTWORK_REQUESTS = 6;
+const MAX_PLAYLIST_TITLE_LENGTH = 255;
 
 function drainArtworkQueue(): void {
   while (activeArtworkRequests < MAX_ARTWORK_REQUESTS && artworkQueue.length) {
@@ -100,7 +104,21 @@ function normalizePlaylist(value: Record<string, unknown>): PlexPlaylist | undef
     leafCount: optionalNumber(value.leafCount),
     addedAt: optionalNumber(value.addedAt),
     updatedAt: optionalNumber(value.updatedAt),
+    lastViewedAt: optionalNumber(value.lastViewedAt),
+    viewCount: optionalNumber(value.viewCount),
   };
+}
+
+function normalizePlaylistTitle(title: string): string {
+  const normalized = title.trim();
+  if (
+    !normalized
+    || Array.from(normalized).length > MAX_PLAYLIST_TITLE_LENGTH
+    || Array.from(normalized).some((character) => /\p{Cc}/u.test(character))
+  ) {
+    throw new Error("播放列表名称必须为 1–255 个有效字符");
+  }
+  return normalized;
 }
 
 export async function bootstrap(): Promise<BootstrapResponse> {
@@ -193,7 +211,7 @@ export async function getRecentAlbums(serverId: string, sectionKey: string): Pro
 
 /** Return all readable audio playlists visible to the selected server token. */
 export async function getPlaylists(serverId: string): Promise<PlexPlaylist[]> {
-  if (!isDesktopRuntime()) return [...demoPlaylists];
+  if (!isDesktopRuntime()) return [...demoCreatedPlaylists, ...demoPlaylists];
   const response = await invoke<unknown>("get_playlists", { serverId });
   return playlistRecords(response)
     .map(normalizePlaylist)
@@ -201,6 +219,35 @@ export async function getPlaylists(serverId: string): Promise<PlexPlaylist[]> {
       playlist !== undefined
       && playlist.playlistType === "audio"
     ));
+}
+
+/** Create an empty regular audio playlist through the selected server's scoped PMS token. */
+export async function createPlaylist(serverId: string, title: string): Promise<PlexPlaylist> {
+  if (!isCleanPlexIdentifier(serverId)) throw new Error("无效的 Plex 服务器标识");
+  const normalizedTitle = normalizePlaylistTitle(title);
+  if (!isDesktopRuntime()) {
+    const ratingKey = `playlist-created-${++demoPlaylistSequence}`;
+    const playlist: PlexPlaylist = {
+      ratingKey,
+      key: `/playlists/${ratingKey}/items`,
+      type: "playlist",
+      title: normalizedTitle,
+      playlistType: "audio",
+      smart: false,
+      readOnly: false,
+      leafCount: 0,
+      duration: 0,
+      addedAt: Date.now() / 1000,
+    };
+    demoCreatedPlaylists.unshift(playlist);
+    return { ...playlist };
+  }
+  const response = await invoke<unknown>("create_playlist", { serverId, title: normalizedTitle });
+  const playlist = playlistRecords(response)
+    .map(normalizePlaylist)
+    .find((candidate) => candidate?.playlistType === "audio");
+  if (!playlist) throw new Error("Plex 没有返回新建的音乐播放列表");
+  return playlist;
 }
 
 /** PMS remains authoritative, but smart and read-only playlists are never write targets. */
@@ -214,7 +261,7 @@ export function canWritePlaylist(playlist: PlexPlaylist): boolean {
 /** Read a playlist by its clean identifier instead of trusting the server-supplied `key`. */
 export async function getPlaylistItems(serverId: string, playlistId: string): Promise<PlexItem[]> {
   if (!isCleanPlexIdentifier(serverId) || !isCleanPlexIdentifier(playlistId)) {
-    throw new Error("无效的 Plex 歌单标识");
+    throw new Error("无效的 Plex 播放列表标识");
   }
   if (!isDesktopRuntime()) return [...(demoPlaylistItems[playlistId] ?? [])];
   const response = await invoke<unknown>("get_playlist_items", { serverId, playlistId });
@@ -231,6 +278,95 @@ export async function getChildren(serverId: string, ratingKey: string): Promise<
     "X-Plex-Container-Size": "500",
   });
   return metadata(response);
+}
+
+export async function getArtistTracksPage(
+  serverId: string,
+  ratingKey: string,
+  start = 0,
+  pageSize = 50,
+): Promise<PlexItemPage> {
+  if (!isCleanPlexIdentifier(ratingKey)) throw new Error("无效的 Plex 艺术家标识");
+  const normalizedStart = Math.max(0, Math.floor(Number.isFinite(start) ? start : 0));
+  const normalizedPageSize = Math.min(100, Math.max(1, Math.floor(Number.isFinite(pageSize) ? pageSize : 50)));
+
+  if (!isDesktopRuntime()) {
+    const previewFailureStart = import.meta.env.DEV && typeof window.location?.search === "string"
+      ? Number.parseInt(new URLSearchParams(window.location.search).get("artist-track-fail-once") || "", 10)
+      : Number.NaN;
+    if (normalizedStart === 0) demoArtistTrackFailureKey = undefined;
+    const failureKey = `${ratingKey}:${previewFailureStart}`;
+    if (Number.isFinite(previewFailureStart) && normalizedStart === previewFailureStart && demoArtistTrackFailureKey !== failureKey) {
+      demoArtistTrackFailureKey = failureKey;
+      throw new Error("艺术家歌曲分页预览失败");
+    }
+    const allTracks = demoArtistTracks(ratingKey);
+    return {
+      items: allTracks.slice(normalizedStart, normalizedStart + normalizedPageSize),
+      start: normalizedStart,
+      nextStart: Math.min(allTracks.length, normalizedStart + normalizedPageSize),
+      totalSize: allTracks.length,
+    };
+  }
+
+  const response = await serverGet(serverId, `/library/metadata/${ratingKey}/allLeaves`, {
+    type: "10",
+    sort: "parentTitleSort:asc,parentIndex:asc,index:asc",
+    "X-Plex-Container-Start": String(normalizedStart),
+    "X-Plex-Container-Size": String(normalizedPageSize),
+  });
+  const root = container(response);
+  const pageItems = metadata(response);
+  const items = pageItems.filter((item) => item?.type === "track");
+  return {
+    items,
+    start: normalizedStart,
+    nextStart: normalizedStart + pageItems.length,
+    totalSize: optionalNumber(root.totalSize) ?? normalizedStart + items.length,
+  };
+}
+
+function demoArtistTracks(ratingKey: string): PlexItem[] {
+  const tracks = demoTracks.filter((track) => track.grandparentRatingKey === ratingKey);
+  const previewCount = import.meta.env.DEV && typeof window.location?.search === "string"
+    ? Number.parseInt(new URLSearchParams(window.location.search).get("artist-track-preview") || "", 10)
+    : Number.NaN;
+  if (!Number.isFinite(previewCount) || previewCount <= tracks.length || !tracks.length) return tracks;
+
+  return Array.from({ length: Math.min(500, previewCount) }, (_, index) => {
+    const template = tracks[index % tracks.length];
+    const albumNumber = Math.floor(index / 10) + 1;
+    return {
+      ...template,
+      ratingKey: `${template.ratingKey}-preview-${index}`,
+      key: `/library/metadata/${template.ratingKey}-preview-${index}`,
+      title: `${template.title} ${index + 1}`,
+      parentRatingKey: `${template.parentRatingKey}-preview-${albumNumber}`,
+      parentTitle: `${template.parentTitle} ${String(albumNumber).padStart(2, "0")}`,
+      parentTitleSort: `${template.parentTitle || "Album"} ${String(albumNumber).padStart(2, "0")}`,
+      parentIndex: 1,
+      index: (index % 10) + 1,
+    };
+  });
+}
+
+export async function getRecommendationHubs(serverId: string, sectionKey: string): Promise<PlexHub[]> {
+  if (!isDesktopRuntime()) return demoRecommendationHubs.map((hub) => ({ ...hub, items: [...hub.items] }));
+  const response = await serverGet(serverId, `/hubs/sections/${sectionKey}`, { count: "18" });
+  const root = container(response);
+  const hubs = Array.isArray(root.Hub) ? root.Hub.filter(isRecord) : [];
+  return hubs.map((hub): PlexHub => {
+    const rawItems = hub.Metadata ?? hub.Directory ?? hub.Track;
+    return {
+      title: optionalString(hub.title) || "推荐",
+      type: optionalString(hub.type) || "mixed",
+      identifier: optionalString(hub.hubIdentifier),
+      context: optionalString(hub.context),
+      more: optionalBooleanFlag(hub.more),
+      promoted: optionalBooleanFlag(hub.promoted),
+      items: Array.isArray(rawItems) ? rawItems.filter(isRecord) as unknown as PlexItem[] : [],
+    };
+  }).filter((hub) => hub.items.length > 0 && ["artist", "album", "track"].includes(hub.type));
 }
 
 export async function searchLibrary(serverId: string, sectionKey: string, queryText: string): Promise<PlexHub[]> {

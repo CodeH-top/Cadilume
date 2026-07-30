@@ -450,8 +450,6 @@ export function getManualNextIndex(currentIndex: number, queueLength: number): n
 
 type RoutableAudioElement = HTMLAudioElement & {
   setSinkId?: (sinkId: string) => Promise<void>;
-  webkitShowPlaybackTargetPicker?: () => void;
-  webkitCurrentPlaybackTargetIsWireless?: boolean;
 };
 
 export interface AudioPreparation {
@@ -790,7 +788,6 @@ export class DualAudioPool {
     this.elements = elements as [RoutableAudioElement, RoutableAudioElement];
     for (const audio of this.elements) {
       audio.preload = "auto";
-      audio.setAttribute("x-webkit-airplay", "allow");
     }
   }
 
@@ -827,13 +824,6 @@ export class DualAudioPool {
     return audio;
   }
 
-  takePreparedUrl(preparation: AudioPreparation): string | null {
-    if (!this.prepared || !samePreparation(this.prepared, preparation)) return null;
-    const url = this.prepared.url;
-    this.cancelPrepared();
-    return url;
-  }
-
   takePrepared(preparation: AudioPreparation): RoutableAudioElement | null {
     if (!this.prepared || !samePreparation(this.prepared, preparation)) return null;
     const next = this.prepared.audio;
@@ -867,17 +857,6 @@ export class DualAudioPool {
     return applyOutputSink(this.elements, sinkId);
   }
 
-  showAirPlayPicker(): boolean {
-    const picker = this.active.webkitShowPlaybackTargetPicker;
-    if (typeof picker !== "function") return false;
-    try {
-      picker.call(this.active);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   clearSources(): void {
     this.prepared = undefined;
     for (const audio of this.elements) {
@@ -902,6 +881,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const scrobbledRef = useRef(new Set<string>());
   const playbackFallbackRef = useRef<PlaybackFallbackState>(createPlaybackFallbackState(quality));
   const playbackFailureHandlerRef = useRef<(diagnostic: string, source: string) => boolean>(() => false);
+  const playbackLoadingRef = useRef(false);
   const loadRequestRef = useRef(0);
   const prebufferRequestRef = useRef(0);
   const outputSinkRequestRef = useRef(0);
@@ -918,6 +898,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const [queue, setQueue] = useState<PlexItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [playing, setPlaying] = useState(false);
+  const [loading, setLoadingState] = useState(false);
+  const [buffering, setBuffering] = useState(false);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolumeState] = useState(storedVolume);
@@ -928,7 +910,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const [repeat, setRepeatState] = useState<RepeatMode>(() => initialPersistedSession?.repeat ?? "all");
   const [prebufferNext, setPrebufferNextState] = useState(storedPrebufferNext);
   const [outputSinkId, setOutputSinkIdState] = useState(storedOutputSinkId);
-  const [airPlayActive, setAirPlayActive] = useState(false);
   const [error, setError] = useState<string>();
   const [playbackFailure, setPlaybackFailure] = useState<PlaybackFailure>();
   const volumeRef = useRef(volume);
@@ -936,7 +917,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const shuffleRef = useRef(shuffle);
   const repeatRef = useRef(repeat);
   const outputSinkIdRef = useRef(outputSinkId);
-  const airPlayActiveRef = useRef(airPlayActive);
 
   serverIdRef.current = serverId;
   qualityRef.current = quality;
@@ -945,7 +925,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   shuffleRef.current = shuffle;
   repeatRef.current = repeat;
   outputSinkIdRef.current = outputSinkId;
-  airPlayActiveRef.current = airPlayActive;
+
+  const setPlaybackLoading = useCallback((value: boolean) => {
+    playbackLoadingRef.current = value;
+    setLoadingState(value);
+  }, []);
 
   const current = currentIndex >= 0 ? queue[currentIndex] : undefined;
 
@@ -1004,6 +988,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const track = tracks[index];
     if (!track || !serverId) return;
     const requestId = ++loadRequestRef.current;
+    setPlaybackLoading(autoplay);
+    setBuffering(false);
     prebufferRequestRef.current += 1;
     indexRef.current = index;
     setCurrentIndex(index);
@@ -1020,9 +1006,16 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
     if (!isDesktopRuntime()) {
       resumeProgressRef.current = null;
+      setPlaybackLoading(false);
       setPlaying(autoplay);
       return;
     }
+
+    const finishCurrentLoad = () => {
+      if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
+      setPlaybackLoading(false);
+      setBuffering(false);
+    };
 
     const preparation: AudioPreparation = {
       index,
@@ -1034,44 +1027,27 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
     let assignedSource = "";
     try {
-      if (!forceFreshTicket && airPlayActiveRef.current) {
-        const preparedUrl = pool?.takePreparedUrl(preparation);
-        if (preparedUrl && pool) {
-          const audio = pool.active;
-          audioRef.current = audio;
-          audio.pause();
-          audio.src = preparedUrl;
-          assignedSource = preparedUrl;
-          audio.load();
-          await seekAfterMetadata(audio, () => resumeProgressRef.current ?? progressRef.current);
-          if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
-          resumeProgressRef.current = null;
-          if (autoplay) await audio.play();
-          else setPlaying(false);
-          return;
-        }
-      }
-
-      if (!forceFreshTicket && !airPlayActiveRef.current) {
+      if (!forceFreshTicket) {
         const preparedAudio = pool?.takePrepared(preparation);
         if (preparedAudio) {
           audioRef.current = preparedAudio;
           assignedSource = preparedAudio.currentSrc || preparedAudio.src;
-          const wireless = Boolean(preparedAudio.webkitCurrentPlaybackTargetIsWireless);
-          airPlayActiveRef.current = wireless;
-          setAirPlayActive(wireless);
           await seekAfterMetadata(preparedAudio, () => resumeProgressRef.current ?? progressRef.current);
           if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
           resumeProgressRef.current = null;
           if (autoplay) await preparedAudio.play();
           else setPlaying(false);
+          finishCurrentLoad();
           return;
         }
       }
 
       pool?.cancelPrepared();
       const audio = pool?.active ?? audioRef.current;
-      if (!audio) return;
+      if (!audio) {
+        finishCurrentLoad();
+        return;
+      }
       audio.pause();
       if (!autoplay) setPlaying(false);
 
@@ -1084,6 +1060,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       resumeProgressRef.current = null;
       if (autoplay) await audio.play();
+      finishCurrentLoad();
     } catch (reason) {
       if (requestId !== loadRequestRef.current) return;
       const audio = audioRef.current;
@@ -1092,12 +1069,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         : formatPlaybackFailure(reason);
       if (!playbackFailureHandlerRef.current(diagnostic, assignedSource)) {
         const message = `音频无法播放（${diagnostic}）。`;
+        setPlaybackLoading(false);
+        setBuffering(false);
         setPlaying(false);
         setError(message);
         setPlaybackFailure({ message, technicalDetails: diagnostic, attemptedQualities: [quality] });
       }
     }
-  }, [quality, schedulePersistedSession, serverId]);
+  }, [quality, schedulePersistedSession, serverId, setPlaybackLoading]);
 
   const retryCurrent = useCallback(() => {
     const retry = createPlaybackRetryRequest(
@@ -1165,6 +1144,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       if (selected.index != null) {
         void loadAt(selected.index, true);
       } else {
+        setPlaybackLoading(false);
+        setBuffering(false);
         setPlaying(false);
         schedulePersistedSession(true);
       }
@@ -1175,6 +1156,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       : getManualNextIndex(currentIndexValue, tracks.length);
     if (nextIndex != null) void loadAt(nextIndex, true);
     else {
+      setPlaybackLoading(false);
+      setBuffering(false);
       setPlaying(false);
       schedulePersistedSession(true);
     }
@@ -1211,7 +1194,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [loadAt, schedulePersistedSession]);
 
   const toggle = useCallback(() => {
-    if (!current) return;
+    if (!current || playbackLoadingRef.current) return;
     if (!isDesktopRuntime()) {
       setPlaying((value) => !value);
       schedulePersistedSession(true);
@@ -1289,8 +1272,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     return operation;
   }, []);
 
-  const showAirPlayPicker = useCallback((): boolean => audioPoolRef.current?.showAirPlayPicker() ?? false, []);
-
   const removeFromQueue = useCallback((index: number) => {
     if (!Number.isInteger(index) || index < 0 || index >= queueRef.current.length || index === indexRef.current) return;
     const nextQueue = queueRef.current.filter((_, itemIndex) => itemIndex !== index);
@@ -1323,13 +1304,13 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       const pool = audioPoolRef.current;
       pool?.clearSources();
       if (pool) audioRef.current = pool.active;
-      airPlayActiveRef.current = false;
       setQueue([]);
       setCurrentIndex(-1);
       setProgress(0);
       setDuration(0);
+      setPlaybackLoading(false);
+      setBuffering(false);
       setPlaying(false);
-      setAirPlayActive(false);
       setError(undefined);
       setPlaybackFailure(undefined);
     }
@@ -1366,12 +1347,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     setCurrentIndex(restoredIndex);
     setProgress(restoredProgress);
     setDuration((restoredTrack?.duration || 0) / 1000);
+    setPlaybackLoading(false);
+    setBuffering(false);
     setPlaying(false);
     setShuffleState(persisted.shuffle);
     setRepeatState(persisted.repeat);
     setError(undefined);
     setPlaybackFailure(undefined);
-  }, [flushPlaybackSession, serverId]);
+  }, [flushPlaybackSession, serverId, setPlaybackLoading]);
 
   useEffect(() => {
     const flush = () => flushPlaybackSession();
@@ -1428,6 +1411,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           })
           .join("、");
         const message = `音频无法播放（${diagnostic}）。${attemptedLabel ? `已尝试 ${attemptedLabel}；` : ""}请检查远程连接或服务器转码状态。`;
+        setPlaybackLoading(false);
+        setBuffering(false);
         setPlaying(false);
         schedulePersistedSession(true);
         setError(message);
@@ -1435,6 +1420,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         return true;
       }
 
+      setPlaybackLoading(true);
+      setBuffering(false);
       setPlaying(false);
       setPlaybackFailure(undefined);
       setError(`音频播放失败（${diagnostic}），正在自动切换到 ${decision.quality} kbps 兼容串流…`);
@@ -1461,6 +1448,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           resumeProgressRef.current = null;
           await audio.play();
           if (!isActiveFallback()) return;
+          setPlaybackLoading(false);
+          setBuffering(false);
           setError(undefined);
           setPlaybackFailure(undefined);
         })
@@ -1512,20 +1501,29 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           setPlaybackFailure(undefined);
         }
       };
+      const onPlaying = () => {
+        if (!isCurrent()) return;
+        setPlaybackLoading(false);
+        setBuffering(false);
+      };
+      const onWaiting = () => {
+        if (isCurrent() && !audio.paused && !audio.ended) setBuffering(true);
+      };
+      const onStalled = () => {
+        if (isCurrent() && !audio.paused && !audio.ended && audio.readyState < 3) setBuffering(true);
+      };
       const onPause = () => {
         if (isCurrent()) {
+          setBuffering(false);
           setPlaying(false);
           schedulePersistedSession(true);
         }
       };
       const onEnded = () => {
-        if (isCurrent()) endedRef.current();
-      };
-      const onPlaybackTargetChanged = () => {
         if (!isCurrent()) return;
-        const wireless = Boolean(audio.webkitCurrentPlaybackTargetIsWireless);
-        airPlayActiveRef.current = wireless;
-        setAirPlayActive(wireless);
+        setPlaybackLoading(false);
+        setBuffering(false);
+        endedRef.current();
       };
       const onError = () => {
         if (!isCurrent()) {
@@ -1538,18 +1536,22 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       audio.addEventListener("timeupdate", updateTime);
       audio.addEventListener("durationchange", updateTime);
       audio.addEventListener("play", onPlay);
+      audio.addEventListener("playing", onPlaying);
+      audio.addEventListener("waiting", onWaiting);
+      audio.addEventListener("stalled", onStalled);
       audio.addEventListener("pause", onPause);
       audio.addEventListener("ended", onEnded);
       audio.addEventListener("error", onError);
-      audio.addEventListener("webkitcurrentplaybacktargetiswirelesschanged", onPlaybackTargetChanged);
       return () => {
         audio.removeEventListener("timeupdate", updateTime);
         audio.removeEventListener("durationchange", updateTime);
         audio.removeEventListener("play", onPlay);
+        audio.removeEventListener("playing", onPlaying);
+        audio.removeEventListener("waiting", onWaiting);
+        audio.removeEventListener("stalled", onStalled);
         audio.removeEventListener("pause", onPause);
         audio.removeEventListener("ended", onEnded);
         audio.removeEventListener("error", onError);
-        audio.removeEventListener("webkitcurrentplaybacktargetiswirelesschanged", onPlaybackTargetChanged);
       };
     };
 
@@ -1578,7 +1580,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       if (audioPoolRef.current === pool) audioPoolRef.current = null;
       if (audioRef.current && pool.elements.includes(audioRef.current as RoutableAudioElement)) audioRef.current = null;
     };
-  }, [flushPlaybackSession, schedulePersistedSession]);
+  }, [flushPlaybackSession, schedulePersistedSession, setPlaybackLoading]);
 
   useEffect(() => {
     endedRef.current = () => { void advance(true); };
@@ -1764,6 +1766,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     current,
     currentIndex,
     playing,
+    loading,
+    buffering,
     progress,
     duration,
     volume,
@@ -1772,7 +1776,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     repeat,
     prebufferNext,
     outputSinkId,
-    airPlayActive,
     error,
     playbackFailure,
     retryCurrent,
@@ -1788,9 +1791,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     setRepeat,
     setPrebufferNext,
     setOutputSinkId,
-    showAirPlayPicker,
     removeFromQueue,
     flushPlaybackSession,
     discardPlaybackSession,
-  }), [airPlayActive, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, muted, next, outputSinkId, playContext, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setOutputSinkId, setPrebufferNext, setVolume, showAirPlayPicker, shuffle, toggle, volume]);
+  }), [buffering, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, loading, muted, next, outputSinkId, playContext, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
 }

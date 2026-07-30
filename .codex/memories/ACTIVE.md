@@ -16,6 +16,7 @@
 - [ACT-012] Serve audio and artwork through separate bounded loopback ticket registries. Never expose PMS hosts, media paths, artwork cache keys, or tokens to the WebView; revoke both registries on account change/logout and only artwork tickets when clearing artwork cache.
 - [ACT-013] Cadilume never performs client-side audio transcoding. A loopback media URL is only a credential-isolating stream proxy: original quality reads the PMS Part, while compatibility conversion or bitrate reduction is requested from PMS universal transcode, including when PMS runs on the same Mac.
 - [ACT-014] Treat connection topology and media handling as independent dimensions: `local=true` is local direct, `relay=true` is Plex Relay, and the remaining reachable connection is remote direct; none of these labels alone means that client-side transcoding occurs.
+- [ACT-015] Any Plex playlist creation or mutation must cross a dedicated Rust/Tauri command and use the selected server's scoped token; browser/demo mode may emulate the result, but WebView code must never call PMS directly.
 
 ## Validation
 

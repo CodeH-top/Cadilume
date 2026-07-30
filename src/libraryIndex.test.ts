@@ -18,7 +18,7 @@ describe("Plex alphabet index", () => {
     expect(plexAlphabetBucket(item("4", "1989"))).toBe("#");
   });
 
-  it("orders buckets A-Z then # while preserving PMS order within a bucket", () => {
+  it("puts # before A-Z while preserving PMS order within a bucket", () => {
     const groups = groupPlexItemsByAlphabet([
       item("b2", "Bravo Two", "Bravo Two"),
       item("a1", "Alpha", "Alpha"),
@@ -26,7 +26,7 @@ describe("Plex alphabet index", () => {
       item("other", "陈奕迅"),
     ]);
 
-    expect(groups.map((group) => group.bucket)).toEqual(["A", "B", "#"]);
-    expect(groups[1].items.map(({ ratingKey }) => ratingKey)).toEqual(["b2", "b1"]);
+    expect(groups.map((group) => group.bucket)).toEqual(["#", "A", "B"]);
+    expect(groups[2].items.map(({ ratingKey }) => ratingKey)).toEqual(["b2", "b1"]);
   });
 });

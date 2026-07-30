@@ -775,6 +775,22 @@ pub async fn server_get(
 }
 
 #[tauri::command]
+pub async fn create_playlist(
+    server_id: String,
+    title: String,
+    state: State<'_, PlexState>,
+) -> Result<Value, String> {
+    let query = create_audio_playlist_query(&title).map_err(display_error)?;
+    state
+        .server_request_response(&server_id, Method::POST, "/playlists", &query)
+        .await
+        .map_err(display_error)?
+        .json::<Value>()
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
 pub async fn get_playlists(
     server_id: String,
     state: State<'_, PlexState>,
@@ -1901,6 +1917,18 @@ fn audio_playlist_query() -> HashMap<String, String> {
     ])
 }
 
+fn create_audio_playlist_query(title: &str) -> Result<HashMap<String, String>> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 255 || title.chars().any(char::is_control) {
+        return Err(anyhow!("播放列表名称必须为 1–255 个有效字符"));
+    }
+    Ok(HashMap::from([
+        ("type".to_string(), "audio".to_string()),
+        ("title".to_string(), title.to_string()),
+        ("smart".to_string(), "0".to_string()),
+    ]))
+}
+
 fn playlist_items_path(playlist_id: &str) -> Result<String> {
     if !valid_plex_identifier(playlist_id) {
         return Err(anyhow!("无效的 Plex 歌单标识"));
@@ -1995,6 +2023,22 @@ mod tests {
         assert_eq!(query.get("type").map(String::as_str), Some("15"));
         assert_eq!(query.get("playlistType").map(String::as_str), Some("audio"));
         assert!(!query.contains_key("smart"));
+    }
+
+    #[test]
+    fn create_playlist_query_builds_a_blank_audio_playlist_and_validates_title() {
+        let query = create_audio_playlist_query("  通勤音乐  ").unwrap();
+
+        assert_eq!(query.len(), 3);
+        assert_eq!(query.get("type").map(String::as_str), Some("audio"));
+        assert_eq!(query.get("title").map(String::as_str), Some("通勤音乐"));
+        assert_eq!(query.get("smart").map(String::as_str), Some("0"));
+
+        for invalid in ["", "   ", "含\n换行"] {
+            assert!(create_audio_playlist_query(invalid).is_err());
+        }
+        assert!(create_audio_playlist_query("歌".repeat(256).as_str()).is_err());
+        assert!(create_audio_playlist_query("歌".repeat(255).as_str()).is_ok());
     }
 
     #[test]

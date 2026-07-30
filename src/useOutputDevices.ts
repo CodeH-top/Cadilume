@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 export type OutputPlatform = "macos" | "windows" | "other";
-export type OutputControlResult = "airplay-opened" | "airplay-unavailable" | "missing-track" | "devices-panel";
 
 export interface OutputDevice {
   deviceId: string;
@@ -48,20 +47,6 @@ export function detectOutputPlatform(info: NavigatorPlatformInfo): OutputPlatfor
   if (/mac|darwin/i.test(identity)) return "macos";
   if (/win/i.test(identity)) return "windows";
   return "other";
-}
-
-export function activateOutputControl(
-  platform: OutputPlatform,
-  hasTrack: boolean,
-  showAirPlayPicker: () => boolean,
-  toggleDevicesPanel: () => void,
-): OutputControlResult {
-  if (platform !== "macos") {
-    toggleDevicesPanel();
-    return "devices-panel";
-  }
-  if (!hasTrack) return "missing-track";
-  return showAirPlayPicker() ? "airplay-opened" : "airplay-unavailable";
 }
 
 export function normalizeOutputDevices(devices: readonly MediaDeviceInfo[]): OutputDevice[] {

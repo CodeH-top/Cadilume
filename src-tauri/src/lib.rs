@@ -31,6 +31,7 @@ pub fn run() {
             plex::logout,
             plex::discover_servers,
             plex::server_get,
+            plex::create_playlist,
             plex::get_playlists,
             plex::get_playlist_items,
             plex::add_to_playlist,

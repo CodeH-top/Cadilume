@@ -70,6 +70,8 @@ export interface PlexItem {
   thumb?: string;
   art?: string;
   parentTitle?: string;
+  /** PMS' album collation value used when an artist's tracks are sorted by album. */
+  parentTitleSort?: string;
   parentRatingKey?: string;
   grandparentTitle?: string;
   grandparentRatingKey?: string;
@@ -78,9 +80,17 @@ export interface PlexItem {
   index?: number;
   parentIndex?: number;
   addedAt?: number;
+  lastViewedAt?: number;
   viewCount?: number;
   Media?: PlexMedia[];
   imageUrl?: string;
+}
+
+export interface PlexItemPage {
+  items: PlexItem[];
+  start: number;
+  nextStart: number;
+  totalSize: number;
 }
 
 /** An account-scoped Plex playlist candidate; PMS remains authoritative for write ACLs. */
@@ -100,11 +110,17 @@ export interface PlexPlaylist {
   leafCount?: number;
   addedAt?: number;
   updatedAt?: number;
+  lastViewedAt?: number;
+  viewCount?: number;
 }
 
 export interface PlexHub {
   title: string;
   type: string;
+  identifier?: string;
+  context?: string;
+  more?: boolean;
+  promoted?: boolean;
   items: PlexItem[];
 }
 

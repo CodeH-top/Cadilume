@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { getPlexLyricsScrollTop } from "./NowPlayingView";
+import { getLyricProgress, getPlexLyricsScrollTop } from "./NowPlayingView";
+
+describe("expanded player lyric progress", () => {
+  const line = { id: "line-1", startMs: 1_000, endMs: 3_000, texts: ["Line"] };
+
+  it("clamps a timed lyric gradient to its exact millisecond window", () => {
+    expect(getLyricProgress(line, 900)).toBe(0);
+    expect(getLyricProgress(line, 2_000)).toBe(0.5);
+    expect(getLyricProgress(line, 3_200)).toBe(1);
+  });
+
+  it("keeps untimed lyrics static", () => {
+    expect(getLyricProgress({ ...line, startMs: null, endMs: null }, 2_000)).toBe(0);
+  });
+});
 
 describe("expanded player lyric scrolling", () => {
   it("keeps the list still while the active lyric remains visible", () => {

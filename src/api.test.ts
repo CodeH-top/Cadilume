@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, getLibraryItems, getPlaylistItems, getPlaylists, pollPin } from "./api";
+import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getPlaylistItems, getPlaylists, getRecommendationHubs, pollPin } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -92,6 +92,83 @@ describe("Plex library sorting", () => {
       },
     });
   });
+
+  it("pages an artist's tracks by Plex album sort, disc, and track index", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        totalSize: "73",
+        Metadata: [
+          {
+            ratingKey: "track-51",
+            key: "/library/metadata/track-51",
+            type: "track",
+            title: "Song",
+            parentTitle: "Album",
+            parentTitleSort: "Album",
+            parentIndex: 2,
+            index: 4,
+          },
+          { ratingKey: "album-ignored", key: "/library/metadata/album-ignored", type: "album", title: "Ignored" },
+        ],
+      },
+    });
+
+    const page = await getArtistTracksPage("server-a", "artist_42-1", 50, 50);
+
+    expect(page).toMatchObject({ start: 50, nextStart: 52, totalSize: 73 });
+    expect(page.items.map((item) => item.ratingKey)).toEqual(["track-51"]);
+    expect(page.items[0].parentTitleSort).toBe("Album");
+    expect(invokeMock).toHaveBeenCalledWith("server_get", {
+      serverId: "server-a",
+      path: "/library/metadata/artist_42-1/allLeaves",
+      query: {
+        type: "10",
+        sort: "parentTitleSort:asc,parentIndex:asc,index:asc",
+        "X-Plex-Container-Start": "50",
+        "X-Plex-Container-Size": "50",
+      },
+    });
+  });
+
+  it("rejects an unsafe artist identifier before requesting PMS", async () => {
+    await expect(getArtistTracksPage("server-a", "../artist", 0, 50)).rejects.toThrow("无效的 Plex 艺术家标识");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("loads non-empty supported recommendation hubs from the selected music section", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        Hub: [
+          {
+            title: "Recently Played",
+            type: "track",
+            hubIdentifier: "music.recentlyplayed.15",
+            context: "hub.music.recentlyplayed",
+            more: 1,
+            Metadata: [{ ratingKey: "track-1", key: "/library/metadata/track-1", type: "track", title: "Song" }],
+          },
+          { title: "Empty", type: "album", Metadata: [] },
+          { title: "Videos", type: "movie", Metadata: [{ ratingKey: "movie-1", type: "movie", title: "Movie" }] },
+        ],
+      },
+    });
+
+    const hubs = await getRecommendationHubs("server-a", "15");
+
+    expect(hubs).toEqual([expect.objectContaining({
+      title: "Recently Played",
+      type: "track",
+      identifier: "music.recentlyplayed.15",
+      context: "hub.music.recentlyplayed",
+      more: true,
+      items: [expect.objectContaining({ ratingKey: "track-1" })],
+    })]);
+    expect(invokeMock).toHaveBeenCalledWith("server_get", {
+      serverId: "server-a",
+      path: "/hubs/sections/15",
+      query: { count: "18" },
+    });
+  });
 });
 
 describe("Plex audio playlists", () => {
@@ -171,7 +248,7 @@ describe("Plex audio playlists", () => {
           {
             ratingKey: "folder-50",
             type: "playlistfolder",
-            title: "歌单目录",
+            title: "播放列表目录",
             playlistType: "audio",
             smart: false,
           },
@@ -193,7 +270,7 @@ describe("Plex audio playlists", () => {
           {
             ratingKey: "../invalid-53",
             type: "playlist",
-            title: "无效歌单标识",
+            title: "无效播放列表标识",
             playlistType: "audio",
             smart: false,
             readOnly: false,
@@ -242,11 +319,70 @@ describe("Plex audio playlists", () => {
     });
   });
 
+  it("creates a trimmed regular audio playlist through the scoped Rust command", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        Metadata: [{
+          ratingKey: "playlist-99",
+          key: "/playlists/playlist-99/items",
+          type: "playlist",
+          title: "通勤音乐",
+          playlistType: "audio",
+          smart: false,
+          readOnly: false,
+          leafCount: 0,
+        }],
+      },
+    });
+
+    const playlist = await createPlaylist("server-a", "  通勤音乐  ");
+
+    expect(playlist).toMatchObject({
+      ratingKey: "playlist-99",
+      title: "通勤音乐",
+      playlistType: "audio",
+      smart: false,
+      readOnly: false,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("create_playlist", {
+      serverId: "server-a",
+      title: "通勤音乐",
+    });
+  });
+
+  it("rejects invalid playlist creation input before invoking Tauri", async () => {
+    for (const title of ["", "   ", "含\n换行", "歌".repeat(256)]) {
+      await expect(createPlaylist("server-a", title)).rejects.toThrow("播放列表名称必须为 1–255 个有效字符");
+    }
+    await expect(createPlaylist("../server", "有效名称")).rejects.toThrow("无效的 Plex 服务器标识");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("creates and refreshes an empty playlist in browser demo mode", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {},
+    });
+
+    const created = await createPlaylist("demo-server", "验收新播放列表");
+    const playlists = await getPlaylists("demo-server");
+
+    expect(created).toMatchObject({
+      title: "验收新播放列表",
+      playlistType: "audio",
+      smart: false,
+      readOnly: false,
+      leafCount: 0,
+    });
+    expect(playlists.some((playlist) => playlist.ratingKey === created.ratingKey)).toBe(true);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
   it("rejects malformed identifiers before invoking Tauri", async () => {
     for (const playlistId of ["", "../42", "42/items", "42?x=1", "42#items", "42 items", "a".repeat(257)]) {
-      await expect(getPlaylistItems("server-a", playlistId)).rejects.toThrow("无效的 Plex 歌单标识");
+      await expect(getPlaylistItems("server-a", playlistId)).rejects.toThrow("无效的 Plex 播放列表标识");
     }
-    await expect(getPlaylistItems("../server", "playlist-42")).rejects.toThrow("无效的 Plex 歌单标识");
+    await expect(getPlaylistItems("../server", "playlist-42")).rejects.toThrow("无效的 Plex 播放列表标识");
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
@@ -259,7 +395,7 @@ describe("Plex audio playlists", () => {
     const playlists = await getPlaylists("demo-server");
     expect(playlists.length).toBeGreaterThan(10);
 
-    const regular = playlists.find(canWritePlaylist);
+    const regular = playlists.find((playlist) => canWritePlaylist(playlist) && (playlist.leafCount ?? 0) > 0);
     const smart = playlists.find((playlist) => playlist.smart);
     const readOnly = playlists.find((playlist) => playlist.readOnly);
     expect(regular).toBeDefined();

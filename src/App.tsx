@@ -1,11 +1,14 @@
 import {
-  Airplay,
   Album,
   ArrowLeft,
+  Cable,
   Captions,
   Check,
+  ChevronDown,
   CircleUserRound,
+  Cloud,
   Database,
+  Globe2,
   Headphones,
   Home,
   Laptop,
@@ -19,6 +22,7 @@ import {
   Music2,
   Pause,
   Play,
+  Plus,
   Power,
   Radio,
   RefreshCw,
@@ -26,11 +30,11 @@ import {
   Repeat1,
   Search,
   Server,
+  Settings,
   Shuffle,
   SkipBack,
   SkipForward,
   SlidersHorizontal,
-  Sparkles,
   Speaker,
   Sun,
   Trash2,
@@ -38,22 +42,27 @@ import {
   Volume1,
   Volume2,
   VolumeX,
+  WifiOff,
   X,
 } from "lucide-react";
-import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import * as Select from "@radix-ui/react-select";
+import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import {
   artworkUrl,
   addTrackToPlaylist,
   bootstrap,
   canWritePlaylist,
   clearArtworkCache,
+  createPlaylist,
   discoverServers,
+  getArtistTracksPage,
   getCacheStatus,
   getChildren,
   getLibraryItems,
   getPlaylistItems,
   getPlaylists,
   getRecentAlbums,
+  getRecommendationHubs,
   getSections,
   isDesktopRuntime,
   logout,
@@ -63,11 +72,13 @@ import {
   showMainWindow,
 } from "./api";
 import "./App.css";
+import { appendUniqueArtistTracks } from "./artistTracks";
 import { selectRandomContextPlayback } from "./contextPlayback";
 import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
 import { hasDisplayableLyrics } from "./lyrics";
 import { getPlexLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
-import { rangeFillPercent } from "./playerUi";
+import { playbackControlLabel, rangeFillPercent } from "./playerUi";
+import { isRecentlyAddedHub, orderRecommendationHubs, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
 import type {
   BootstrapResponse,
   CacheStatus,
@@ -84,7 +95,7 @@ import type {
 } from "./types";
 import { formatDuration, trackAlbum, trackArtist } from "./types";
 import { readPersistedPlaybackSession, usePlayer, type PlaybackFailure } from "./usePlayer";
-import { activateOutputControl, useOutputDevices } from "./useOutputDevices";
+import { useOutputDevices } from "./useOutputDevices";
 import { useLyrics } from "./useLyrics";
 import { usePlexLogin } from "./usePlexLogin";
 import { BrandIcon } from "./BrandIcon";
@@ -92,7 +103,7 @@ import { BrandIcon } from "./BrandIcon";
 type Icon = typeof Home;
 
 const navigation: Array<{ id: LibraryView; label: string; icon: Icon }> = [
-  { id: "home", label: "主页", icon: Home },
+  { id: "home", label: "推荐", icon: Home },
   { id: "albums", label: "专辑", icon: Album },
   { id: "artists", label: "艺术家", icon: Mic2 },
   { id: "tracks", label: "歌曲", icon: Music2 },
@@ -102,6 +113,8 @@ const ArtworkServerContext = createContext<string | undefined>(undefined);
 const artworkCache = new Map<string, Promise<string>>();
 const NOW_PLAYING_MODE_STORAGE_KEY = "cadilume-now-playing-mode";
 const PLAYBACK_SETTINGS_ID = "playback-settings";
+const ARTIST_TRACK_PAGE_SIZE = 50;
+type ConnectionKind = "local" | "remote" | "relay" | "disconnected";
 
 function App() {
   const [themeMode, setThemeMode] = useThemeMode();
@@ -157,6 +170,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const [sectionKey, setSectionKey] = useState<string>();
   const [view, setView] = useState<LibraryView>("home");
   const [items, setItems] = useState<PlexItem[]>([]);
+  const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
   const [searchHubs, setSearchHubs] = useState<PlexHub[]>([]);
   const [searchText, setSearchText] = useState("");
   const [loading, setLoading] = useState(true);
@@ -165,6 +179,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const [nowPlayingOpen, setNowPlayingOpen] = useState(false);
   const [nowPlayingMode, setNowPlayingMode] = useState<NowPlayingMode>(readNowPlayingMode);
   const [playlistTrack, setPlaylistTrack] = useState<PlexItem>();
+  const [playlistCreationOpen, setPlaylistCreationOpen] = useState(false);
   const [playlists, setPlaylists] = useState<PlexPlaylist[]>([]);
   const [playlistListLoading, setPlaylistListLoading] = useState(false);
   const [playlistListError, setPlaylistListError] = useState<string>();
@@ -179,10 +194,10 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const [cacheBusy, setCacheBusy] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
   const [sourcesSyncing, setSourcesSyncing] = useState(false);
+  const [connectionAvailable, setConnectionAvailable] = useState(false);
   const [playbackSettingsRequest, setPlaybackSettingsRequest] = useState(0);
   const [playbackFailurePreview, setPlaybackFailurePreview] = useState<PlaybackFailure>();
   const contentRef = useRef<HTMLElement>(null);
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const nowPlayingTriggerRef = useRef<HTMLButtonElement>(null);
   const loadedSectionRef = useRef<string | undefined>(undefined);
   const playlistListRequestRef = useRef(0);
@@ -194,29 +209,37 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const previewLyricsCountParam = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("now-playing-preview-lines")
     : null;
+  const previewLyricsModeParam = import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get("now-playing-preview-lyrics")
+    : null;
+  const previewLyricsMode = ["timed", "plain", "none", "loading", "error"].includes(previewLyricsModeParam || "")
+    ? previewLyricsModeParam as "timed" | "plain" | "none" | "loading" | "error"
+    : null;
   const parsedPreviewLyricsCount = previewLyricsCountParam === null
     ? null
     : Number.parseInt(previewLyricsCountParam, 10);
   const previewLyricsCount = parsedPreviewLyricsCount === null || !Number.isFinite(parsedPreviewLyricsCount)
     ? null
     : Math.min(120, Math.max(0, parsedPreviewLyricsCount));
-  const nowPlayingLyrics = previewLyricsCount === null ? lyrics : {
-    document: {
+  const previewLineCount = previewLyricsCount ?? 24;
+  const previewLyricsEnabled = previewLyricsMode !== null || previewLyricsCount !== null;
+  const previewTimedLyrics = previewLyricsMode !== "plain";
+  const nowPlayingLyrics = !previewLyricsEnabled ? lyrics : {
+    document: previewLyricsMode === "none" || previewLyricsMode === "loading" || previewLyricsMode === "error" ? undefined : {
       format: "plain" as const,
-      timed: true,
+      timed: previewTimedLyrics,
       offsetMs: 0,
-      provider: "Cadilume 布局预览",
-      lines: Array.from({ length: previewLyricsCount }, (_, index) => ({
+      lines: Array.from({ length: previewLineCount }, (_, index) => ({
         id: `layout-preview-${index}`,
-        startMs: index * 2_000,
-        endMs: (index + 1) * 2_000,
+        startMs: previewTimedLyrics ? index * 2_000 : null,
+        endMs: previewTimedLyrics ? (index + 1) * 2_000 : null,
         texts: [`布局预览歌词第 ${index + 1} 行${index % 4 === 0 ? "，用于验证长文本与独立滚动" : ""}`],
       })),
     },
-    loading: false,
-    error: undefined,
-    activeIndex: previewLyricsCount > 0
-      ? Math.min(previewLyricsCount - 1, Math.max(0, Math.floor(player.progress / 2)))
+    loading: previewLyricsMode === "loading",
+    error: previewLyricsMode === "error" ? "歌词预览加载失败" : undefined,
+    activeIndex: previewTimedLyrics && previewLineCount > 0
+      ? Math.min(previewLineCount - 1, Math.max(0, Math.floor(player.progress / 2)))
       : -1,
   };
   const hasCurrentTrack = Boolean(player.current);
@@ -232,6 +255,15 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
   const lyricsPanelOpen = sidePanel === "lyrics" && canToggleLyrics;
   const previewPlaybackFailure = import.meta.env.DEV
     && new URLSearchParams(window.location.search).has("playback-error-preview");
+  const previewPlaybackLoading = import.meta.env.DEV
+    && new URLSearchParams(window.location.search).has("playback-loading-preview");
+  const requestedConnectionPreview = import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get("connection-preview")
+    : null;
+  const connectionPreview = ["local", "remote", "relay", "disconnected"].includes(requestedConnectionPreview || "")
+    ? requestedConnectionPreview as ConnectionKind
+    : undefined;
+  const playbackLoading = player.loading || previewPlaybackLoading;
   const activePlaybackFailure = player.playbackFailure ?? playbackFailurePreview;
 
   const selectedServer = servers.find((server) => server.id === serverId);
@@ -294,6 +326,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     try {
       const result = await discoverServers();
       setServers(result);
+      setConnectionAvailable(result.length > 0);
       setServerId((current) => {
         if (result.some((server) => server.id === current)) return current;
         if (result.some((server) => server.id === preferredPlaybackServerId)) return preferredPlaybackServerId;
@@ -303,6 +336,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
       if (!result.length) setNotice("当前账号没有发现可访问的 Plex Media Server。请先让服务器所有者共享音乐库。" );
       return true;
     } catch (reason) {
+      setConnectionAvailable(false);
       setNotice(reason instanceof Error ? reason.message : String(reason));
       return false;
     } finally {
@@ -319,32 +353,43 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     void getSections(serverId)
       .then((result) => {
         if (cancelled) return;
+        setConnectionAvailable(true);
         setSections(result);
         setSectionKey((current) => result.some((section) => section.key === current) ? current : result[0]?.key);
         if (!result.length) setNotice("这台服务器没有向当前账号开放音乐资料库。" );
       })
-      .catch((reason) => !cancelled && setNotice(String(reason)))
+      .catch((reason) => {
+        if (cancelled) return;
+        setConnectionAvailable(false);
+        setNotice(String(reason));
+      })
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
   }, [serverId, sourceRevision]);
 
-  const loadPlaylistList = useCallback(async () => {
+  const loadPlaylistList = useCallback(async (announce = false) => {
     const requestId = ++playlistListRequestRef.current;
     if (!serverId) {
       setPlaylists([]);
       setPlaylistListError(undefined);
       setPlaylistListLoading(false);
+      if (announce) setNotice("请先在设置中选择音乐服务器。");
       return;
     }
     setPlaylistListLoading(true);
     setPlaylistListError(undefined);
     try {
       const result = await getPlaylists(serverId);
-      if (playlistListRequestRef.current === requestId) setPlaylists(result);
+      if (playlistListRequestRef.current === requestId) {
+        setPlaylists(result);
+        if (announce) setNotice(result.length ? `播放列表已刷新，共 ${result.length} 个。` : "播放列表已刷新，当前没有可显示的音乐播放列表。");
+      }
     } catch (reason) {
       if (playlistListRequestRef.current === requestId) {
+        const message = playlistReadErrorMessage(reason);
         setPlaylists([]);
-        setPlaylistListError(playlistReadErrorMessage(reason));
+        setPlaylistListError(message);
+        if (announce) setNotice(message);
       }
     } finally {
       if (playlistListRequestRef.current === requestId) setPlaylistListLoading(false);
@@ -368,16 +413,34 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
     setPlaylistItemsLoading(false);
     setView(nextView);
     setDetail(undefined);
+    if (nextView !== "home") setHomeHubs([]);
     if (nextView === "settings") setSidePanel(null);
     if (!serverId || !sectionKey || nextView === "settings" || nextView === "search") return;
     setLoading(true);
     setNotice(undefined);
     try {
-      if (nextView === "home") setItems(await getRecentAlbums(serverId, sectionKey));
+      if (nextView === "home") {
+        const [hubs, recentAlbums] = await Promise.all([
+          getRecommendationHubs(serverId, sectionKey),
+          getRecentAlbums(serverId, sectionKey),
+        ]);
+        const completeHubs = hubs.some(isRecentlyAddedHub) || !recentAlbums.length
+          ? hubs
+          : [...hubs, {
+            title: "最近加入的音乐",
+            type: "album",
+            identifier: "cadilume.recentlyadded",
+            items: recentAlbums,
+          }];
+        setItems(recentAlbums);
+        setHomeHubs(orderRecommendationHubs(completeHubs));
+      }
       if (nextView === "albums") setItems(await getLibraryItems(serverId, sectionKey, 9));
       if (nextView === "artists") setItems(await getLibraryItems(serverId, sectionKey, 8));
       if (nextView === "tracks") setItems(await getLibraryItems(serverId, sectionKey, 10));
+      setConnectionAvailable(true);
     } catch (reason) {
+      setConnectionAvailable(false);
       setNotice(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setLoading(false);
@@ -472,26 +535,6 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
       setLoading(false);
     }
   }, [closePlaylist, searchText, sectionKey, serverId]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target instanceof Element ? event.target : null;
-      const isInteractiveTarget = Boolean(target?.closest("input, textarea, select, button, a, [contenteditable]:not([contenteditable='false'])"));
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        if (nowPlayingOpen || playlistTrack) return;
-        searchInputRef.current?.focus();
-        return;
-      }
-      if (event.code === "Space" && !playlistTrack && !isInteractiveTarget) {
-        event.preventDefault();
-        player.toggle();
-      }
-      if (event.key === "Escape" && !playlistTrack && !nowPlayingOpen) setSidePanel(null);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [nowPlayingOpen, player, playlistTrack]);
 
   const changeCloseBehavior = async (behavior: CloseBehavior) => {
     setCloseBehavior(behavior);
@@ -603,39 +646,40 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
           loading={playlistListLoading}
           error={playlistListError}
           onOpen={(playlist) => void openPlaylist(playlist)}
-          onRetry={() => void loadPlaylistList()}
+          onRetry={() => void loadPlaylistList(true)}
+          onCreate={() => {
+            if (!serverId) {
+              setNotice("请先在设置中选择音乐服务器。");
+              return;
+            }
+            setSidePanel(null);
+            setPlaylistTrack(undefined);
+            setPlaylistCreationOpen(true);
+          }}
         />
-        <div className="sidebar-footer">
-          <button className={`account-button ${!selectedPlaylist && view === "settings" ? "active" : ""}`} aria-current={!selectedPlaylist && view === "settings" ? "page" : undefined} onClick={() => void loadView("settings")}>
-            <Avatar account={account} />
-            <span><strong>{account.title || account.username}</strong><small>{selectedServer ? (selectedServer.owned ? "我的服务器" : "共享资料库") : "选择音乐来源"}</small></span>
-          </button>
-        </div>
       </aside>
 
       <section className="workspace" aria-hidden={expandedPlayerOpen || undefined} inert={expandedPlayerOpen || undefined}>
         <header className="topbar">
           <form className="searchbox" onSubmit={submitSearch} role="search">
             <Search size={17} />
-            <input ref={searchInputRef} value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索歌曲、专辑或艺术家" aria-label="搜索资料库" />
-            <kbd>{outputDevices.platform === "macos" ? "⌘ K" : "Ctrl K"}</kbd>
+            <input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索歌曲、专辑或艺术家" aria-label="搜索资料库" />
           </form>
           <div className="topbar-actions">
-            {selectedServer && (() => {
-              const connectionKind = selectedServer.local ? "local" : selectedServer.relay ? "relay" : "remote";
-              const connectionLabel = selectedServer.local ? "本地直连" : selectedServer.relay ? "Plex Relay" : "远程直连";
-              return (
-                <span className="connection-pill" data-connection={connectionKind} aria-label={`连接方式：${connectionLabel}`} title="当前选中服务器的连接方式">
-                  <span className="status-dot" aria-hidden="true" />
-                  {connectionLabel}
-                </span>
-              );
-            })()}
+            <ConnectionIndicator server={selectedServer} connected={connectionAvailable} kindOverride={connectionPreview} />
+            <button className="topbar-account" type="button" aria-label={`打开 ${account.title || account.username} 的 Plex 账号设置`} onClick={() => void loadView("settings")}>
+              <Avatar account={account} />
+              <span>
+                <strong>{account.title || account.username}</strong>
+                <small>{selectedServer ? (selectedServer.owned ? "我的服务器" : "共享资料库") : "选择音乐来源"}</small>
+              </span>
+            </button>
+            <IconButton label="设置" active={!selectedPlaylist && view === "settings"} onClick={() => void loadView("settings")}><Settings size={18} /></IconButton>
+            <IconButton label={sourcesSyncing ? "正在同步资料" : "刷新资料"} disabled={sourcesSyncing} onClick={() => void syncSources()}><RefreshCw className={sourcesSyncing ? "spin" : ""} size={17} /></IconButton>
           </div>
         </header>
 
         <main ref={contentRef} id="main-content" className="content" tabIndex={-1}>
-          {notice && <Notice message={notice} onClose={() => setNotice(undefined)} />}
           {selectedPlaylist ? (
             <PlaylistDetailView
               playlist={selectedPlaylist}
@@ -652,6 +696,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
             <ContentView
               view={view}
               items={items}
+              homeHubs={homeHubs}
               hubs={searchHubs}
               searchText={searchText}
               detail={detail}
@@ -662,14 +707,15 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
               sections={sections}
               sectionKey={sectionKey}
               section={selectedSection}
-              sourcesSyncing={sourcesSyncing}
               closeBehavior={closeBehavior}
               quality={quality}
               themeMode={themeMode}
               prebufferNext={player.prebufferNext}
               cacheStatus={cacheStatus}
               cacheBusy={cacheBusy}
+              playlists={playlists}
               onOpen={openItem}
+              onOpenPlaylist={(playlist) => void openPlaylist(playlist)}
               onBack={() => setDetail(undefined)}
               onPlayDetail={playDetail}
               onShuffleDetail={() => shuffleContext(detail?.children || [])}
@@ -679,7 +725,6 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
               onThemeMode={onThemeMode}
               onServerChange={setServerId}
               onSectionChange={setSectionKey}
-              onSyncSources={() => void syncSources()}
               onPrebufferNext={player.setPrebufferNext}
               onClearCache={() => void clearCache()}
               onLogout={signOut}
@@ -708,7 +753,6 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
       {sidePanel === "devices" && (
         <DevicesPanel
           output={outputDevices}
-          player={player}
           onClose={() => setSidePanel(null)}
         />
       )}
@@ -719,14 +763,19 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         onModeChange={changeNowPlayingMode}
         track={player.current}
         playing={player.playing}
+        loading={playbackLoading}
+        buffering={player.buffering}
         artwork={<Artwork item={player.current} size="immersive" />}
-        backgroundArtwork={<Artwork item={player.current} size="backdrop" preferArt />}
+        backgroundArtwork={<Artwork item={player.current} size="backdrop" />}
         progressSeconds={player.progress}
         durationSeconds={player.duration}
         shuffle={player.shuffle}
         repeat={player.repeat}
         muted={player.muted}
         volume={player.volume}
+        lyrics={nowPlayingLyrics}
+        queue={player.queue}
+        currentQueueIndex={player.currentIndex}
         theme={themeMode}
         onSeek={player.seek}
         onShuffleChange={player.setShuffle}
@@ -736,6 +785,10 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         onRepeatChange={player.setRepeat}
         onMutedChange={player.setMuted}
         onVolumeChange={player.setVolume}
+        onSelectQueueIndex={(index) => {
+          const track = player.queue[index];
+          if (track) player.playContext(track, player.queue);
+        }}
         onClose={closeNowPlaying}
         escapeEnabled={!playlistTrack && !activePlaybackFailure}
         onAddToPlaylist={() => {
@@ -767,8 +820,24 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
         />
       )}
 
+      {playlistCreationOpen && serverId && (
+        <CreatePlaylistDialog
+          serverId={serverId}
+          onClose={() => setPlaylistCreationOpen(false)}
+          onCreated={(playlist) => {
+            setPlaylistCreationOpen(false);
+            setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
+            setNotice(`已创建播放列表“${playlist.title}”。`);
+            void loadPlaylistList();
+          }}
+          onError={setNotice}
+        />
+      )}
+
       <PlayerBar
         player={player}
+        loading={playbackLoading}
+        buffering={player.buffering}
         nowPlayingTriggerRef={nowPlayingTriggerRef}
         expanded={expandedPlayerOpen}
         queueOpen={queuePanelOpen}
@@ -797,23 +866,13 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
           setSidePanel((value) => value === "lyrics" ? null : "lyrics");
         }}
         onOutputAction={() => {
-          const result = activateOutputControl(
-            outputDevices.platform,
-            hasCurrentTrack,
-            player.showAirPlayPicker,
-            () => {
-              setNowPlayingOpen(false);
-              setPlaylistTrack(undefined);
-              setSidePanel((value) => value === "devices" ? null : "devices");
-            },
-          );
-          if (result === "missing-track") {
-            setNotice("请先播放一首歌曲，再选择 AirPlay 设备。");
-          } else if (result === "airplay-unavailable") {
-            setNotice("当前 macOS WebView 没有提供 AirPlay 选择器，请从控制中心的“声音”菜单选择 AirPlay 设备。");
-          }
+          setNowPlayingOpen(false);
+          setPlaylistTrack(undefined);
+          setSidePanel((value) => value === "devices" ? null : "devices");
         }}
       />
+
+      {notice && <GlobalToast message={notice} onClose={() => setNotice(undefined)} />}
     </div>
     </ArtworkServerContext.Provider>
   );
@@ -822,6 +881,7 @@ function MusicShell({ initialSession, themeMode, onThemeMode }: { initialSession
 interface ContentViewProps {
   view: LibraryView;
   items: PlexItem[];
+  homeHubs: PlexHub[];
   hubs: PlexHub[];
   searchText: string;
   detail?: { source: PlexItem; children: PlexItem[] };
@@ -832,14 +892,15 @@ interface ContentViewProps {
   sections: LibrarySection[];
   sectionKey?: string;
   section?: LibrarySection;
-  sourcesSyncing: boolean;
   closeBehavior: CloseBehavior;
   quality: StreamQuality;
   themeMode: ThemeMode;
   prebufferNext: boolean;
   cacheStatus?: CacheStatus;
   cacheBusy: boolean;
+  playlists: PlexPlaylist[];
   onOpen: (item: PlexItem) => void;
+  onOpenPlaylist: (playlist: PlexPlaylist) => void;
   onBack: () => void;
   onPlayDetail: () => void;
   onShuffleDetail: () => void;
@@ -849,47 +910,53 @@ interface ContentViewProps {
   onThemeMode: (value: ThemeMode) => void;
   onServerChange: (value: string) => void;
   onSectionChange: (value: string) => void;
-  onSyncSources: () => void;
   onPrebufferNext: (value: boolean) => void;
   onClearCache: () => void;
   onLogout: () => void;
 }
 
-function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetry }: {
+function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetry, onCreate }: {
   playlists: PlexPlaylist[];
   selectedId?: string;
   loading: boolean;
   error?: string;
   onOpen: (playlist: PlexPlaylist) => void;
   onRetry: () => void;
+  onCreate: () => void;
 }) {
+  const [collapsed, setCollapsed] = useState(false);
   return (
-    <nav className="sidebar-playlists" aria-label="歌单">
-      <div className="sidebar-playlists-heading">
-        <span>歌单</span>
+    <nav className={`sidebar-playlists ${collapsed ? "is-collapsed" : ""}`} aria-label="播放列表">
+      <div className="sidebar-playlists-toolbar">
+        <button className="sidebar-playlists-heading" type="button" aria-expanded={!collapsed} aria-controls="sidebar-playlist-list" onClick={() => setCollapsed((value) => !value)}>
+          <span>播放列表</span>
+          <ChevronDown size={15} strokeWidth={2} aria-hidden="true" />
+        </button>
+        <button className="sidebar-playlists-create" type="button" aria-label="新建播放列表" title="新建播放列表" onClick={onCreate}>
+          <Plus size={16} strokeWidth={2} aria-hidden="true" />
+        </button>
       </div>
-      <div className="sidebar-playlist-list" aria-busy={loading || undefined}>
+      <div id="sidebar-playlist-list" className="sidebar-playlist-list" aria-busy={loading || undefined} hidden={collapsed}>
         {loading ? (
-          <div className="sidebar-playlist-state" role="status"><LoaderCircle className="spin" size={17} /><span>正在同步歌单…</span></div>
+          <div className="sidebar-playlist-state" role="status"><LoaderCircle className="spin" size={17} /><span>正在同步播放列表…</span></div>
         ) : error ? (
-          <div className="sidebar-playlist-state is-error" role="alert"><span>歌单读取失败</span><button type="button" onClick={onRetry}>重试</button></div>
+          <div className="sidebar-playlist-state is-error" role="alert"><span>播放列表读取失败</span><button type="button" onClick={onRetry}>重试</button></div>
         ) : !playlists.length ? (
-          <div className="sidebar-playlist-state"><ListMusic size={18} /><span>暂无音乐歌单</span></div>
+          <div className="sidebar-playlist-state"><ListMusic size={18} /><span>暂无音乐播放列表</span></div>
         ) : playlists.map((playlist) => {
           const capability = [playlist.smart ? "智能" : "普通", playlist.readOnly ? "只读" : undefined].filter(Boolean).join(" · ");
           const active = selectedId === playlist.ratingKey;
-          const PlaylistIcon = playlist.smart ? Sparkles : ListMusic;
           return (
             <button
               type="button"
               className={`sidebar-playlist-item ${active ? "active" : ""}`}
               key={playlist.ratingKey}
               aria-current={active ? "page" : undefined}
-              aria-label={`${playlist.title}，${capability}歌单`}
+              aria-label={`${playlist.title}，${capability}播放列表`}
               title={playlist.title}
               onClick={() => onOpen(playlist)}
             >
-              <PlaylistIcon size={15} strokeWidth={1.9} />
+              <Artwork item={playlist} size="small" className="sidebar-playlist-artwork" />
               <span><strong>{playlist.title}</strong><small>{capability}</small></span>
             </button>
           );
@@ -901,12 +968,89 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
 
 function ContentView(props: ContentViewProps) {
   if (props.view === "settings") return <SettingsView {...props} />;
-  if (props.detail) return <DetailView detail={props.detail} onBack={props.onBack} onPlay={props.onPlayDetail} onShuffle={props.onShuffleDetail} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
+  if (props.detail) return <DetailView detail={props.detail} serverId={props.serverId} onBack={props.onBack} onPlay={props.onPlayDetail} onShuffle={props.onShuffleDetail} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "search") return <SearchResults hubs={props.hubs} query={props.searchText} onOpen={props.onOpen} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "tracks") return <TrackTable title="歌曲" tracks={props.items} onPlay={props.onPlayTrack} />;
   if (props.view === "artists") return <CardCollection title="艺术家" items={props.items} round indexed onOpen={props.onOpen} />;
   if (props.view === "albums") return <CardCollection title="专辑" items={props.items} indexed onOpen={props.onOpen} />;
-  return <CardCollection title="最近加入" items={props.items} onOpen={props.onOpen} compact />;
+  return <RecommendationsView hubs={props.homeHubs} playlists={props.playlists} onOpen={props.onOpen} onOpenPlaylist={props.onOpenPlaylist} onPlayTrack={props.onPlayTrack} />;
+}
+
+function ConnectionIndicator({ server, connected, kindOverride }: { server?: PlexServer; connected: boolean; kindOverride?: ConnectionKind }) {
+  const kind = kindOverride ?? (!server || !connected ? "disconnected" : server.local ? "local" : server.relay ? "relay" : "remote");
+  const label = kind === "local" ? "本地直连" : kind === "remote" ? "远程直连" : kind === "relay" ? "Plex Relay" : "连接已断开";
+  const description = kind === "local"
+    ? "本地直连：当前通过局域网直接连接 Plex Media Server。"
+    : kind === "remote"
+      ? "远程直连：当前通过公网直接连接 Plex Media Server。"
+      : kind === "relay"
+        ? "Plex Relay：当前由 Plex 中继转发，带宽可能受限。"
+        : "连接已断开：当前无法访问所选 Plex Media Server。";
+  const StatusIcon = kind === "local" ? Cable : kind === "remote" ? Globe2 : kind === "relay" ? Cloud : WifiOff;
+  return (
+    <span className="connection-tooltip-anchor">
+      <span className="connection-indicator" data-connection={kind} role="status" tabIndex={0} aria-label={`连接状态：${label}`} aria-describedby="connection-status-tooltip">
+        <StatusIcon size={17} strokeWidth={1.9} aria-hidden="true" />
+      </span>
+      <span id="connection-status-tooltip" className="connection-tooltip" role="tooltip">{description}</span>
+    </span>
+  );
+}
+
+function RecommendationsView({ hubs, playlists, onOpen, onOpenPlaylist, onPlayTrack }: {
+  hubs: PlexHub[];
+  playlists: PlexPlaylist[];
+  onOpen: (item: PlexItem) => void;
+  onOpenPlaylist: (playlist: PlexPlaylist) => void;
+  onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
+}) {
+  const recentPlaylists = recentlyPlayedPlaylists(playlists);
+  const orderedHubs = orderRecommendationHubs(hubs);
+  return (
+    <section className="recommendations-page">
+      <div className="page-heading"><h1>推荐</h1></div>
+      {!recentPlaylists.length && !orderedHubs.length ? (
+        <EmptyState title="还没有推荐内容" description="开始播放音乐后，这里会显示最近播放和服务器推荐。" icon={<Music2 size={28} />} />
+      ) : (
+        <div className="recommendation-sections">
+          {recentPlaylists.length > 0 && (
+            <section className="recommendation-section" aria-labelledby="recent-playlists-heading">
+              <div className="section-heading"><h2 id="recent-playlists-heading">最近播放的播放列表</h2></div>
+              <div className="recommendation-row" role="list">
+                {recentPlaylists.map((playlist) => (
+                  <button className="recommendation-card" type="button" role="listitem" key={playlist.ratingKey} onClick={() => onOpenPlaylist(playlist)}>
+                    <Artwork item={playlist} size="large" />
+                    <strong>{playlist.title}</strong>
+                    <small>{playlist.smart ? "智能播放列表" : `${playlist.leafCount ?? 0} 首歌曲`}</small>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+          {orderedHubs.map((hub, hubIndex) => (
+            <section className="recommendation-section" aria-labelledby={`recommendation-hub-${hubIndex}`} key={`${hub.identifier || hub.title}-${hubIndex}`}>
+              <div className="section-heading"><h2 id={`recommendation-hub-${hubIndex}`}>{recommendationHubTitle(hub)}</h2></div>
+              <div className="recommendation-row" role="list">
+                {hub.items.map((item, itemIndex) => (
+                  <button
+                    className="recommendation-card"
+                    type="button"
+                    role="listitem"
+                    key={`${item.ratingKey}-${itemIndex}`}
+                    onClick={() => item.type === "track" ? onPlayTrack(item, hub.items) : onOpen(item)}
+                  >
+                    <Artwork item={item} className={item.type === "artist" ? "round" : ""} size="large" />
+                    <strong>{item.title}</strong>
+                    <small>{item.type === "track" ? trackArtist(item) : item.parentTitle || (item.type === "artist" ? "艺术家" : item.year || "专辑")}</small>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function PlaylistDetailView({ playlist, tracks, loading, error, onBack, onRetry, onPlay, onShuffle, onPlayTrack }: {
@@ -920,7 +1064,7 @@ function PlaylistDetailView({ playlist, tracks, loading, error, onBack, onRetry,
   onShuffle: () => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
 }) {
-  const kind = [playlist.smart ? "智能" : "普通", playlist.readOnly ? "只读" : undefined].filter(Boolean).join(" · ") + "歌单";
+  const kind = [playlist.smart ? "智能" : "普通", playlist.readOnly ? "只读" : undefined].filter(Boolean).join(" · ") + "播放列表";
   const trackCount = loading ? playlist.leafCount ?? 0 : tracks.length;
   return (
     <>
@@ -937,12 +1081,12 @@ function PlaylistDetailView({ playlist, tracks, loading, error, onBack, onRetry,
         </div>
       </header>
       {loading ? (
-        <div className="playlist-detail-state" role="status"><LoaderCircle className="spin" size={22} /><span>正在读取歌单曲目…</span></div>
+        <div className="playlist-detail-state" role="status"><LoaderCircle className="spin" size={22} /><span>正在读取播放列表曲目…</span></div>
       ) : error ? (
-        <div className="playlist-detail-state is-error" role="alert"><TriangleAlert size={24} /><strong>无法读取这个歌单</strong><span>{error}</span><button className="secondary-button" type="button" onClick={onRetry}><RefreshCw size={15} />重试</button></div>
+        <div className="playlist-detail-state is-error" role="alert"><TriangleAlert size={24} /><strong>无法读取这个播放列表</strong><span>{error}</span><button className="secondary-button" type="button" onClick={onRetry}><RefreshCw size={15} />重试</button></div>
       ) : tracks.length ? (
         <TrackTable title="曲目" tracks={tracks} onPlay={onPlayTrack} />
-      ) : <EmptyState title="这个歌单还没有歌曲" description={playlist.smart ? "Plex 当前没有返回符合智能规则的曲目。" : "可以稍后从歌曲菜单向普通可写歌单添加内容。"} icon={<ListMusic size={28} />} />}
+      ) : <EmptyState title="这个播放列表还没有歌曲" description={playlist.smart ? "Plex 当前没有返回符合智能规则的曲目。" : "可以稍后从歌曲菜单向普通可写播放列表添加内容。"} icon={<ListMusic size={28} />} />}
     </>
   );
 }
@@ -1009,21 +1153,216 @@ function MediaCardGrid({ items, round, compact, onOpen }: { items: PlexItem[]; r
   );
 }
 
-function DetailView({ detail, onBack, onPlay, onShuffle, onOpen, onPlayTrack }: { detail: { source: PlexItem; children: PlexItem[] }; onBack: () => void; onPlay: () => void; onShuffle: () => void; onOpen: (item: PlexItem) => void; onPlayTrack: (track: PlexItem, context: PlexItem[]) => void }) {
+function DetailView({ detail, serverId, onBack, onPlay, onShuffle, onOpen, onPlayTrack }: {
+  detail: { source: PlexItem; children: PlexItem[] };
+  serverId?: string;
+  onBack: () => void;
+  onPlay: () => void;
+  onShuffle: () => void;
+  onOpen: (item: PlexItem) => void;
+  onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
+}) {
+  if (detail.source.type === "artist") {
+    return (
+      <ArtistDetailView
+        key={detail.source.ratingKey}
+        detail={detail}
+        serverId={serverId}
+        onBack={onBack}
+        onOpen={onOpen}
+        onPlayTrack={onPlayTrack}
+      />
+    );
+  }
+
   const tracks = detail.children.filter((item) => item.type === "track");
-  const albums = detail.children.filter((item) => item.type === "album");
-  const typeLabel = detail.source.type === "artist" ? "艺术家" : "专辑";
-  const detailMeta = detail.source.parentTitle ? `${typeLabel} · ${detail.source.parentTitle}` : typeLabel;
+  const detailMeta = detail.source.parentTitle ? `专辑 · ${detail.source.parentTitle}` : "专辑";
   return (
-    <>
+    <section className="detail-page album-detail-page">
       <button className="back-button" onClick={onBack}><ArrowLeft size={17} />返回</button>
       <header className="detail-hero">
-        <Artwork item={detail.source} size="hero" className={detail.source.type === "artist" ? "round" : ""} />
-        <div><h1>{detail.source.title}</h1><p>{detailMeta}</p>{tracks.length > 0 && <div className="detail-actions"><button className="primary-button" onClick={onPlay}><Play size={17} fill="currentColor" />播放</button>{detail.source.type === "album" && <button className="secondary-button" onClick={onShuffle}><Shuffle size={16} />随机播放</button>}</div>}</div>
+        <Artwork item={detail.source} size="hero" />
+        <div><h1>{detail.source.title}</h1><p>{detailMeta}</p>{tracks.length > 0 && <div className="detail-actions"><button className="primary-button" onClick={onPlay}><Play size={17} fill="currentColor" />播放</button><button className="secondary-button" onClick={onShuffle}><Shuffle size={16} />随机播放</button></div>}</div>
       </header>
       {tracks.length > 0 && <TrackTable title="曲目" tracks={tracks} onPlay={onPlayTrack} />}
-      {albums.length > 0 && <CardCollection title="专辑" items={albums} onOpen={onOpen} />}
-    </>
+    </section>
+  );
+}
+
+type ArtistDetailTab = "albums" | "tracks";
+
+function ArtistDetailView({ detail, serverId, onBack, onOpen, onPlayTrack }: {
+  detail: { source: PlexItem; children: PlexItem[] };
+  serverId?: string;
+  onBack: () => void;
+  onOpen: (item: PlexItem) => void;
+  onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
+}) {
+  const albums = detail.children.filter((item) => item.type === "album");
+  const [activeTab, setActiveTab] = useState<ArtistDetailTab>("albums");
+  const [tracks, setTracks] = useState<PlexItem[]>([]);
+  const [totalSize, setTotalSize] = useState<number>();
+  const [tracksLoading, setTracksLoading] = useState(false);
+  const [tracksError, setTracksError] = useState<string>();
+  const albumsTabRef = useRef<HTMLButtonElement>(null);
+  const tracksTabRef = useRef<HTMLButtonElement>(null);
+  const loadSentinelRef = useRef<HTMLDivElement>(null);
+  const requestRef = useRef(0);
+  const loadingRef = useRef(false);
+  const nextStartRef = useRef(0);
+  const totalSizeRef = useRef<number | undefined>(undefined);
+  const tabIdBase = `artist-${detail.source.ratingKey.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  const hasMoreTracks = totalSize === undefined || tracks.length < totalSize;
+
+  const loadNextTrackPage = useCallback(async () => {
+    if (!serverId || loadingRef.current) return;
+    const start = nextStartRef.current;
+    if (totalSizeRef.current !== undefined && start >= totalSizeRef.current) return;
+    const requestId = ++requestRef.current;
+    loadingRef.current = true;
+    setTracksLoading(true);
+    setTracksError(undefined);
+    try {
+      const page = await getArtistTracksPage(serverId, detail.source.ratingKey, start, ARTIST_TRACK_PAGE_SIZE);
+      if (requestId !== requestRef.current) return;
+      setTracks((current) => appendUniqueArtistTracks(current, page.items));
+      nextStartRef.current = page.nextStart;
+      const resolvedTotalSize = page.items.length
+        ? Math.max(page.totalSize, nextStartRef.current)
+        : nextStartRef.current;
+      totalSizeRef.current = resolvedTotalSize;
+      setTotalSize(resolvedTotalSize);
+    } catch (reason) {
+      if (requestId === requestRef.current) {
+        setTracksError(reason instanceof Error ? reason.message : String(reason));
+      }
+    } finally {
+      if (requestId === requestRef.current) {
+        loadingRef.current = false;
+        setTracksLoading(false);
+      }
+    }
+  }, [detail.source.ratingKey, serverId]);
+
+  useEffect(() => () => {
+    requestRef.current += 1;
+    loadingRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "tracks" && !tracks.length && !tracksLoading && !tracksError) {
+      void loadNextTrackPage();
+    }
+  }, [activeTab, loadNextTrackPage, tracks.length, tracksError, tracksLoading]);
+
+  useEffect(() => {
+    const sentinel = loadSentinelRef.current;
+    if (activeTab !== "tracks" || !sentinel || tracksLoading || tracksError || !hasMoreTracks) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void loadNextTrackPage();
+    }, {
+      root: sentinel.closest(".content"),
+      rootMargin: "0px 0px 280px",
+      threshold: 0.01,
+    });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [activeTab, hasMoreTracks, loadNextTrackPage, tracks.length, tracksError, tracksLoading]);
+
+  const selectTabFromKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const nextTab: ArtistDetailTab = event.key === "ArrowLeft" || event.key === "Home" ? "albums" : "tracks";
+    setActiveTab(nextTab);
+    window.requestAnimationFrame(() => (nextTab === "albums" ? albumsTabRef : tracksTabRef).current?.focus());
+  };
+
+  return (
+    <section className="detail-page artist-detail-page">
+      <button className="back-button artist-back-button" type="button" onClick={onBack}><ArrowLeft size={18} strokeWidth={2} />返回艺术家列表</button>
+      <header className="detail-hero artist-detail-hero">
+        <Artwork item={detail.source} size="hero" className="round" />
+        <div><h1>{detail.source.title}</h1><p>艺术家</p></div>
+      </header>
+      <div className="artist-detail-tabs" role="tablist" aria-label={`${detail.source.title}内容`}>
+        <button
+          ref={albumsTabRef}
+          id={`${tabIdBase}-albums-tab`}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "albums"}
+          aria-controls={`${tabIdBase}-albums-panel`}
+          tabIndex={activeTab === "albums" ? 0 : -1}
+          onClick={() => setActiveTab("albums")}
+          onKeyDown={selectTabFromKeyboard}
+        >专辑</button>
+        <button
+          ref={tracksTabRef}
+          id={`${tabIdBase}-tracks-tab`}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "tracks"}
+          aria-controls={`${tabIdBase}-tracks-panel`}
+          tabIndex={activeTab === "tracks" ? 0 : -1}
+          onClick={() => setActiveTab("tracks")}
+          onKeyDown={selectTabFromKeyboard}
+        >歌曲</button>
+      </div>
+      {activeTab === "albums" ? (
+        <div id={`${tabIdBase}-albums-panel`} className="artist-detail-panel" role="tabpanel" aria-labelledby={`${tabIdBase}-albums-tab`}>
+          {albums.length
+            ? <MediaCardGrid items={albums} round={false} compact={false} onOpen={onOpen} />
+            : <EmptyState title="没有专辑" description="Plex 当前没有返回可显示的专辑。" />}
+        </div>
+      ) : (
+        <div id={`${tabIdBase}-tracks-panel`} className="artist-detail-panel artist-tracks-panel" role="tabpanel" aria-labelledby={`${tabIdBase}-tracks-tab`} aria-busy={tracksLoading || undefined}>
+          {tracks.length ? <ArtistTrackTable tracks={tracks} totalSize={totalSize} onPlay={onPlayTrack} /> : tracksLoading ? (
+            <div className="artist-track-list-state" role="status"><LoaderCircle className="spin" size={21} /><span>正在读取歌曲…</span></div>
+          ) : tracksError ? (
+            <div className="artist-track-list-state is-error" role="alert"><TriangleAlert size={22} /><strong>无法读取歌曲</strong><button className="secondary-button" type="button" onClick={() => void loadNextTrackPage()}><RefreshCw size={15} />重试</button></div>
+          ) : <EmptyState title="没有歌曲" description="Plex 当前没有返回这位艺术家的歌曲。" />}
+          {tracks.length > 0 && tracksError && (
+            <div className="artist-track-page-error" role="alert"><span>后续歌曲加载失败</span><button className="secondary-button" type="button" onClick={() => void loadNextTrackPage()}><RefreshCw size={15} />重试</button></div>
+          )}
+          {tracks.length > 0 && hasMoreTracks && !tracksError && (
+            <div ref={loadSentinelRef} className={`artist-track-sentinel ${tracksLoading ? "is-loading" : ""}`} aria-hidden={!tracksLoading || undefined}>
+              {tracksLoading && <><LoaderCircle className="spin" size={18} /><span>正在加载更多歌曲…</span></>}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ArtistTrackTable({ tracks, totalSize, onPlay }: {
+  tracks: PlexItem[];
+  totalSize?: number;
+  onPlay: (track: PlexItem, context: PlexItem[]) => void;
+}) {
+  return (
+    <div className="artist-track-table" role="table" aria-label="艺术家全部歌曲" aria-rowcount={totalSize === undefined ? undefined : totalSize + 1}>
+      <div className="artist-track-row artist-track-head" role="row">
+        <span role="columnheader">序号</span><span role="columnheader" aria-label="专辑封面" /><span role="columnheader">标题</span><span role="columnheader">歌手</span><span role="columnheader">专辑</span><span role="columnheader">时长</span>
+      </div>
+      {tracks.map((track, index) => (
+        <button
+          className="artist-track-row"
+          type="button"
+          role="row"
+          aria-rowindex={index + 2}
+          key={`${track.ratingKey}-${index}`}
+          onClick={() => onPlay(track, tracks)}
+        >
+          <span className="artist-track-number" role="cell"><span>{index + 1}</span><Play size={13} fill="currentColor" aria-hidden="true" /></span>
+          <span role="cell"><Artwork item={track} size="small" /></span>
+          <strong className="truncate" role="cell">{track.title}</strong>
+          <span className="truncate" role="cell">{trackArtist(track)}</span>
+          <span className="truncate" role="cell">{trackAlbum(track)}</span>
+          <span className="duration-cell" role="cell">{formatDuration(track.duration)}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -1078,7 +1417,7 @@ function SettingsView(props: ContentViewProps) {
           <ChoiceCard active={props.themeMode === "dark"} title="深色" icon={<Moon size={20} />} onClick={() => props.onThemeMode("dark")} />
         </div>
       </SettingsGroup>
-      <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放" description="需要兼容时由 Plex 服务器转码；Cadilume 不在本地转码。">
+      <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放">
         <div className="settings-stack">
           <label className="field-row"><span>音频质量</span><select value={props.quality} onChange={(event) => props.onQuality(event.target.value as StreamQuality)}><option value="auto">自动（优先直放 / PMS 兼容转码）</option><option value="original">始终原始质量</option><option value="320">320 kbps</option><option value="256">256 kbps</option><option value="192">192 kbps</option></select></label>
           <label className="toggle-row">
@@ -1096,35 +1435,74 @@ function SettingsView(props: ContentViewProps) {
       </SettingsGroup>
       <SettingsGroup icon={<Server size={18} />} title="音乐来源">
         <div className="settings-stack">
-          <label className="field-row">
+          <div className="field-row">
             <strong>服务器</strong>
-            <select aria-label="Plex 服务器" value={props.serverId || ""} disabled={!props.servers.length} onChange={(event) => props.onServerChange(event.target.value)}>
-              {!props.servers.length && <option value="">未发现服务器</option>}
-              {props.servers.map((server) => <option value={server.id} key={server.id}>{server.name}</option>)}
-            </select>
-          </label>
-          <label className="field-row">
+            <SettingsSelect
+              label="Plex 服务器"
+              value={props.serverId}
+              placeholder="未发现服务器"
+              disabled={props.servers.length <= 1}
+              options={props.servers.map((server) => ({ value: server.id, label: server.name }))}
+              onValueChange={props.onServerChange}
+            />
+          </div>
+          <div className="field-row">
             <strong>音乐资料库</strong>
-            <select aria-label="音乐资料库" value={props.sectionKey || ""} disabled={!props.sections.length} onChange={(event) => props.onSectionChange(event.target.value)}>
-              {!props.sections.length && <option value="">未发现音乐资料库</option>}
-              {props.sections.map((section) => <option value={section.key} key={section.key}>{section.title}</option>)}
-            </select>
-          </label>
-          <div className="source-sync-row">
-            <span>{props.server ? `${props.server.owned ? "所有者" : "家庭 / 共享访问"} · ${props.server.local ? "本地直连" : props.server.relay ? "Plex Relay" : "远程直连"}` : "尚未连接音乐来源"}</span>
-            <button className="secondary-button" type="button" disabled={props.sourcesSyncing} onClick={props.onSyncSources}>{props.sourcesSyncing ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}同步资料</button>
+            <SettingsSelect
+              label="音乐资料库"
+              value={props.sectionKey}
+              placeholder="未发现音乐资料库"
+              disabled={props.sections.length <= 1}
+              options={props.sections.map((section) => ({ value: section.key, label: section.title }))}
+              onValueChange={props.onSectionChange}
+            />
           </div>
         </div>
       </SettingsGroup>
       <SettingsGroup icon={<CircleUserRound size={18} />} title="Plex 账号">
-        <div className="account-settings-row"><span>{props.account.email || props.account.username}</span><button className="danger-button" onClick={props.onLogout}><LogOut size={16} />退出账号</button></div>
+        <div className="account-settings-row">
+          <span className="settings-account-identity"><Avatar account={props.account} /><span><strong>{props.account.title || props.account.username}</strong><small>{props.account.email || props.account.username}</small></span></span>
+          <span className="settings-account-library"><strong>{props.section?.title || "未选择音乐资料库"}</strong><small>{props.server ? `${props.server.owned ? "我的服务器" : "共享资料库"} · ${props.server.name}` : "未选择服务器"}</small></span>
+          <button className="danger-button" onClick={props.onLogout}><LogOut size={16} />退出账号</button>
+        </div>
       </SettingsGroup>
     </div>
   );
 }
 
-function SettingsGroup({ id, icon, title, description, children }: { id?: string; icon: ReactNode; title: string; description?: string; children: ReactNode }) {
-  return <section id={id} className="settings-group"><header><span className="settings-icon">{icon}</span><div><h2>{title}</h2>{description && <p>{description}</p>}</div></header><div className="settings-body">{children}</div></section>;
+function SettingsGroup({ id, icon, title, children }: { id?: string; icon: ReactNode; title: string; children: ReactNode }) {
+  return <section id={id} className="settings-group"><header><span className="settings-icon">{icon}</span><div><h2>{title}</h2></div></header><div className="settings-body">{children}</div></section>;
+}
+
+function SettingsSelect({ label, value, placeholder, disabled, options, onValueChange }: {
+  label: string;
+  value?: string;
+  placeholder: string;
+  disabled: boolean;
+  options: Array<{ value: string; label: string }>;
+  onValueChange: (value: string) => void;
+}) {
+  const selectedValue = options.some((option) => option.value === value) ? value : undefined;
+  return (
+    <Select.Root value={selectedValue} disabled={disabled || options.length === 0} onValueChange={onValueChange}>
+      <Select.Trigger className="settings-select-trigger" aria-label={label}>
+        <Select.Value placeholder={placeholder} />
+        <Select.Icon className="settings-select-chevron"><ChevronDown size={15} strokeWidth={2} /></Select.Icon>
+      </Select.Trigger>
+      <Select.Portal>
+        <Select.Content className="settings-select-content" position="popper" sideOffset={6} collisionPadding={12}>
+          <Select.Viewport className="settings-select-viewport">
+            {options.map((option) => (
+              <Select.Item className="settings-select-item" value={option.value} key={option.value}>
+                <Select.ItemText>{option.label}</Select.ItemText>
+                <Select.ItemIndicator className="settings-select-indicator"><Check size={14} strokeWidth={2.2} /></Select.ItemIndicator>
+              </Select.Item>
+            ))}
+          </Select.Viewport>
+        </Select.Content>
+      </Select.Portal>
+    </Select.Root>
+  );
 }
 
 function ChoiceCard({ active, title, icon, onClick }: { active: boolean; title: string; icon: ReactNode; onClick: () => void }) {
@@ -1235,25 +1613,10 @@ function LyricsPanel({ track, lyrics, onSeek }: {
   );
 }
 
-function DevicesPanel({ output, player, onClose }: {
+function DevicesPanel({ output, onClose }: {
   output: ReturnType<typeof useOutputDevices>;
-  player: ReturnType<typeof usePlayer>;
   onClose: () => void;
 }) {
-  const hasTrack = Boolean(player.current);
-  const openAirPlay = async () => {
-    output.setMessage(undefined);
-    if (!hasTrack) {
-      output.setMessage("请先播放一首歌曲，再选择 AirPlay 设备。");
-      return;
-    }
-    try {
-      const opened = await player.showAirPlayPicker();
-      if (!opened) output.setMessage("当前 macOS WebView 没有提供 AirPlay 选择器，请从控制中心的“声音”菜单选择 AirPlay 设备。");
-    } catch (reason) {
-      output.setMessage(reason instanceof Error ? reason.message : "无法打开 AirPlay 设备列表。");
-    }
-  };
   const openWindowsSettings = async () => {
     try {
       await openWindowsAudioSettings();
@@ -1266,16 +1629,7 @@ function DevicesPanel({ output, player, onClose }: {
     <aside className="devices-panel" role="dialog" aria-label="播放设备">
       <header><h2>播放设备</h2><IconButton label="关闭播放设备" onClick={onClose}><X size={18} /></IconButton></header>
       <div className="devices-content">
-        {output.platform === "macos" ? (
-          <>
-            <div className="device-hero"><span><Airplay size={23} /></span><div><strong>AirPlay</strong><small>将当前音乐发送到同一网络上的音箱、电视或接收器。</small></div></div>
-            <div className="device-list" role="list">
-              <div className="device-option active" role="listitem"><span className="device-option-icon">{player.airPlayActive ? <Airplay size={18} /> : <Laptop size={18} />}</span><span><strong>{player.airPlayActive ? "AirPlay 设备" : "此 Mac"}</strong><small>{player.airPlayActive ? "无线播放目标由 macOS 管理" : "当前系统输出"}</small></span><Check size={16} /></div>
-            </div>
-            <button className="primary-button device-primary" type="button" disabled={!hasTrack} onClick={() => void openAirPlay()}><Airplay size={17} />选择 AirPlay 设备</button>
-            <p className="device-hint">{hasTrack ? "如果系统选择器不可用，可在 macOS 控制中心 → 声音中选择 AirPlay；播放队列和控制仍留在 Cadilume。" : "请先播放一首歌曲，再选择 AirPlay 设备。"}</p>
-          </>
-        ) : output.platform === "windows" ? (
+        {output.platform === "windows" ? (
           <>
             <div className="device-hero"><span><Speaker size={23} /></span><div><strong>Windows 音频输出</strong><small>仅改变 Cadilume，不修改系统默认设备。</small></div></div>
             {output.canSelectSink ? (
@@ -1310,6 +1664,139 @@ function DevicesPanel({ output, player, onClose }: {
         {output.message && <p className="device-message" role="status">{output.message}</p>}
       </div>
     </aside>
+  );
+}
+
+function CreatePlaylistDialog({ serverId, onClose, onCreated, onError }: {
+  serverId: string;
+  onClose: () => void;
+  onCreated: (playlist: PlexPlaylist) => void;
+  onError: (message: string) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const dialogRef = useRef<HTMLElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const restoreFocusTargetRef = useRef<HTMLElement | null>(null);
+  const restoreFocusFrameRef = useRef<number | undefined>(undefined);
+  const validTitle = Boolean(title.trim()) && Array.from(title.trim()).length <= 255;
+
+  useEffect(() => {
+    if (restoreFocusFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(restoreFocusFrameRef.current);
+      restoreFocusFrameRef.current = undefined;
+    }
+    const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!restoreFocusTargetRef.current && activeElement !== document.body) {
+      restoreFocusTargetRef.current = activeElement;
+    }
+    inputRef.current?.focus();
+    return () => {
+      restoreFocusFrameRef.current = window.requestAnimationFrame(() => {
+        const restoreTarget = restoreFocusTargetRef.current;
+        if (
+          restoreTarget?.isConnected
+          && !restoreTarget.closest("[inert]")
+          && !restoreTarget.matches(":disabled")
+        ) restoreTarget.focus();
+        restoreFocusFrameRef.current = undefined;
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        "button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])",
+      )).filter((element) => element.getAttribute("aria-hidden") !== "true");
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      const activeIndex = active instanceof HTMLElement ? focusable.indexOf(active) : -1;
+      if (event.shiftKey && activeIndex <= 0) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (activeIndex < 0 || active === last)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!validTitle || busy) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      onCreated(await createPlaylist(serverId, title));
+    } catch (reason) {
+      const message = playlistCreateErrorMessage(reason);
+      setError(message);
+      setBusy(false);
+      onError(message);
+    }
+  };
+
+  return (
+    <div className="playlist-picker-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
+      <section ref={dialogRef} className="playlist-create-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-create-title" tabIndex={-1}>
+        <header>
+          <div>
+            <h2 id="playlist-create-title">新建播放列表</h2>
+            <small>在当前 Plex 账号中创建</small>
+          </div>
+          <IconButton label="关闭新建播放列表" disabled={busy} onClick={onClose}><X size={18} /></IconButton>
+        </header>
+        <form onSubmit={(event) => void submit(event)}>
+          <div className="playlist-create-content">
+            <label htmlFor="playlist-create-name">播放列表名称</label>
+            <input
+              ref={inputRef}
+              id="playlist-create-name"
+              value={title}
+              maxLength={255}
+              required
+              placeholder="例如：周末慢听"
+              aria-invalid={Boolean(error) || undefined}
+              aria-describedby={error ? "playlist-create-description playlist-create-error" : "playlist-create-description"}
+              disabled={busy}
+              onChange={(event) => {
+                setTitle(event.target.value);
+                setError(undefined);
+              }}
+            />
+            <p id="playlist-create-description">先创建一个空白普通音乐播放列表，之后可从歌曲菜单继续添加内容。</p>
+            {error && <p id="playlist-create-error" className="playlist-create-error" role="alert">{error}</p>}
+          </div>
+          <footer>
+            <button className="secondary-button" type="button" disabled={busy} onClick={onClose}>取消</button>
+            <button className="primary-button" type="submit" disabled={!validTitle || busy} aria-busy={busy || undefined}>
+              {busy ? <><LoaderCircle className="spin" size={15} />正在创建…</> : "创建"}
+            </button>
+          </footer>
+        </form>
+      </section>
+    </div>
   );
 }
 
@@ -1406,18 +1893,18 @@ function PlaylistPicker({ serverId, track, onClose, onAdded }: {
       <section ref={dialogRef} className="playlist-picker" role="dialog" aria-modal="true" aria-labelledby="playlist-picker-title">
         <header>
           <div>
-            <h2 id="playlist-picker-title" ref={titleRef} tabIndex={-1}>添加到歌单</h2>
+            <h2 id="playlist-picker-title" ref={titleRef} tabIndex={-1}>添加到播放列表</h2>
             <small>《{track.title}》 · {trackArtist(track)}</small>
           </div>
-          <IconButton label="关闭歌单选择" disabled={Boolean(busyId)} onClick={onClose}><X size={18} /></IconButton>
+          <IconButton label="关闭播放列表选择" disabled={Boolean(busyId)} onClick={onClose}><X size={18} /></IconButton>
         </header>
         <div className="playlist-picker-list" aria-busy={loading || undefined}>
           {loading ? (
-            <div className="playlist-picker-state"><LoaderCircle className="spin" size={22} /><span>正在读取音乐歌单…</span></div>
+            <div className="playlist-picker-state"><LoaderCircle className="spin" size={22} /><span>正在读取音乐播放列表…</span></div>
           ) : error && !playlists.length ? (
-            <div className="playlist-picker-state is-error"><ListMusic size={24} /><strong>无法读取歌单</strong><span>{error}</span></div>
+            <div className="playlist-picker-state is-error"><ListMusic size={24} /><strong>无法读取播放列表</strong><span>{error}</span></div>
           ) : !playlists.length ? (
-            <div className="playlist-picker-state"><ListMusic size={24} /><strong>没有可写入的音乐歌单</strong><span>智能歌单不会显示；共享服务器也可能没有写入权限。</span></div>
+            <div className="playlist-picker-state"><ListMusic size={24} /><strong>没有可写入的音乐播放列表</strong><span>智能播放列表不会显示；共享服务器也可能没有写入权限。</span></div>
           ) : playlists.map((playlist) => (
             <button
               className="playlist-picker-option"
@@ -1438,8 +1925,10 @@ function PlaylistPicker({ serverId, track, onClose, onAdded }: {
   );
 }
 
-function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOpen, devicesOpen, outputPlatform, canOpenNowPlaying, canToggleQueue, canToggleLyrics, onOpenNowPlaying, onToggleQueue, onToggleLyrics, onOutputAction }: {
+function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded, queueOpen, lyricsOpen, devicesOpen, outputPlatform, canOpenNowPlaying, canToggleQueue, canToggleLyrics, onOpenNowPlaying, onToggleQueue, onToggleLyrics, onOutputAction }: {
   player: ReturnType<typeof usePlayer>;
+  loading: boolean;
+  buffering: boolean;
   nowPlayingTriggerRef: RefObject<HTMLButtonElement | null>;
   expanded: boolean;
   queueOpen: boolean;
@@ -1457,6 +1946,8 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOp
   const volumeIcon = player.muted || player.volume === 0 ? <VolumeX size={18} /> : player.volume < 0.5 ? <Volume1 size={18} /> : <Volume2 size={18} />;
   const progressFill = rangeFillPercent(player.progress, player.duration);
   const volumeFill = rangeFillPercent(player.muted ? 0 : player.volume, 1);
+  const playbackBusy = loading || buffering;
+  const playbackLabel = playbackControlLabel({ playing: player.playing, loading, buffering });
   const cycleRepeat = () => player.setRepeat(player.repeat === "off" ? "all" : player.repeat === "all" ? "one" : "off");
   return (
     <footer className={`player-bar ${expanded ? "is-expanded" : ""}`} aria-label="播放器" aria-hidden={expanded || undefined} inert={expanded || undefined}>
@@ -1468,7 +1959,21 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOp
         <div className="transport-controls">
           <IconButton label={player.shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"} active={player.shuffle} onClick={() => player.setShuffle(!player.shuffle)}><Shuffle size={16} /></IconButton>
           <IconButton label="上一首" onClick={player.previous}><SkipBack size={19} fill="currentColor" /></IconButton>
-          <button className="play-button" aria-label={player.playing ? "暂停" : "播放"} onClick={player.toggle} disabled={!player.current}>{player.playing ? <Pause className="pause-icon" size={19} fill="currentColor" aria-hidden="true" /> : <Play className="play-icon" size={19} fill="currentColor" aria-hidden="true" />}</button>
+          <button
+            className={`play-button ${playbackBusy ? "is-loading" : ""}`}
+            aria-label={playbackLabel}
+            title={playbackLabel}
+            aria-busy={playbackBusy || undefined}
+            aria-disabled={loading || undefined}
+            onClick={player.toggle}
+            disabled={!player.current || loading}
+          >
+            {playbackBusy
+              ? <LoaderCircle className="spin playback-spinner" size={19} strokeWidth={2} aria-hidden="true" />
+              : player.playing
+                ? <Pause className="pause-icon" size={19} fill="currentColor" aria-hidden="true" />
+                : <Play className="play-icon" size={19} fill="currentColor" aria-hidden="true" />}
+          </button>
           <IconButton label="下一首" onClick={player.next}><SkipForward size={19} fill="currentColor" /></IconButton>
           <IconButton label={player.repeat === "one" ? "单曲循环" : player.repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止"} active={player.repeat !== "off"} onClick={cycleRepeat}>{player.repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}</IconButton>
         </div>
@@ -1484,11 +1989,13 @@ function PlayerBar({ player, nowPlayingTriggerRef, expanded, queueOpen, lyricsOp
           <Captions size={19} />
         </IconButton>
         <IconButton label="播放队列" active={queueOpen} disabled={!canToggleQueue} onClick={onToggleQueue}><ListMusic size={19} /></IconButton>
-        <IconButton label={outputPlatform === "macos" ? "选择 AirPlay 设备" : "播放设备"} active={outputPlatform === "macos" ? player.airPlayActive : devicesOpen} onClick={onOutputAction}>{outputPlatform === "macos" ? <Airplay size={19} /> : <Speaker size={18} />}</IconButton>
+        {outputPlatform !== "macos" && <IconButton label="播放设备" active={devicesOpen} onClick={onOutputAction}><Speaker size={18} /></IconButton>}
         <div className="volume-control">
           <IconButton label={player.muted ? "取消静音" : "静音"} onClick={() => player.setMuted(!player.muted)}>{volumeIcon}</IconButton>
-          <input aria-label="播放器独立音量" type="range" min="0" max="1" step="0.01" value={player.muted ? 0 : player.volume} style={{ "--range-progress": `${volumeFill}%` } as CSSProperties} onChange={(event) => player.setVolume(Number(event.target.value))} />
-          <span>{Math.round((player.muted ? 0 : player.volume) * 100)}</span>
+          <div className="volume-popover">
+            <input aria-label="播放器独立音量" aria-orientation="vertical" aria-valuetext={`${Math.round((player.muted ? 0 : player.volume) * 100)}%`} title={`音量 ${Math.round((player.muted ? 0 : player.volume) * 100)}%`} type="range" min="0" max="1" step="0.01" value={player.muted ? 0 : player.volume} style={{ "--range-progress": `${volumeFill}%` } as CSSProperties} onChange={(event) => player.setVolume(Number(event.target.value))} />
+            <output aria-live="polite">{Math.round((player.muted ? 0 : player.volume) * 100)}%</output>
+          </div>
         </div>
       </div>
     </footer>
@@ -1630,8 +2137,14 @@ function IconButton({ label, active = false, disabled = false, onClick, children
   return <button type="button" className={`icon-button ${active ? "active" : ""}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
-function Notice({ message, onClose }: { message: string; onClose: () => void }) {
-  return <div className="notice" role="status"><span>{message}</span><IconButton label="关闭提示" onClick={onClose}><X size={16} /></IconButton></div>;
+function GlobalToast({ message, onClose }: { message: string; onClose: () => void }) {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const timer = window.setTimeout(() => closeRef.current(), 4_200);
+    return () => window.clearTimeout(timer);
+  }, [message]);
+  return <div className="global-toast" role="status" aria-live="polite" aria-atomic="true"><span className="global-toast-mark" aria-hidden="true" /><span>{message}</span><IconButton label="关闭提示" onClick={onClose}><X size={16} /></IconButton></div>;
 }
 
 function PlaybackErrorAlert({ failure, trackTitle, onRetry, onOpenSettings, onClose }: {
@@ -1719,7 +2232,15 @@ function readStoredQuality(fallback: StreamQuality = "auto"): StreamQuality {
 function playlistReadErrorMessage(reason: unknown): string {
   const message = reason instanceof Error ? reason.message : String(reason || "未知错误");
   if (/\b(?:401|403|404)\b|forbidden|not found|permission|unauthori[sz]ed|无权|权限/iu.test(message)) {
-    return "当前账号无法读取这个歌单，或歌单已被服务器移除。共享服务器会继续服从 Plex Media Server 的访问权限。";
+    return "当前账号无法读取这个播放列表，或播放列表已被服务器移除。共享服务器会继续服从 Plex Media Server 的访问权限。";
+  }
+  return message;
+}
+
+function playlistCreateErrorMessage(reason: unknown): string {
+  const message = reason instanceof Error ? reason.message : String(reason || "未知错误");
+  if (/\b(?:401|403)\b|forbidden|permission|unauthori[sz]ed|无权|权限/iu.test(message)) {
+    return "当前账号没有在这台 Plex 服务器创建播放列表的权限。";
   }
   return message;
 }
@@ -1727,7 +2248,7 @@ function playlistReadErrorMessage(reason: unknown): string {
 function playlistErrorMessage(reason: unknown): string {
   const message = reason instanceof Error ? reason.message : String(reason || "未知错误");
   if (/\b(?:401|403|404)\b|forbidden|not found|permission|unauthori[sz]ed|无权|权限/iu.test(message)) {
-    return "当前账号没有写入这个歌单的权限，或歌单已被服务器移除。共享账号需要服务器所有者授予写入权限。";
+    return "当前账号没有写入这个播放列表的权限，或播放列表已被服务器移除。共享账号需要服务器所有者授予写入权限。";
   }
   return message;
 }

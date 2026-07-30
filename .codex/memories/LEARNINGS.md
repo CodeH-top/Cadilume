@@ -1,5 +1,11 @@
 # LEARNINGS
 
+## 2026-07-30 — 播放列表创建、顶部身份与连接提示
+
+- Plex `POST /playlists` 可创建空白普通播放列表；Cadilume 通过专用 Rust/Tauri command 传入 `type=audio`、清理后的 `title` 和 `smart=0`，由当前服务器专属 token 服从 PMS ACL。浏览器演示只维护内存中的演示列表，不能把该路径改成 WebView 直连。
+- 侧栏标题区应把折叠箭头作为标题文字后的紧邻控件，把 `+` 作为最右侧独立按钮；账号入口用头像与两行信息横排、无常驻外框。连接拓扑图标需要可聚焦的 `aria-describedby` + `role="tooltip"`，原生 `title` 不能替代 hover/focus 的明确状态说明。
+- React StrictMode 下，模态框初始焦点 effect 的 cleanup 里延迟恢复焦点可能在第二次 effect setup 后抢回触发器；用 ref 保存原始触发器并取消待执行的 `requestAnimationFrame`，再在真正卸载时恢复焦点。
+
 ## 2026-07-29 — 歌词 UI 验证不等于 Plexamp 对时
 
 - 歌词独立滚动、播放器布局稳定、右侧歌词栏和行切换渐变只验证界面行为，不能作为歌词时间轴已与 Plexamp 对齐的证据。

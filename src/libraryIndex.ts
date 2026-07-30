@@ -1,8 +1,9 @@
 import type { PlexItem } from "./types";
 
 export const PLEX_ALPHABET_INDEX = [
+  "#",
   "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
-  "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "#",
+  "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
 ] as const;
 
 export type PlexAlphabetBucket = typeof PLEX_ALPHABET_INDEX[number];

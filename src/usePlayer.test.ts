@@ -40,17 +40,10 @@ class FakeAudio {
   currentTime = 0;
   loadCount = 0;
   pauseCount = 0;
-  pickerCount = 0;
   sinkCalls: string[] = [];
   failSinkId?: string;
-  readonly attributes = new Map<string, string>();
-
-  setAttribute(name: string, value: string): void {
-    this.attributes.set(name, value);
-  }
 
   removeAttribute(name: string): void {
-    this.attributes.delete(name);
     if (name === "src") this.src = "";
   }
 
@@ -70,10 +63,6 @@ class FakeAudio {
   async setSinkId(sinkId: string): Promise<void> {
     this.sinkCalls.push(sinkId);
     if (sinkId && sinkId === this.failSinkId) throw new Error("device disappeared");
-  }
-
-  webkitShowPlaybackTargetPicker(): void {
-    this.pickerCount += 1;
   }
 }
 
@@ -527,14 +516,13 @@ describe("media playback diagnostics", () => {
 });
 
 describe("DualAudioPool", () => {
-  it("configures both slots for eager buffering and AirPlay", () => {
+  it("configures both slots for eager buffering", () => {
     const first = new FakeAudio();
     const second = new FakeAudio();
     new DualAudioPool([asAudio(first), asAudio(second)]);
 
     for (const audio of [first, second]) {
       expect(audio.preload).toBe("auto");
-      expect(audio.attributes.get("x-webkit-airplay")).toBe("allow");
     }
   });
 
@@ -559,23 +547,6 @@ describe("DualAudioPool", () => {
     expect(second.src).toBe("https://music.test/next");
     expect(second.loadCount).toBe(1);
     expect(first.src).toBe("");
-  });
-
-  it("can consume the resolved URL without swapping slots to preserve an AirPlay route", () => {
-    const first = new FakeAudio();
-    const second = new FakeAudio();
-    first.src = "https://music.test/current";
-    const pool = new DualAudioPool([asAudio(first), asAudio(second)]);
-    const key = preparation();
-
-    pool.prepare(key, "https://music.test/next");
-    const resolvedUrl = pool.takePreparedUrl(key);
-
-    expect(resolvedUrl).toBe("https://music.test/next");
-    expect(pool.active).toBe(asAudio(first));
-    expect(first.src).toBe("https://music.test/current");
-    expect(second.src).toBe("");
-    expect(pool.hasPrepared(key)).toBe(false);
   });
 
   it("discards a failed standby slot so it cannot become active later", () => {
@@ -620,23 +591,6 @@ describe("DualAudioPool", () => {
     expect(first.src).toBe("https://music.test/current");
     expect(first.pauseCount).toBe(0);
     expect(first.loadCount).toBe(0);
-  });
-
-  it("reports whether the active WebKit AirPlay picker is available", () => {
-    const first = new FakeAudio();
-    const second = new FakeAudio();
-    const pool = new DualAudioPool([asAudio(first), asAudio(second)]);
-
-    expect(pool.showAirPlayPicker()).toBe(true);
-    expect(first.pickerCount).toBe(1);
-    first.webkitShowPlaybackTargetPicker = undefined as unknown as () => void;
-    expect(pool.showAirPlayPicker()).toBe(false);
-
-    const key = preparation();
-    pool.prepare(key, "https://music.test/next");
-    pool.takePrepared(key);
-    expect(pool.showAirPlayPicker()).toBe(true);
-    expect(second.pickerCount).toBe(1);
   });
 
   it("stops and clears both slots when the queue changes servers", () => {
