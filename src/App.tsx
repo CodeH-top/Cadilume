@@ -66,7 +66,6 @@ import {
   getChildren,
   getLibraryItems,
   getLibraryMetadata,
-  getPlaybackHistory,
   getTracksPage,
   getPlaylistItems,
   getPlaylists,
@@ -81,7 +80,6 @@ import {
   setCloseBehavior as saveCloseBehavior,
   setBrandPreset as saveBrandPreset,
   setDeviceName as saveDeviceName,
-  setPlayHistorySyncEnabled as savePlayHistorySyncEnabled,
   showMainWindow,
 } from "./api";
 import "./App.css";
@@ -90,7 +88,6 @@ import { selectRandomContextPlayback } from "./contextPlayback";
 import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
 import { libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryRoute, type LibraryDetailType, type LibraryRoute } from "./libraryRoute";
 import { hasDisplayableLyrics } from "./lyrics";
-import { plexMusicGateway } from "./musicGateway";
 import { getPlexLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
 import { playbackControlLabel, rangeFillPercent } from "./playerUi";
 import { homeRecommendationHubs, isRecentlyAddedHub, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
@@ -106,7 +103,6 @@ import type {
   PlexAccount,
   PlexHub,
   PlexItem,
-  PlexPlaybackHistoryItem,
   PlexPlaylist,
   PlexServer,
   StreamQuality,
@@ -337,11 +333,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [detail, setDetail] = useState<{ source: PlexItem; children: PlexItem[] }>();
   const [closeBehavior, setCloseBehavior] = useState<CloseBehavior>(initialSession.closeBehavior);
   const [deviceName, setDeviceName] = useState(initialSession.deviceName);
-  const [syncRecentPlays, setSyncRecentPlays] = useState(() => Boolean(initialSession.syncRecentPlays));
-  const [syncRecentPlaysUpdating, setSyncRecentPlaysUpdating] = useState(false);
-  const [remoteHistory, setRemoteHistory] = useState<PlexPlaybackHistoryItem[]>([]);
-  const [remoteHistoryLoading, setRemoteHistoryLoading] = useState(false);
-  const [remoteHistoryError, setRemoteHistoryError] = useState<string>();
   const [quality, setQuality] = useState<StreamQuality>(() => readStoredQuality(initialPlaybackSession?.quality));
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>();
   const [cacheStatusError, setCacheStatusError] = useState<string>();
@@ -359,8 +350,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const playlistItemsRequestRef = useRef(0);
   const viewRequestRef = useRef(0);
   const artistDirectoryRequestRef = useRef(0);
-  const historyRequestRef = useRef(0);
-  const historyPreferenceRequestRef = useRef(0);
   const cacheStatusRequestRef = useRef(0);
   const preferredPlaybackServerId = initialPlaybackSession?.serverId;
   const player = usePlayer(serverId, quality);
@@ -430,37 +419,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 
   const selectedServer = servers.find((server) => server.id === serverId);
   const selectedSection = sections.find((section) => section.key === sectionKey);
-
-  useEffect(() => {
-    const requestId = ++historyRequestRef.current;
-    if (!syncRecentPlays || !serverId) {
-      setRemoteHistory([]);
-      setRemoteHistoryError(undefined);
-      setRemoteHistoryLoading(false);
-      return;
-    }
-
-    setRemoteHistory([]);
-    setRemoteHistoryError(undefined);
-    setRemoteHistoryLoading(true);
-    void getPlaybackHistory(serverId)
-      .then((history) => {
-        if (historyRequestRef.current === requestId) setRemoteHistory(history);
-      })
-      .catch(() => {
-        if (historyRequestRef.current === requestId) {
-          setRemoteHistory([]);
-          setRemoteHistoryError("暂时无法读取其他设备的最近播放，不影响本机播放。");
-        }
-      })
-      .finally(() => {
-        if (historyRequestRef.current === requestId) setRemoteHistoryLoading(false);
-      });
-
-    return () => {
-      if (historyRequestRef.current === requestId) historyRequestRef.current += 1;
-    };
-  }, [serverId, sourceRevision, syncRecentPlays]);
 
   useEffect(() => {
     const requestId = ++artistDirectoryRequestRef.current;
@@ -1014,37 +972,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     }
   }, []);
 
-  const changePlayHistorySync = useCallback(async (enabled: boolean) => {
-    if (syncRecentPlaysUpdating || enabled === syncRecentPlays) return;
-    const requestId = ++historyPreferenceRequestRef.current;
-    setSyncRecentPlaysUpdating(true);
-
-    if (!enabled) {
-      // Remove cached history before the asynchronous persistence round-trip so
-      // the user's opt-out has an immediate visible effect.
-      historyRequestRef.current += 1;
-      setSyncRecentPlays(false);
-      setRemoteHistory([]);
-      setRemoteHistoryError(undefined);
-      setRemoteHistoryLoading(false);
-    }
-
-    try {
-      await savePlayHistorySyncEnabled(enabled);
-      if (historyPreferenceRequestRef.current === requestId && enabled) {
-        setSyncRecentPlays(true);
-      }
-    } catch {
-      if (historyPreferenceRequestRef.current !== requestId) return;
-      if (!enabled) setSyncRecentPlays(true);
-      setNotice(enabled
-        ? "无法保存其他设备最近播放同步设置。"
-        : "无法关闭其他设备最近播放同步，已恢复原设置。");
-    } finally {
-      if (historyPreferenceRequestRef.current === requestId) setSyncRecentPlaysUpdating(false);
-    }
-  }, [syncRecentPlays, syncRecentPlaysUpdating]);
-
   const changeQuality = (value: StreamQuality) => {
     setQuality(value);
     try {
@@ -1141,20 +1068,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       player.setShuffle(false);
     } catch (reason) {
       setNotice(playlistReadErrorMessage(reason));
-      throw reason;
-    }
-  }, [player, serverId]);
-
-  const playRemoteHistoryItem = useCallback(async (item: PlexPlaybackHistoryItem) => {
-    if (!serverId) return;
-    setNotice(undefined);
-    try {
-      const track = await plexMusicGateway.library.getTrack(serverId, item.ratingKey);
-      if (track.type !== "track") throw new Error("该条记录对应的歌曲当前不可播放。");
-      player.playContext(track, [track]);
-      player.setShuffle(false);
-    } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : "无法播放这条跨设备记录。");
       throw reason;
     }
   }, [player, serverId]);
@@ -1307,11 +1220,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
               cacheStatusError={cacheStatusError}
               cacheBusy={cacheBusy}
               sourcesSyncing={sourcesSyncing}
-              syncRecentPlays={syncRecentPlays}
-              syncRecentPlaysUpdating={syncRecentPlaysUpdating}
-              remoteHistory={remoteHistory}
-              remoteHistoryLoading={remoteHistoryLoading}
-              remoteHistoryError={remoteHistoryError}
               playlists={playlists}
               onOpen={openItem}
               onTracksRouteChange={navigateToTracks}
@@ -1319,7 +1227,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
               onOpenPlaylist={(playlist) => void openPlaylist(playlist)}
               onPlayRecommendationItem={playRecommendationItem}
               onPlayRecommendationPlaylist={playRecommendationPlaylist}
-              onPlayRemoteHistoryItem={playRemoteHistoryItem}
               onBack={closeDetail}
               onPlayDetail={playDetail}
               onShuffleDetail={() => shuffleContext(detail?.children || [])}
@@ -1327,7 +1234,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
               onCloseBehavior={changeCloseBehavior}
               onBrandPreset={changeBrandPreset}
               onEditDeviceName={() => setDeviceNameDialogOpen(true)}
-              onSyncRecentPlays={changePlayHistorySync}
               onQuality={changeQuality}
               onServerChange={setServerId}
               onSectionChange={setSectionKey}
@@ -1528,11 +1434,6 @@ interface ContentViewProps {
   cacheStatusError?: string;
   cacheBusy: boolean;
   sourcesSyncing: boolean;
-  syncRecentPlays: boolean;
-  syncRecentPlaysUpdating: boolean;
-  remoteHistory: PlexPlaybackHistoryItem[];
-  remoteHistoryLoading: boolean;
-  remoteHistoryError?: string;
   playlists: PlexPlaylist[];
   onOpen: (item: PlexItem) => void;
   onTracksRouteChange: (route: LibraryRoute) => void;
@@ -1540,7 +1441,6 @@ interface ContentViewProps {
   onOpenPlaylist: (playlist: PlexPlaylist) => void;
   onPlayRecommendationItem: (item: PlexItem, context: PlexItem[]) => Promise<void>;
   onPlayRecommendationPlaylist: (playlist: PlexPlaylist) => Promise<void>;
-  onPlayRemoteHistoryItem: (item: PlexPlaybackHistoryItem) => Promise<void>;
   onBack: () => void;
   onPlayDetail: () => void;
   onShuffleDetail: () => void;
@@ -1548,7 +1448,6 @@ interface ContentViewProps {
   onCloseBehavior: (value: CloseBehavior) => void;
   onBrandPreset: BrandPresetChange;
   onEditDeviceName: () => void;
-  onSyncRecentPlays: (enabled: boolean) => void;
   onQuality: (value: StreamQuality) => void;
   onServerChange: (value: string) => void;
   onSectionChange: (value: string) => void;
@@ -1640,13 +1539,8 @@ function ContentView(props: ContentViewProps) {
     <RecommendationsView
       hubs={props.homeHubs}
       playlists={props.playlists}
-      remoteHistory={props.remoteHistory}
-      remoteHistoryEnabled={props.syncRecentPlays}
-      remoteHistoryLoading={props.remoteHistoryLoading}
-      remoteHistoryError={props.remoteHistoryError}
       onPlayItem={props.onPlayRecommendationItem}
       onPlayPlaylist={props.onPlayRecommendationPlaylist}
-      onPlayRemoteHistoryItem={props.onPlayRemoteHistoryItem}
     />
   );
 }
@@ -1668,23 +1562,13 @@ function ConnectionIndicator({ server, connected, kindOverride }: { server?: Ple
 function RecommendationsView({
   hubs,
   playlists,
-  remoteHistory,
-  remoteHistoryEnabled,
-  remoteHistoryLoading,
-  remoteHistoryError,
   onPlayItem,
   onPlayPlaylist,
-  onPlayRemoteHistoryItem,
 }: {
   hubs: PlexHub[];
   playlists: PlexPlaylist[];
-  remoteHistory: PlexPlaybackHistoryItem[];
-  remoteHistoryEnabled: boolean;
-  remoteHistoryLoading: boolean;
-  remoteHistoryError?: string;
   onPlayItem: (item: PlexItem, context: PlexItem[]) => Promise<void>;
   onPlayPlaylist: (playlist: PlexPlaylist) => Promise<void>;
-  onPlayRemoteHistoryItem: (item: PlexPlaybackHistoryItem) => Promise<void>;
 }) {
   const [pendingKey, setPendingKey] = useState<string>();
   const recentPlaylists = recentlyPlayedPlaylists(playlists);
@@ -1703,7 +1587,7 @@ function RecommendationsView({
   return (
     <section className="recommendations-page">
       <div className="page-heading"><h1>推荐</h1></div>
-      {!recentPlaylists.length && !orderedHubs.length && !remoteHistoryEnabled ? (
+      {!recentPlaylists.length && !orderedHubs.length ? (
         <EmptyState title="还没有推荐内容" description="开始播放音乐后，这里会显示最近播放和服务器推荐。" icon={<Music2 size={28} />} />
       ) : (
         <div className="recommendation-sections">
@@ -1735,45 +1619,6 @@ function RecommendationsView({
                   );
                 })}
               </div>
-            </section>
-          )}
-          {remoteHistoryEnabled && (
-            <section className="recommendation-section remote-history-section" aria-labelledby="remote-history-heading">
-              <div className="section-heading"><h2 id="remote-history-heading">跨设备最近播放</h2></div>
-              {remoteHistoryLoading ? (
-                <p className="remote-history-notice" role="status"><LoaderCircle className="spin" size={16} />正在读取其他设备的音乐记录…</p>
-              ) : remoteHistoryError ? (
-                <p className="remote-history-notice is-error" role="status">{remoteHistoryError}</p>
-              ) : remoteHistory.length ? (
-                <div className="recommendation-row card-grid" role="list">
-                  {remoteHistory.map((item, itemIndex) => {
-                    const key = `remote-history-${item.ratingKey}-${item.viewedAt}-${itemIndex}`;
-                    const pending = pendingKey === key;
-                    return (
-                      <button
-                        className={`recommendation-card remote-history-card media-card ${pending ? "is-loading" : ""}`}
-                        type="button"
-                        role="listitem"
-                        key={key}
-                        aria-label={`播放其他设备最近播放的“${item.title}”`}
-                        aria-busy={pending || undefined}
-                        disabled={pending}
-                        onClick={() => void runPlayback(key, () => onPlayRemoteHistoryItem(item))}
-                      >
-                        <span className="recommendation-artwork">
-                          <Artwork item={item} size="large" />
-                          <span className="recommendation-play-indicator" aria-hidden="true">{pending ? <LoaderCircle className="spin" size={21} /> : <Play size={22} fill="currentColor" />}</span>
-                        </span>
-                        <strong>{item.title}</strong>
-                        <small>{item.artist || "未知歌手"}{item.album ? ` · ${item.album}` : ""}</small>
-                        <span className="remote-history-device"><Laptop size={13} aria-hidden="true" />{item.deviceName}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="remote-history-notice">当前没有可显示的其他设备音乐记录。</p>
-              )}
             </section>
           )}
           {orderedHubs.map((hub, hubIndex) => (
@@ -2444,10 +2289,6 @@ function SettingsView(props: ContentViewProps) {
           <div className="toggle-row">
             <span><strong>预缓冲下一首</strong><small>提前加载队列中的下一首。</small></span>
             <label className="toggle-switch" aria-label="预缓冲下一首"><input type="checkbox" checked={props.prebufferNext} onChange={(event) => props.onPrebufferNext(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /></label>
-          </div>
-          <div className="toggle-row">
-            <span><strong>同步其他设备的最近播放</strong><small>仅读取当前已授权 PMS 内、当前账号在其他设备的音乐播放历史；关闭后立即清除本机已读取的记录。</small></span>
-            <label className="toggle-switch" aria-label="同步其他设备的最近播放" aria-busy={props.syncRecentPlaysUpdating || undefined}><input type="checkbox" checked={props.syncRecentPlays} disabled={props.syncRecentPlaysUpdating} onChange={(event) => props.onSyncRecentPlays(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /></label>
           </div>
         </div>
       </SettingsGroup>

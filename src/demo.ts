@@ -41,7 +41,6 @@ export const demoBootstrap: BootstrapResponse = {
   authenticated: true,
   closeBehavior: "tray",
   deviceName: "演示 Mac",
-  syncRecentPlays: false,
   brandPreset: "amber",
   account: {
     id: 1,

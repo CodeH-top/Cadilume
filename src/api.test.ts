@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaybackHistory, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, pollPin, setBrandPreset, setDeviceName, setPlayHistorySyncEnabled } from "./api";
+import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTracksPage, pollPin, setBrandPreset, setDeviceName } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -500,67 +500,6 @@ describe("Plex PIN authentication boundary", () => {
     expect(authenticated).toEqual({ id: 1, code: "DEMO", expiresIn: 300, authenticated: true });
     expect(created).not.toHaveProperty("authToken");
     expect(authenticated).not.toHaveProperty("authToken");
-  });
-});
-
-describe("cross-device recent playback history", () => {
-  it("uses the dedicated native commands and resolves playback metadata only from a rating key", async () => {
-    invokeMock
-      .mockResolvedValueOnce([{
-        ratingKey: "track-17",
-        title: "Other Room Song",
-        artist: "Artist",
-        album: "Album",
-        viewedAt: 1_700_000_000,
-        deviceName: "客厅 Mac",
-      }])
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({
-        MediaContainer: {
-          Metadata: [{ ratingKey: "track-17", key: "/library/metadata/track-17", type: "track", title: "Other Room Song" }],
-        },
-      });
-
-    await expect(getPlaybackHistory("server-a")).resolves.toEqual([expect.objectContaining({
-      ratingKey: "track-17",
-      deviceName: "客厅 Mac",
-    })]);
-    await expect(setPlayHistorySyncEnabled(true)).resolves.toBeUndefined();
-    await expect(getTrackMetadata("server-a", "track-17")).resolves.toMatchObject({ type: "track", ratingKey: "track-17" });
-
-    expect(invokeMock).toHaveBeenNthCalledWith(1, "get_playback_history", { serverId: "server-a" });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "set_play_history_sync_enabled", { enabled: true });
-    expect(invokeMock).toHaveBeenNthCalledWith(3, "server_get", {
-      serverId: "server-a",
-      path: "/library/metadata/track-17",
-      query: {},
-    });
-  });
-
-  it("keeps browser-demo history to the IPC-minimal presentation shape", async () => {
-    Object.defineProperty(globalThis, "window", {
-      configurable: true,
-      value: {},
-    });
-
-    const history = await getPlaybackHistory("demo-server");
-
-    expect(history.length).toBeGreaterThan(0);
-    expect(history[0]).toEqual(expect.objectContaining({
-      ratingKey: expect.any(String),
-      title: expect.any(String),
-      viewedAt: expect.any(Number),
-      deviceName: expect.any(String),
-    }));
-    expect(history[0]).not.toHaveProperty("key");
-    expect(history[0]).not.toHaveProperty("type");
-    expect(invokeMock).not.toHaveBeenCalled();
-  });
-
-  it("rejects unsafe history and metadata identifiers before invoking Tauri", async () => {
-    await expect(getPlaybackHistory("../server")).rejects.toThrow("无效的 Plex 服务器标识");
-    await expect(getTrackMetadata("server-a", "../track")).rejects.toThrow("无效的 Plex 歌曲标识");
-    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 

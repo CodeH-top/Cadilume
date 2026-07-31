@@ -23,6 +23,8 @@
   Source: user correction on 2026-07-31.
 - [ACT-018] 用户可见的视觉风格只能称为“琥珀金 / 雨林绿 / 澄海蓝”，不得以第三方产品或其配色命名；它是设置页内固定、紧凑、右对齐的三项单选，不是下拉菜单，切换成功须给出短提示。关闭主窗口的两项选择沿用同一紧凑单选布局。
   Source: explicit user correction on 2026-07-31.
+- [ACT-019] Cadilume 持续开发期间保留且只保留一条已确认归属本项目的 `pnpm tauri dev` 开发链；前端改动优先依赖该链的 HMR，非必要不得重启原生进程或另起开发态，以维持 Keychain 权限与登录会话连续性。只有 Rust/原生配置变动或最终真实验收确有需要时，才在明确说明后重启这同一条链。
+  Source: user request on 2026-07-31.
 
 ## Validation
 

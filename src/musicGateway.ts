@@ -55,7 +55,6 @@ export interface MusicProviderCapabilities {
   canStream: boolean;
   canReportPlayback: boolean;
   canLoadLyrics: boolean;
-  canReadRemoteHistory: boolean;
   canControlCompanion: boolean;
 }
 
@@ -105,7 +104,6 @@ export const plexMusicGateway: MusicProviderGateway<PlexItem> = {
     canStream: true,
     canReportPlayback: true,
     canLoadLyrics: true,
-    canReadRemoteHistory: true,
     canControlCompanion: false,
   },
   library: {

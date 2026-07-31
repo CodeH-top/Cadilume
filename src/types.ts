@@ -27,7 +27,6 @@ export interface BootstrapResponse {
   account?: PlexAccount;
   closeBehavior: CloseBehavior;
   deviceName: string;
-  syncRecentPlays: boolean;
   brandPreset: BrandPreset;
 }
 
@@ -89,23 +88,6 @@ export interface PlexItem {
   viewCount?: number;
   Media?: PlexMedia[];
   imageUrl?: string;
-}
-
-/**
- * A privacy-filtered item from the selected PMS' session history.
- *
- * Cadilume only receives history for the signed-in account and excludes this
- * client's own identifier before this data reaches the WebView.
- */
-export interface PlexPlaybackHistoryItem {
-  ratingKey: string;
-  title: string;
-  artist?: string;
-  album?: string;
-  thumb?: string;
-  art?: string;
-  viewedAt: number;
-  deviceName: string;
 }
 
 export interface PlexItemPage {

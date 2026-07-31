@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { demoAlbums, demoArtists, demoBootstrap, demoPlaylistItems, demoPlaylists, demoRecommendationHubs, demoSections, demoServers, demoTracks } from "./demo";
 import { plexLibraryTrackSort, plexSingerTrackSort, sortTracks, type TrackSortState } from "./trackSort";
-import type { BootstrapResponse, BrandPreset, CacheStatus, CloseBehavior, LibrarySection, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaybackHistoryItem, PlexPlaylist, PlexServer, StreamQuality } from "./types";
+import type { BootstrapResponse, BrandPreset, CacheStatus, CloseBehavior, LibrarySection, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
 
 const artworkQueue: Array<() => void> = [];
 let activeArtworkRequests = 0;
@@ -486,34 +486,6 @@ export async function getRecommendationHubs(serverId: string, sectionKey: string
   }).filter((hub) => hub.items.length > 0 && ["artist", "album", "track"].includes(hub.type));
 }
 
-/**
- * Read recent music sessions recorded by the current PMS for this Plex account
- * on other devices. The native command performs account and client-ID filtering
- * before returning data to the WebView.
- */
-export async function getPlaybackHistory(serverId: string): Promise<PlexPlaybackHistoryItem[]> {
-  if (!isCleanPlexIdentifier(serverId)) throw new Error("无效的 Plex 服务器标识");
-  if (!isDesktopRuntime()) {
-    const now = Math.floor(Date.now() / 1000);
-    return demoTracks.slice(2, 8).map((track, index) => ({
-      ratingKey: track.ratingKey,
-      title: track.title,
-      artist: trackArtistName(track),
-      album: track.parentTitle,
-      thumb: track.thumb,
-      art: track.art,
-      viewedAt: now - (index + 1) * 3_600,
-      deviceName: index % 2 === 0 ? "Plexamp iPhone" : "客厅 Mac",
-    }));
-  }
-  return invoke("get_playback_history", { serverId });
-}
-
-function trackArtistName(track: PlexItem): string | undefined {
-  return track.grandparentTitle || track.parentTitle;
-}
-
-/** Resolve a history row to fresh PMS metadata only when the user asks to play it. */
 export async function getTrackMetadata(serverId: string, ratingKey: string): Promise<PlexItem> {
   if (!isCleanPlexIdentifier(serverId) || !isCleanPlexIdentifier(ratingKey)) {
     throw new Error("无效的 Plex 歌曲标识");
@@ -606,10 +578,6 @@ export async function setDeviceName(deviceName: string): Promise<string> {
   const normalized = normalizeDeviceName(deviceName);
   if (!isDesktopRuntime()) return normalized;
   return invoke("set_device_name", { deviceName: normalized });
-}
-
-export async function setPlayHistorySyncEnabled(enabled: boolean): Promise<void> {
-  if (isDesktopRuntime()) await invoke("set_play_history_sync_enabled", { enabled });
 }
 
 export async function setBrandPreset(preset: BrandPreset): Promise<void> {
