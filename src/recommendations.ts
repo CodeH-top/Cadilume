@@ -24,6 +24,31 @@ export function orderRecommendationHubs(hubs: readonly PlexHub[]): PlexHub[] {
     .map(({ hub }) => hub);
 }
 
+/**
+ * The home page intentionally exposes only the two useful recent bands. PMS can
+ * return promoted artists, albums, mixes, and other hubs alongside them; those
+ * are valid search/library data but are not part of Cadilume's compact home.
+ * Recently played must be a track hub so an artist-only PMS response never
+ * turns the section into the wrong media type.
+ */
+export function homeRecommendationHubs(hubs: readonly PlexHub[]): PlexHub[] {
+  const recentlyPlayed = hubs.find((hub) => isRecentlyPlayedHub(hub) && hub.items.some((item) => item.type === "track"));
+  const recentlyAdded = hubs.find(isRecentlyAddedHub);
+  const result: PlexHub[] = [];
+
+  if (recentlyPlayed) {
+    const tracks = recentlyPlayed.items.filter((item) => item.type === "track");
+    if (tracks.length) result.push({ ...recentlyPlayed, type: "track", items: tracks });
+  }
+
+  if (recentlyAdded) {
+    const media = recentlyAdded.items.filter((item) => item.type === "track" || item.type === "album");
+    if (media.length) result.push({ ...recentlyAdded, items: media });
+  }
+
+  return result;
+}
+
 export function recommendationHubTitle(hub: PlexHub): string {
   if (isRecentlyPlayedHub(hub)) return "最近播放的音乐";
   if (isRecentlyAddedHub(hub)) return "最近加入的音乐";

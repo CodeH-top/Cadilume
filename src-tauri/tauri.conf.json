@@ -15,12 +15,19 @@
         "label": "main",
         "title": "Cadilume",
         "width": 1280,
-        "height": 820,
+        "height": 800,
         "minWidth": 1280,
-        "minHeight": 820,
+        "minHeight": 800,
         "center": true,
         "resizable": true,
         "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "shadow": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 28
+        },
         "backgroundThrottling": "disabled",
         "fullscreen": false
       }

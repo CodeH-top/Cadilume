@@ -6,20 +6,20 @@
 
 ```text
 React / Tauri WebView
-  ├─ Music 资料库、搜索、普通/智能/只读音频播放列表、队列与设置
+  ├─ Music 资料库、搜索、普通/智能/只读音频歌单、队列与设置
   ├─ DualAudioPool + Media Session + 独立音量
-  ├─ 两种展开播放器、主窗口右侧歌词与进度同步
+  ├─ 两种展开播放器、主窗口中央歌词层与进度同步
   └─ Windows Audio Output Devices 适配；macOS 输出交给系统
           │ typed Tauri commands / events
 Rust / Tauri
   ├─ Plex PIN、Keychain / Credential Manager 与 resources 发现
-  ├─ per-server token、PMS 白名单请求、播放列表读写与连接重试
+  ├─ per-server token、PMS 白名单请求、歌单读写与连接重试
   ├─ 歌词读取、授权隔离的封面磁盘缓存
   ├─ 127.0.0.1 高熵票据流代理、timeline 与 scrobble
   └─ 原生窗口、Dock/托盘恢复与原生菜单退出
 ```
 
-该阶段优先保证共享账号访问、仅暴露 Music 类资料库、普通/智能/只读音频播放列表读取与播放、普通可写播放列表创建与写入、桌面播放与窗口生命周期。浏览器开发模式使用演示数据，账号和 PMS 请求只在 Tauri 桌面运行时生效。
+该阶段优先保证共享账号访问、仅暴露 Music 类资料库、普通/智能/只读音频歌单读取与播放、普通可写歌单创建与写入、桌面播放与窗口生命周期。浏览器开发模式使用演示数据，账号和 PMS 请求只在 Tauri 桌面运行时生效。
 
 ## Plex 数据与权限边界
 
@@ -27,10 +27,10 @@ Rust / Tauri
 - `/api/v2/resources` 返回的每台服务器专属 `accessToken` 仅保存在 Rust 状态中；`owned:false` 家庭/共享服务器使用它自己的 token，不错误复用账号 token。
 - Section 列表只接受 `type=artist`，因此 UI 只暴露 Plex 的音乐类型资料库；电影、剧集和照片库不会进入导航或查询链路。
 - 歌手与专辑使用 PMS `sort=titleSort:asc`，以 500 项容器分页读取到 `MediaContainer.totalSize`；React 保留 `titleSort` 并只生成 A–Z/# 导航分组，组内不再进行 locale 排序。曲目页维持单页有界读取。
-- 艺术家详情的歌曲标签调用 `/library/metadata/{artist}/allLeaves`，请求排序固定为 `parentTitleSort:asc,parentIndex:asc,index:asc`，每页 50 首；前端保留 PMS 顺序并按 `ratingKey` 过滤页间及页内重复。后续页失败不清空已加载数据，也不推进起点，用户重试时只重新请求失败页。
-- 服务器和 Music Section 只在设置页选择；侧栏不重复放置来源选择器，而是在主导航下方常驻当前账号可读的音频播放列表，账号入口位于顶部工具区。
-- PMS 数据请求只允许预定义的库、搜索、播放列表和播放状态等路径，并尝试已发现的本地、远程直连或 Relay 连接。
-- 客户端列出普通、智能和只读音频播放列表，并通过固定的 `/playlists/{id}/items` 路径读取曲目；智能播放列表每次打开都重新读取 PMS 当前结果。侧栏创建入口调用专用 Tauri command，以当前服务器 token 向 PMS `POST /playlists` 创建空白普通音频播放列表；只有普通且非只读播放列表进入写入选择器，并通过 `PUT /playlists/{playlistId}/items` 添加曲目。创建与写入仍由 PMS 检查 ACL；共享账号权限不足时 UI 给出提示，不会伪装成功。
+- 歌手详情的歌曲标签调用 `/library/metadata/{artist}/allLeaves`，请求排序固定为 `parentTitleSort:asc,parentIndex:asc,index:asc`，每页 50 首；前端保留 PMS 顺序并按 `ratingKey` 过滤页间及页内重复。后续页失败不清空已加载数据，也不推进起点，用户重试时只重新请求失败页。
+- 服务器和 Music Section 只在设置页选择；侧栏不重复放置来源选择器，而是在主导航下方常驻当前账号可读的音频歌单，账号入口位于顶部工具区。
+- PMS 数据请求只允许预定义的库、搜索、歌单和播放状态等路径，并尝试已发现的本地、远程直连或 Relay 连接。
+- 客户端列出普通、智能和只读音频歌单，并通过固定的 `/playlists/{id}/items` 路径读取歌曲；智能歌单每次打开都重新读取 PMS 当前结果。侧栏创建入口调用专用 Tauri command，以当前服务器 token 向 PMS `POST /playlists` 创建空白普通音频歌单；只有普通且非只读歌单进入写入选择器，并通过 `PUT /playlists/{playlistId}/items` 添加歌曲。创建与写入仍由 PMS 检查 ACL；共享账号权限不足时 UI 给出提示，不会伪装成功。
 - 客户端不依据 `subscription.active` 阻止基础音乐访问，但仍服从服务器 ACL、HTTP 错误和功能级订阅限制。
 - 本项目是非官方 Plex 互操作客户端；支持普通账号访问已经授权的 Music 库，不等于绕过 Plex Pass、服务器 ACL 或媒体所有权边界。
 
@@ -82,8 +82,16 @@ HTMLAudioElement
 ### 当前队列、随机与会话
 
 - `repeat=off` 时按队列顺序自然播放，到队尾停止；`repeat=all` 只回到当前队列队首；`repeat=one` 只在媒体自然结束时重播当前曲目。手动上一首/下一首仍可在当前队列中导航。
-- 随机播放使用 shuffle bag，同一轮不重复；Previous 按已播放的随机历史回退。随机和循环都不会离开创建当前播放上下文时的队列，不会自动接续另一张专辑或播放列表。
+- 随机播放使用 shuffle bag，同一轮不重复；Previous 按已播放的随机历史回退。随机和循环都不会离开创建当前播放上下文时的队列，不会自动接续另一张专辑或歌单。
 - 本地会话以版本化、最多 500 首的精简形式保存服务器、音质、队列、当前曲目/下标、进度、随机与循环模式；不保存 token、ticket 或已解析的音频 URL。会话 30 天后失效，恢复时不自动播放，登出时删除。
+
+## 多平台播放与歌词边界
+
+- `src/musicGateway.ts` 是播放器与歌词的唯一 provider 入口：`MusicProviderGateway` 固化 provider ID、能力声明、`MusicLibraryGateway`、`PlaybackGateway`、`LyricsGateway` 和统一错误映射。`usePlayer` / `useLyrics` 不直接调用 Plex API。
+- 当前只有 `plexMusicGateway` 实现该契约。它在本机回环流、timeline、scrobble、歌词和“跨设备历史点击后重新读取歌曲”之间转译 PMS 数据；队列与歌词 UI 只消费可播放歌曲和通用歌词结构，不持有服务端 token、PMS URL 或协议分支。
+- `MusicLyricsPayload` 是 provider 已翻译后的可移植歌词形状；LRC、SRT、VTT、纯文本和毫秒时间轴归一逻辑不依赖 Plex 名称。Plex 类型别名仅为当前兼容层，不是新 adapter 的约束。
+- Emby/Jellyfin adapter 以后必须独立提供认证、资料库、可播放媒体、timeline/scrobble、歌词和错误映射；当前不添加 URL、token 存储、登录入口、网络请求或兼容性声明。Plex 黄、Emby 绿、Jellyfin 蓝仅是视觉预设，永不选择或切换 provider。
+- Plex Companion controller / receiver 不属于该边界的当前能力，`canControlCompanion=false` 只用于显式保留未来能力位，不代表已经实现发射或接收。
 
 ## 平台输出
 
@@ -105,7 +113,7 @@ HTMLAudioElement
 - Rust 按 PMS metadata 中 `Part.Stream` 的原始顺序寻找歌词流，使用每台服务器 token 拉取并解析 Plex JSON/XML 响应或返回原始歌词文本；首条失败时再按服务器顺序尝试下一条，不在客户端重排 provider。
 - React 继续解析 LRC、SRT、VTT 与纯文本并归一成时间轴；PMS `startOffset/endOffset` 的毫秒边界不取整到秒。播放期间以活动 Audio 的 `currentTime` 约每 50ms 发布一次进度，并保留 `timeupdate` 兜底，不加入固定正负 delay。
 - 无时间轴的纯文本歌词可阅读但不会伪造自动步进；确认没有非空歌词行时禁用底栏歌词按钮。切歌通过服务器与 rating key 隔离异步结果，不会短暂显示上一首歌词。
-- 底栏歌词按钮直接切换主窗口右侧歌词栏；右栏拥有独立滚动容器，切歌时复位，不会带动主内容或播放器骨架滚动；切到无歌词曲目后自动收起。
+- 底栏歌词按钮直接切换主窗口中央歌词层；该层占据标题栏与固定播放器之间的完整可用高度，不重排资料库内容、没有遮罩或关闭按钮，切歌时独立滚动容器复位；切到无歌词曲目后自动收起。
 - 底部播放栏可向上展开“黑胶”或“封面”完整播放器；歌词/播放队列使用播放器骨架内的互斥右侧内容分栏，与左侧播放视觉并列，不复用主窗口右栏、不呈现为浮动卡片，也不增加第二个关闭入口。时间轴歌词继续由活动 Audio 的真实进度驱动，纯文本歌词保持静态。
 - 当前不创建独立桌面歌词窗口，也不在托盘/菜单栏保留桌面歌词入口。
 
@@ -132,12 +140,13 @@ HTMLAudioElement
 
 ## 窗口、托盘与主题
 
-- 主窗口保留系统原生装饰，默认尺寸和最小尺寸都固定为 `1280×820`，不允许继续缩小。
+- 主窗口默认尺寸和最小尺寸都固定为 `1280×800`，不允许继续缩小。macOS 保持 `decorations: true`、`titleBarStyle: Overlay`、`hiddenTitle: true` 与原生阴影，不启用透明窗口或私有 API；系统标题文字不可见，但原生交通灯、圆角、阴影、最小化、缩放和全屏行为都保留。
+- React 只提供一层 52px 自定义顶部工具栏：`--app-titlebar-height` 是 CSS 唯一高度来源，macOS 左侧预留 88px；专用背景层使用 `data-tauri-drag-region`，搜索框、账号和按钮位于其上且保持可交互。`src-tauri/tauri.conf.json` 的 `trafficLightPosition` 是不可引用 CSS 变量的原生配置；当前 macOS/Tauri 2.11 实测使用 `x: 16, y: 28` 时 16px 原生可访问性控件框中心位于窗口顶部 26px，恰好与 52px 工具栏中线重合。
 - 关闭行为持久化为 `tray` 或 `quit`；`tray` 模式拦截关闭并隐藏主窗口，`quit` 模式进入统一的原生退出流程。macOS 的 Dock Reopen 事件与托盘/菜单栏“显示 Cadilume”都会显示、取消最小化并聚焦主窗口。
 - 从窗口关闭或托盘/菜单栏退出时，Rust 先向主窗口发送 `app://before-exit`；React 立即刷新播放会话并回送确认，Rust 在收到确认或 750 ms 超时后结束进程。
 - macOS 菜单栏使用独立的透明单色 18pt@2x Template 图标，由系统适配浅/深外观；Windows 通知区域继续使用应用默认图标。两端菜单提供显示主窗口、播放/暂停和退出；设置页只配置关闭行为并提供危险色“退出账号”，不再重复提供退出应用按钮。
-- 主侧栏按“品牌与主导航 → 独立滚动的播放列表区”组织；播放列表滚动不会移动主导航、顶部工具区或固定播放器。
-- 主题支持跟随系统、浅色和深色，并通过共享 CSS token 保持同一信息层级。
+- 主侧栏按“品牌与主导航 → 独立滚动的歌单区”组织；歌单滚动不会移动主导航、顶部工具区或固定播放器。
+- 主题仅保留浅色与深色：首次启动读取系统当前外观，随后由右上角的两态开关持久化；共享 CSS token 保持同一信息层级。
 
 ## v0.2 原生播放核心
 

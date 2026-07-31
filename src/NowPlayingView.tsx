@@ -20,7 +20,7 @@ import {
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { hasDisplayableLyrics, type LyricLine, type LyricsDocument } from "./lyrics";
 import { playbackControlLabel } from "./playerUi";
-import type { PlexMedia } from "./types";
+import type { PlexMedia, ThemeMode } from "./types";
 import "./NowPlayingView.css";
 
 /**
@@ -62,15 +62,15 @@ export interface NowPlayingLyricsState {
   activeIndex: number;
 }
 
-export type NowPlayingTheme = "system" | "light" | "dark";
+export type NowPlayingTheme = ThemeMode;
 export type NowPlayingMode = "vinyl" | "artwork";
 export type NowPlayingRepeatMode = "off" | "all" | "one";
-type NowPlayingPanel = "lyrics" | "queue" | null;
+type NowPlayingPanel = "queue" | null;
 
 export interface NowPlayingViewProps {
   /** When omitted, the component remains mounted but animates below the window. */
   open?: boolean;
-  /** The expanded player can show a turntable view or a full-bleed artwork view. */
+  /** The expanded player can show a turntable or a height-fitted artwork view. */
   mode?: NowPlayingMode;
   onModeChange?: (mode: NowPlayingMode) => void;
   track?: NowPlayingTrack;
@@ -157,11 +157,7 @@ function clampUnit(value: number): number {
 }
 
 function trackArtist(track?: NowPlayingTrack): string {
-  return track?.artist || track?.grandparentTitle || track?.parentTitle || "未知艺术家";
-}
-
-function trackAlbum(track?: NowPlayingTrack): string {
-  return track?.album || track?.parentTitle || "未知专辑";
+  return track?.artist || track?.grandparentTitle || track?.parentTitle || "未知歌手";
 }
 
 function formatSeconds(value: number): string {
@@ -183,7 +179,6 @@ export function NowPlayingView({
   muted = false,
   volume = 1,
   artwork,
-  backgroundArtwork,
   progressSeconds,
   durationSeconds,
   lyrics,
@@ -214,7 +209,6 @@ export function NowPlayingView({
   const visible = Boolean(open && track);
   const displayMode = onModeChange ? mode : internalMode;
   const artist = trackArtist(track);
-  const album = trackAlbum(track);
   const normalizedDuration = durationSeconds ?? durationFromTrack(track);
   const hasTimeline = Number.isFinite(normalizedDuration) && (normalizedDuration || 0) > 0;
   const timelineValue = hasTimeline ? clampUnit((progressSeconds || 0) / (normalizedDuration || 1)) : 0;
@@ -224,7 +218,6 @@ export function NowPlayingView({
   const playbackBusy = loading || buffering;
   const activelyPlaying = playing && !playbackBusy;
   const playbackLabel = playbackControlLabel({ playing, loading, buffering });
-  const lyricsAvailable = Boolean(lyrics?.loading || lyrics?.error || hasDisplayableLyrics(lyrics?.document));
   const queueAvailable = queue.length > 0;
   const repeatLabel = repeat === "one" ? "单曲循环" : repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止";
   const volumeIcon = effectiveVolume === 0
@@ -232,8 +225,7 @@ export function NowPlayingView({
     : effectiveVolume < 0.5
       ? <Volume1 size={18} strokeWidth={1.8} aria-hidden="true" />
       : <Volume2 size={18} strokeWidth={1.8} aria-hidden="true" />;
-  const stateLabel = loading ? "正在加载音频" : buffering ? "正在缓冲" : playing ? "正在播放" : "已暂停";
-  const themeAttribute = theme === "system" ? undefined : theme;
+  const themeAttribute = theme;
   const modeClass = displayMode === "artwork" ? "is-artwork-mode" : "is-vinyl-mode";
   escapeEnabledRef.current = escapeEnabled;
 
@@ -243,9 +235,8 @@ export function NowPlayingView({
 
   useEffect(() => {
     if (!visible) setActivePanel(null);
-    else if (activePanel === "lyrics" && !lyricsAvailable) setActivePanel(null);
     else if (activePanel === "queue" && !queueAvailable) setActivePanel(null);
-  }, [activePanel, lyricsAvailable, queueAvailable, visible]);
+  }, [activePanel, queueAvailable, visible]);
 
   useEffect(() => {
     if (!visible || !escapeEnabledRef.current) return;
@@ -266,6 +257,10 @@ export function NowPlayingView({
       if (!escapeEnabledRef.current) return;
       if (event.key === "Escape") {
         event.preventDefault();
+        if (activePanel === "queue") {
+          setActivePanel(null);
+          return;
+        }
         onClose();
         return;
       }
@@ -300,7 +295,7 @@ export function NowPlayingView({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, visible]);
+  }, [activePanel, onClose, visible]);
 
   const handleBackdropMouseDown = (event: MouseEvent<HTMLElement>) => {
     if (visible && event.target === event.currentTarget) onClose();
@@ -322,9 +317,7 @@ export function NowPlayingView({
     onRepeatChange?.(nextMode);
   };
 
-  const togglePanel = (panel: Exclude<NowPlayingPanel, null>) => {
-    setActivePanel((current) => current === panel ? null : panel);
-  };
+  const toggleQueue = () => setActivePanel((current) => current === "queue" ? null : "queue");
 
   return (
     <section
@@ -339,14 +332,10 @@ export function NowPlayingView({
       tabIndex={-1}
       onMouseDown={handleBackdropMouseDown}
     >
-      {displayMode === "artwork" && (
-        <div className="now-playing-background-artwork" aria-hidden="true">
-          {backgroundArtwork || artwork || <Disc3 size={180} strokeWidth={1} />}
-        </div>
-      )}
       <div className="now-playing-sheen" aria-hidden="true" />
       <div className="now-playing-frame">
         <header className="now-playing-header">
+          <div className="now-playing-header-drag-region" data-tauri-drag-region aria-hidden="true" />
           <button
             ref={closeButtonRef}
             className="now-playing-icon-button now-playing-close-button"
@@ -357,9 +346,7 @@ export function NowPlayingView({
           >
             <ChevronDown size={22} strokeWidth={1.8} aria-hidden="true" />
           </button>
-          <div className="now-playing-header-title" aria-live="polite">
-            <span>{stateLabel}</span>
-          </div>
+          <span className="now-playing-header-spacer" aria-hidden="true" />
           <div className="now-playing-header-actions">
             <div className="now-playing-mode-switch" role="group" aria-label="展开播放器模式">
               <button
@@ -390,16 +377,16 @@ export function NowPlayingView({
               className="now-playing-action-button"
               type="button"
               disabled={!track || !onAddToPlaylist}
-              aria-label="添加到播放列表"
+              aria-label="添加到歌单"
               onClick={() => track && onAddToPlaylist?.(track)}
             >
               <ListPlus size={17} strokeWidth={1.8} aria-hidden="true" />
-              <span>添加到播放列表</span>
+              <span>添加到歌单</span>
             </button>
           </div>
         </header>
 
-        <div className={`now-playing-content ${activePanel ? "has-panel" : ""}`}>
+        <div className="now-playing-content">
           <section className="now-playing-art-column" aria-label="播放视觉与曲目信息">
             {displayMode === "vinyl" ? (
               <div className={`now-playing-record-stage ${activelyPlaying ? "is-playing" : "is-paused"}`}>
@@ -408,9 +395,7 @@ export function NowPlayingView({
                   <div className="now-playing-record-grooves" aria-hidden="true" />
                   <div className="now-playing-record-label">
                     <div className="now-playing-artwork">{artwork || <Disc3 size={38} strokeWidth={1.4} aria-hidden="true" />}</div>
-                    <span className="now-playing-spindle" aria-hidden="true" />
                   </div>
-                  <span className="now-playing-record-hole" aria-hidden="true" />
                 </div>
               </div>
             ) : (
@@ -418,29 +403,17 @@ export function NowPlayingView({
                 <div className="now-playing-cover-artwork">{artwork || <Music2 size={64} strokeWidth={1.2} aria-hidden="true" />}</div>
               </div>
             )}
-            <div className="now-playing-track-meta">
-              <div className="now-playing-track-heading">
-                <h1 id={titleId}>{track?.title || "尚未播放"}</h1>
+              <div className="now-playing-track-meta">
+                <div className="now-playing-track-heading">
+                  <h1 id={titleId}>{track?.title || "尚未播放"}</h1>
+                </div>
+                <p>{artist}</p>
               </div>
-              <p>{artist}</p>
-              <small>{album}{track?.year ? ` · ${track.year}` : ""}</small>
-            </div>
           </section>
-          {activePanel === "lyrics" && (
-            <ExpandedLyricsPanel
-              track={track}
-              lyrics={lyrics}
-              progressSeconds={progressSeconds || 0}
-              onSeek={onSeek}
-            />
-          )}
-          {activePanel === "queue" && (
-            <ExpandedQueuePanel
-              queue={queue}
-              currentIndex={currentQueueIndex}
-              onSelect={onSelectQueueIndex}
-            />
-          )}
+          <ExpandedLyricsPanel track={track} lyrics={lyrics} onSeek={onSeek} />
+          {activePanel === "queue" && <div className="now-playing-queue-popover">
+            <ExpandedQueuePanel queue={queue} currentIndex={currentQueueIndex} onSelect={onSelectQueueIndex} />
+          </div>}
         </div>
 
         <footer className="now-playing-controller" aria-label="完整播放器控制">
@@ -463,24 +436,13 @@ export function NowPlayingView({
           <div className="now-playing-control-row">
             <div className="now-playing-panel-actions" role="group" aria-label="展开播放器内容">
               <button
-                className={`now-playing-control-button ${activePanel === "lyrics" ? "is-active" : ""}`}
-                type="button"
-                disabled={!lyricsAvailable}
-                aria-label={activePanel === "lyrics" ? "隐藏歌词" : lyricsAvailable ? "显示歌词" : "这首歌暂无歌词"}
-                aria-pressed={activePanel === "lyrics"}
-                title={activePanel === "lyrics" ? "隐藏歌词" : lyricsAvailable ? "显示歌词" : "这首歌暂无歌词"}
-                onClick={() => togglePanel("lyrics")}
-              >
-                <Captions size={19} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-              <button
                 className={`now-playing-control-button ${activePanel === "queue" ? "is-active" : ""}`}
                 type="button"
                 disabled={!queueAvailable}
                 aria-label={activePanel === "queue" ? "隐藏播放队列" : "显示播放队列"}
                 aria-pressed={activePanel === "queue"}
                 title={activePanel === "queue" ? "隐藏播放队列" : "显示播放队列"}
-                onClick={() => togglePanel("queue")}
+                onClick={toggleQueue}
               >
                 <ListMusic size={19} strokeWidth={1.8} aria-hidden="true" />
               </button>
@@ -586,10 +548,9 @@ export function NowPlayingView({
   );
 }
 
-function ExpandedLyricsPanel({ track, lyrics, progressSeconds, onSeek }: {
+function ExpandedLyricsPanel({ track, lyrics, onSeek }: {
   track?: NowPlayingTrack;
   lyrics?: NowPlayingLyricsState;
-  progressSeconds: number;
   onSeek: (seconds: number) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
@@ -644,7 +605,6 @@ function ExpandedLyricsPanel({ track, lyrics, progressSeconds, onSeek }: {
           }
           const timed = lyrics?.document?.timed === true && line.startMs !== null;
           const active = timed && index === activeIndex;
-          const lyricProgress = active ? getLyricProgress(line, progressSeconds * 1000) : 0;
           return (
             <button
               ref={(node) => { lineRefs.current[line.id] = node; }}
@@ -653,7 +613,6 @@ function ExpandedLyricsPanel({ track, lyrics, progressSeconds, onSeek }: {
               type="button"
               disabled={!timed}
               aria-current={active ? "true" : undefined}
-              style={{ "--now-playing-lyric-progress": `${lyricProgress * 100}%` } as CSSProperties}
               onClick={() => timed && onSeek((line.startMs || 0) / 1000)}
             >
               {line.texts.map((text, textIndex) => <span key={`${line.id}-${textIndex}`}>{text}</span>)}

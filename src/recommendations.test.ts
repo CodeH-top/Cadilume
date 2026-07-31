@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { orderRecommendationHubs, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
-import type { PlexHub, PlexPlaylist } from "./types";
+import { homeRecommendationHubs, orderRecommendationHubs, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
+import type { PlexHub, PlexItem, PlexPlaylist } from "./types";
 
 const hub = (title: string, identifier: string): PlexHub => ({ title, identifier, type: "album", items: [] });
 const playlist = (ratingKey: string, lastViewedAt?: number, viewCount?: number): PlexPlaylist => ({
@@ -41,5 +41,24 @@ describe("recommendation ordering", () => {
       playlist("newer", 300, 2),
       playlist("count-only", undefined, 4),
     ]).map(({ ratingKey }) => ratingKey)).toEqual(["newer", "older", "count-only"]);
+  });
+
+  it("keeps the home page to recent playlists, played tracks, and added music", () => {
+    const track: PlexItem = { ratingKey: "track-1", key: "/library/metadata/track-1", type: "track", title: "Song" };
+    const artist: PlexItem = { ratingKey: "artist-1", key: "/library/metadata/artist-1", type: "artist", title: "Artist" };
+    const album: PlexItem = { ratingKey: "album-1", key: "/library/metadata/album-1", type: "album", title: "Album" };
+    const home = homeRecommendationHubs([
+      { title: "Top artists", type: "artist", identifier: "music.topartists.1", items: [artist] },
+      { title: "Recently Added", type: "album", identifier: "music.recentlyadded.1", items: [album, artist] },
+      { title: "Recently Played", type: "artist", identifier: "music.recentlyplayed.artists.1", items: [artist] },
+      { title: "Recently Played Tracks", type: "track", identifier: "music.recentlyplayed.1", items: [artist, track] },
+    ]);
+
+    expect(home.map(({ identifier }) => identifier)).toEqual([
+      "music.recentlyplayed.1",
+      "music.recentlyadded.1",
+    ]);
+    expect(home[0].items.every((item) => item.type === "track")).toBe(true);
+    expect(home[1].items.map((item) => item.type)).toEqual(["album"]);
   });
 });

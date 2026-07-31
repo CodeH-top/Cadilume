@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, isDesktopRuntime, reportTimeline, scrobble, streamUrl } from "./api";
+import { acknowledgeQuit, isDesktopRuntime } from "./api";
+import { plexMusicGateway } from "./musicGateway";
 import { trackAlbum, trackArtist, type PlexItem, type StreamQuality } from "./types";
 
 export type RepeatMode = "off" | "all" | "one";
@@ -1051,7 +1052,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       audio.pause();
       if (!autoplay) setPlaying(false);
 
-      const url = await streamUrl(serverId, track, quality);
+      const url = await plexMusicGateway.playback.streamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       audio.src = url;
       assignedSource = url;
@@ -1435,7 +1436,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           && fallbackState.activeQuality === fallbackQuality
           && fallbackState.pendingQuality === undefined;
       };
-      void streamUrl(activeServerId, track, fallbackQuality)
+      void plexMusicGateway.playback.streamUrl(activeServerId, track, fallbackQuality)
         .then(async (url) => {
           if (!isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)) return;
           if (playbackFallbackRef.current.pendingQuality !== fallbackQuality) return;
@@ -1491,7 +1492,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         const scrobbleKey = activeServerId && track ? `${activeServerId}:${track.ratingKey}` : undefined;
         if (track && activeServerId && scrobbleKey && audio.duration > 0 && audio.currentTime / audio.duration >= 0.9 && !scrobbledRef.current.has(scrobbleKey)) {
           scrobbledRef.current.add(scrobbleKey);
-          void scrobble(activeServerId, track.ratingKey);
+          void plexMusicGateway.playback.scrobble(activeServerId, track);
         }
       };
       const onPlay = () => {
@@ -1653,7 +1654,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     if (pool.hasPrepared(preparation)) return;
     pool.cancelPrepared();
 
-    void streamUrl(playbackServerId, nextTrack, quality)
+    void plexMusicGateway.playback.streamUrl(playbackServerId, nextTrack, quality)
       .then((url) => {
         if (
           prebufferRequestRef.current !== requestId
@@ -1692,7 +1693,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       const activeServerId = queueServerIdRef.current;
       const activeTrack = queueRef.current[indexRef.current];
       if (!activeServerId || activeTrack?.ratingKey !== current.ratingKey) return;
-      void reportTimeline(activeServerId, current, playing ? "playing" : "paused", progressRef.current).catch(() => undefined);
+      void plexMusicGateway.playback.reportTimeline(activeServerId, current, playing ? "playing" : "paused", progressRef.current).catch(() => undefined);
     };
     send();
     if (!playing) return;

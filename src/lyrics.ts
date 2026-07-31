@@ -1,4 +1,4 @@
-import type { PlexLyricsPayload } from "./types";
+import type { MusicLyricsPayload } from "./types";
 
 export type LyricFormat = "lrc" | "srt" | "vtt" | "plain";
 
@@ -66,7 +66,7 @@ export function findActiveLyricIndex(lines: readonly LyricLine[], playbackMs: nu
   return index;
 }
 
-export function normalizePlexLyrics(payload: PlexLyricsPayload, durationMs?: number): LyricsDocument {
+export function normalizeMusicLyrics(payload: MusicLyricsPayload, durationMs?: number): LyricsDocument {
   if (payload.rawText?.trim()) {
     return {
       ...parseLyrics(payload.rawText, payload.formatHint),
@@ -88,7 +88,7 @@ export function normalizePlexLyrics(payload: PlexLyricsPayload, durationMs?: num
       author: payload.author,
       by: payload.by,
       lines: payload.lines.map((line, index) => ({
-        id: `plex-plain-${index}`,
+        id: `provider-plain-${index}`,
         startMs: null,
         endMs: null,
         texts: line.text.trim() ? [line.text.trim()] : [],
@@ -99,12 +99,12 @@ export function normalizePlexLyrics(payload: PlexLyricsPayload, durationMs?: num
 
   const grouped = new Map<number, { texts: string[]; endMs: number | null }>();
   for (const line of timedSource) {
-    const startMs = normalizePlexOffset(line.startMs as number);
+    const startMs = normalizeProviderOffset(line.startMs as number);
     const current = grouped.get(startMs) || { texts: [], endMs: null };
     const text = line.text.trim();
     if (text && !current.texts.includes(text)) current.texts.push(text);
     if (Number.isFinite(line.endMs)) {
-      const endMs = normalizePlexOffset(line.endMs as number);
+      const endMs = normalizeProviderOffset(line.endMs as number);
       if (endMs > startMs) current.endMs = Math.max(current.endMs || 0, endMs);
     }
     grouped.set(startMs, current);
@@ -116,7 +116,7 @@ export function normalizePlexLyrics(payload: PlexLyricsPayload, durationMs?: num
     const explicitEnd = value.endMs && value.endMs > startMs ? value.endMs : null;
     const fallbackEnd = nextStart ?? (durationMs && durationMs > startMs ? Math.round(durationMs) : null);
     return {
-      id: `plex-${startMs}-${index}`,
+      id: `provider-${startMs}-${index}`,
       startMs,
       endMs: explicitEnd ?? fallbackEnd,
       texts: value.texts,
@@ -135,7 +135,10 @@ export function normalizePlexLyrics(payload: PlexLyricsPayload, durationMs?: num
   };
 }
 
-function normalizePlexOffset(value: number): number {
+/** @deprecated Use `normalizeMusicLyrics`; retained for existing Plex-focused callers. */
+export const normalizePlexLyrics = normalizeMusicLyrics;
+
+function normalizeProviderOffset(value: number): number {
   return Math.max(0, Math.round(value));
 }
 

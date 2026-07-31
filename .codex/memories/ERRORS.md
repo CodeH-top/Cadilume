@@ -1,5 +1,29 @@
 # ERRORS
 
+## 2026-07-31 — 内部浏览器本地 URL 曾阻断，现已恢复
+
+- 初始已有 Cadilume `http://[::1]:1420/#/settings` 标签被 Browser URL policy 拒绝；当时没有改用 raw CDP、其他浏览器或其他自动化表面绕过。
+- 后续使用内部浏览器的新标签重新进入同一 Vite 地址后，页面读取和交互恢复。只把可用的 `1280×720` 记录为较小视口验收，计划中 1280×820 的覆盖由真实 Tauri `1280×801` 窗口补强，不能把两者混写。
+- `src-tauri/src/plex.rs` 的四处 Rustfmt 建议已按原样精确收口；`cargo fmt --check` 与 45 项 Rust 测试均通过。
+
+## 2026-07-31 — 不用 AX 文本注入修改设备名；完整终止 Tauri 开发进程组
+
+- macOS `System Events` 的可访问性文本注入曾把设备名称错误持久化为单个逗号；它不适合作为自由文本持久化的写入验收手段。需要恢复时先读取 `scutil --get ComputerName` 与 `Application Support/top.codeh.cadilume/config.json`，只精确修复 `deviceName`，再由原生进程重新加载。
+- 仅向 `pnpm tauri dev` 父进程发送 `TERM` 可能遗留其 `pnpm dev` / Vite 子进程并占用 `1420`。确认 PID、cwd 和 process group 都属于 Cadilume 后，终止该已知进程组，再只启动一条 `pnpm tauri dev`。
+- 验收必须读取真实 Cadilume 原生窗口的 Accessibility 树，而不是仅看浏览器：设置页已显示恢复后的系统名称；用户也在 Plex 实际客户端卡片中确认 `Cadilume — <设备名称>` 和播放状态均被接收。
+
+## 2026-07-30 — 内部浏览器不能证明 View Transitions；真实 WKWebView 的 root 转场会闪屏
+
+- 在内部浏览器打开 Ant Design 官方主题页时，页面运行态返回 `typeof document.startViewTransition === "undefined"`，因此该环境只会执行无动画降级，不能用它判断 Ant Design 或 Cadilume 的 View Transition 揭示观感。
+- 真实 Tauri WKWebView 中，即使关闭 `::view-transition-group/image-pair/old/new` 的默认动画，`document.startViewTransition` 的 root 圆形揭示仍会先闪出一帧；Cadilume 不应把它作为主题动效主路径。
+- 稳定方案是应用自管双层揭示：切换前克隆 `#root` 为 `aria-hidden`、`inert` 的旧主题快照并内联旧 CSS token；把真实根节点放在上层，以标准元素 `clip-path: circle()` 从触发点扩开，完成后删除快照。重复点击只由状态锁忽略，主题按钮不设置 `disabled`，以保持正常 `pointer` 状态。
+
+## 2026-07-30 — 路由 revision 不能把同页激活误判为页面切换
+
+- `loadView()` 原先无条件递增 `contentRevision`，而 `.route-content` 的 key 包含该 revision 且默认带 `route-content-in`。因此重复点击已打开的“设置”会重新挂载整个路由内容，重播 `opacity + translateY(5px)`，主观上表现为主题切换时的页面抖动。
+- 修复方式是把入场动画显式绑定到实际可见内容的切换：初始渲染、同一 hash 的重复激活、同页刷新与主题 rerender 都不改变 revision；同一目标正在切换时忽略重复激活，不同目标仍可中断转向。动画 class 也不再是 `.route-content` 的默认样式。
+- 真实 Tauri 开发态通过 macOS Accessibility 复测：连续四次点击当前“设置”后，在 `20–490ms` 采样中标题矩形始终为 `x=472, y=144, 54×33`；浅→深→浅主题切换期间该矩形同样保持不变，两个按钮均保持 enabled。
+
 ## 2026-07-28 — Xcode 26 `ictool` name collision
 
 - `xcrun --find ictool` resolves to Xcode's asset-catalog compiler and does not support Icon Composer's `--export-preview` interface, even though both executables share the same name.

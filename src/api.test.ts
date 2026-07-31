@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getPlaylistItems, getPlaylists, getRecommendationHubs, pollPin } from "./api";
+import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaybackHistory, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, pollPin, setBrandPreset, setDeviceName, setPlayHistorySyncEnabled } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -130,8 +130,68 @@ describe("Plex library sorting", () => {
     });
   });
 
+  it("forwards an explicit singer table sort to the complete PMS pagination query", async () => {
+    invokeMock.mockResolvedValueOnce({ MediaContainer: { totalSize: 0, Metadata: [] } });
+
+    await getArtistTracksPage("server-a", "artist_42-1", 0, 50, { key: "duration", direction: "desc" });
+
+    expect(invokeMock).toHaveBeenCalledWith("server_get", {
+      serverId: "server-a",
+      path: "/library/metadata/artist_42-1/allLeaves",
+      query: {
+        type: "10",
+        sort: "duration:desc,titleSort:asc",
+        "X-Plex-Container-Start": "0",
+        "X-Plex-Container-Size": "50",
+      },
+    });
+  });
+
+  it("pages the complete main music library through PMS before rendering one page", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        totalSize: "143",
+        Metadata: [
+          { ratingKey: "track-51", key: "/library/metadata/track-51", type: "track", title: "Song" },
+          { ratingKey: "album-ignored", key: "/library/metadata/album-ignored", type: "album", title: "Ignored" },
+        ],
+      },
+    });
+
+    const page = await getTracksPage("server-a", "15", 50, 50, { key: "album", direction: "desc" });
+
+    expect(page).toMatchObject({ start: 50, nextStart: 52, totalSize: 143 });
+    expect(page.items.map((item) => item.ratingKey)).toEqual(["track-51"]);
+    expect(invokeMock).toHaveBeenCalledWith("server_get", {
+      serverId: "server-a",
+      path: "/library/sections/15/all",
+      query: {
+        type: "10",
+        sort: "parentTitleSort:desc,titleSort:asc",
+        "X-Plex-Container-Start": "50",
+        "X-Plex-Container-Size": "50",
+      },
+    });
+  });
+
+  it("resolves a direct detail route by safe metadata identifier", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        Metadata: [{ ratingKey: "album_42-1", key: "/library/metadata/album_42-1", type: "album", title: "Album" }],
+      },
+    });
+
+    await expect(getLibraryMetadata("server-a", "album_42-1")).resolves.toMatchObject({ title: "Album" });
+    expect(invokeMock).toHaveBeenCalledWith("server_get", {
+      serverId: "server-a",
+      path: "/library/metadata/album_42-1",
+      query: {},
+    });
+    await expect(getLibraryMetadata("server-a", "../unsafe")).rejects.toThrow("无效的 Plex 媒体标识");
+  });
+
   it("rejects an unsafe artist identifier before requesting PMS", async () => {
-    await expect(getArtistTracksPage("server-a", "../artist", 0, 50)).rejects.toThrow("无效的 Plex 艺术家标识");
+    await expect(getArtistTracksPage("server-a", "../artist", 0, 50)).rejects.toThrow("无效的 Plex 歌手标识");
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
@@ -248,7 +308,7 @@ describe("Plex audio playlists", () => {
           {
             ratingKey: "folder-50",
             type: "playlistfolder",
-            title: "播放列表目录",
+            title: "歌单目录",
             playlistType: "audio",
             smart: false,
           },
@@ -270,7 +330,7 @@ describe("Plex audio playlists", () => {
           {
             ratingKey: "../invalid-53",
             type: "playlist",
-            title: "无效播放列表标识",
+            title: "无效歌单标识",
             playlistType: "audio",
             smart: false,
             readOnly: false,
@@ -319,7 +379,7 @@ describe("Plex audio playlists", () => {
     });
   });
 
-  it("creates a trimmed regular audio playlist through the scoped Rust command", async () => {
+  it("creates a trimmed regular audio playlist with its summary through the scoped Rust command", async () => {
     invokeMock.mockResolvedValueOnce({
       MediaContainer: {
         Metadata: [{
@@ -335,11 +395,12 @@ describe("Plex audio playlists", () => {
       },
     });
 
-    const playlist = await createPlaylist("server-a", "  通勤音乐  ");
+    const playlist = await createPlaylist("server-a", "  通勤音乐  ", "  城市移动时听\n保持清醒  ");
 
     expect(playlist).toMatchObject({
       ratingKey: "playlist-99",
       title: "通勤音乐",
+      summary: "城市移动时听\n保持清醒",
       playlistType: "audio",
       smart: false,
       readOnly: false,
@@ -347,13 +408,16 @@ describe("Plex audio playlists", () => {
     expect(invokeMock).toHaveBeenCalledWith("create_playlist", {
       serverId: "server-a",
       title: "通勤音乐",
+      summary: "城市移动时听\n保持清醒",
     });
   });
 
   it("rejects invalid playlist creation input before invoking Tauri", async () => {
     for (const title of ["", "   ", "含\n换行", "歌".repeat(256)]) {
-      await expect(createPlaylist("server-a", title)).rejects.toThrow("播放列表名称必须为 1–255 个有效字符");
+      await expect(createPlaylist("server-a", title)).rejects.toThrow("歌单名称必须为 1–255 个有效字符");
     }
+    await expect(createPlaylist("server-a", "有效名称", "\u0000")).rejects.toThrow("歌单描述最多为 1000 个有效字符");
+    await expect(createPlaylist("server-a", "有效名称", "描述".repeat(501))).rejects.toThrow("歌单描述最多为 1000 个有效字符");
     await expect(createPlaylist("../server", "有效名称")).rejects.toThrow("无效的 Plex 服务器标识");
     expect(invokeMock).not.toHaveBeenCalled();
   });
@@ -364,11 +428,12 @@ describe("Plex audio playlists", () => {
       value: {},
     });
 
-    const created = await createPlaylist("demo-server", "验收新播放列表");
+    const created = await createPlaylist("demo-server", "验收新歌单", "用于浏览器演示");
     const playlists = await getPlaylists("demo-server");
 
     expect(created).toMatchObject({
-      title: "验收新播放列表",
+      title: "验收新歌单",
+      summary: "用于浏览器演示",
       playlistType: "audio",
       smart: false,
       readOnly: false,
@@ -380,9 +445,9 @@ describe("Plex audio playlists", () => {
 
   it("rejects malformed identifiers before invoking Tauri", async () => {
     for (const playlistId of ["", "../42", "42/items", "42?x=1", "42#items", "42 items", "a".repeat(257)]) {
-      await expect(getPlaylistItems("server-a", playlistId)).rejects.toThrow("无效的 Plex 播放列表标识");
+      await expect(getPlaylistItems("server-a", playlistId)).rejects.toThrow("无效的 Plex 歌单标识");
     }
-    await expect(getPlaylistItems("../server", "playlist-42")).rejects.toThrow("无效的 Plex 播放列表标识");
+    await expect(getPlaylistItems("../server", "playlist-42")).rejects.toThrow("无效的 Plex 歌单标识");
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
@@ -435,6 +500,93 @@ describe("Plex PIN authentication boundary", () => {
     expect(authenticated).toEqual({ id: 1, code: "DEMO", expiresIn: 300, authenticated: true });
     expect(created).not.toHaveProperty("authToken");
     expect(authenticated).not.toHaveProperty("authToken");
+  });
+});
+
+describe("cross-device recent playback history", () => {
+  it("uses the dedicated native commands and resolves playback metadata only from a rating key", async () => {
+    invokeMock
+      .mockResolvedValueOnce([{
+        ratingKey: "track-17",
+        title: "Other Room Song",
+        artist: "Artist",
+        album: "Album",
+        viewedAt: 1_700_000_000,
+        deviceName: "客厅 Mac",
+      }])
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        MediaContainer: {
+          Metadata: [{ ratingKey: "track-17", key: "/library/metadata/track-17", type: "track", title: "Other Room Song" }],
+        },
+      });
+
+    await expect(getPlaybackHistory("server-a")).resolves.toEqual([expect.objectContaining({
+      ratingKey: "track-17",
+      deviceName: "客厅 Mac",
+    })]);
+    await expect(setPlayHistorySyncEnabled(true)).resolves.toBeUndefined();
+    await expect(getTrackMetadata("server-a", "track-17")).resolves.toMatchObject({ type: "track", ratingKey: "track-17" });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "get_playback_history", { serverId: "server-a" });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "set_play_history_sync_enabled", { enabled: true });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "server_get", {
+      serverId: "server-a",
+      path: "/library/metadata/track-17",
+      query: {},
+    });
+  });
+
+  it("keeps browser-demo history to the IPC-minimal presentation shape", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {},
+    });
+
+    const history = await getPlaybackHistory("demo-server");
+
+    expect(history.length).toBeGreaterThan(0);
+    expect(history[0]).toEqual(expect.objectContaining({
+      ratingKey: expect.any(String),
+      title: expect.any(String),
+      viewedAt: expect.any(Number),
+      deviceName: expect.any(String),
+    }));
+    expect(history[0]).not.toHaveProperty("key");
+    expect(history[0]).not.toHaveProperty("type");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsafe history and metadata identifiers before invoking Tauri", async () => {
+    await expect(getPlaybackHistory("../server")).rejects.toThrow("无效的 Plex 服务器标识");
+    await expect(getTrackMetadata("server-a", "../track")).rejects.toThrow("无效的 Plex 歌曲标识");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Cadilume visual presets", () => {
+  it("persists the fixed visual preset through its dedicated native command", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await expect(setBrandPreset("jellyfin")).resolves.toBeUndefined();
+
+    expect(invokeMock).toHaveBeenCalledWith("set_brand_preset", { preset: "jellyfin" });
+  });
+});
+
+describe("Cadilume device name", () => {
+  it("normalizes the editable name and persists it through the dedicated native command", async () => {
+    invokeMock.mockResolvedValueOnce("客厅 Mac");
+
+    await expect(setDeviceName("  客厅   Mac  ")).resolves.toBe("客厅 Mac");
+
+    expect(invokeMock).toHaveBeenCalledWith("set_device_name", { deviceName: "客厅 Mac" });
+  });
+
+  it("rejects unsafe values before they can reach Tauri", async () => {
+    await expect(setDeviceName("客厅\nMac")).rejects.toThrow("设备名称需为 1–80 个有效字符");
+    await expect(setDeviceName("设".repeat(81))).rejects.toThrow("设备名称需为 1–80 个有效字符");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 

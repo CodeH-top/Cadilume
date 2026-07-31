@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { getLyrics } from "./api";
-import { findActiveLyricIndex, normalizePlexLyrics, type LyricsDocument } from "./lyrics";
+import { plexMusicGateway } from "./musicGateway";
+import { findActiveLyricIndex, normalizeMusicLyrics, type LyricsDocument } from "./lyrics";
 import type { PlexItem } from "./types";
 
 export function useLyrics(
@@ -26,10 +26,10 @@ export function useLyrics(
     }
 
     setLoading(true);
-    void getLyrics(serverId, track.ratingKey)
+    void plexMusicGateway.lyrics.getLyrics(serverId, track)
       .then((payload) => {
         if (cancelled) return;
-        setDocument(payload ? normalizePlexLyrics(payload, track.duration || durationSeconds * 1000) : undefined);
+        setDocument(payload ? normalizeMusicLyrics(payload, track.duration || durationSeconds * 1000) : undefined);
       })
       .catch((reason) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));

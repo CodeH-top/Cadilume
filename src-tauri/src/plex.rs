@@ -1,11 +1,11 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, FileTimes, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        RwLock,
+        Mutex, RwLock,
     },
     time::{Duration, SystemTime},
 };
@@ -20,7 +20,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tauri::State;
+use tauri::{AppHandle, State};
 use url::Url;
 use uuid::Uuid;
 
@@ -38,12 +38,21 @@ const ARTWORK_CACHE_DIR: &str = "artwork";
 const ARTWORK_CACHE_EXTENSION: &str = "cadart";
 const ARTWORK_CACHE_MAGIC: &[u8; 8] = b"CADART01";
 const MAX_CACHE_MIME_BYTES: usize = 127;
+const MAX_REMOTE_HISTORY_ITEMS: usize = 24;
+const MAX_DEVICE_NAME_CHARACTERS: usize = 80;
+const FALLBACK_DEVICE_NAME: &str = "Desktop";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedConfig {
     client_identifier: String,
     close_behavior: CloseBehavior,
+    #[serde(default)]
+    device_name: String,
+    #[serde(default)]
+    sync_recent_plays: bool,
+    #[serde(default)]
+    brand_preset: BrandPreset,
 }
 
 impl Default for PersistedConfig {
@@ -51,6 +60,9 @@ impl Default for PersistedConfig {
         Self {
             client_identifier: Uuid::new_v4().to_string(),
             close_behavior: CloseBehavior::Tray,
+            device_name: default_device_name(),
+            sync_recent_plays: false,
+            brand_preset: BrandPreset::Plex,
         }
     }
 }
@@ -60,6 +72,92 @@ impl Default for PersistedConfig {
 pub enum CloseBehavior {
     Tray,
     Quit,
+}
+
+/// Names used in Plex's device UI travel in request headers, so reject control
+/// characters and keep the value bounded before it is persisted or sent.
+fn normalize_device_name(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(anyhow!("设备名称不能为空"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(anyhow!("设备名称不能包含控制字符"));
+    }
+
+    let mut normalized = String::new();
+    let mut previous_whitespace = false;
+    for character in value.chars() {
+        if character.is_whitespace() {
+            if !previous_whitespace {
+                normalized.push(' ');
+            }
+            previous_whitespace = true;
+        } else {
+            normalized.push(character);
+            previous_whitespace = false;
+        }
+    }
+
+    if normalized.is_empty() || normalized.chars().count() > MAX_DEVICE_NAME_CHARACTERS {
+        return Err(anyhow!(
+            "设备名称需为 1–{MAX_DEVICE_NAME_CHARACTERS} 个有效字符"
+        ));
+    }
+    Ok(normalized)
+}
+
+fn default_device_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("/usr/sbin/scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(name) = String::from_utf8(output.stdout) {
+                    if let Ok(name) = normalize_device_name(&name) {
+                        return name;
+                    }
+                }
+            }
+        }
+    }
+
+    let environment_key = if cfg!(target_os = "windows") {
+        "COMPUTERNAME"
+    } else {
+        "HOSTNAME"
+    };
+    std::env::var(environment_key)
+        .ok()
+        .and_then(|name| normalize_device_name(&name).ok())
+        .unwrap_or_else(|| FALLBACK_DEVICE_NAME.to_string())
+}
+
+fn normalize_persisted_device_name(config: &mut PersistedConfig) -> bool {
+    let previous = config.device_name.clone();
+    let normalized = normalize_device_name(&previous).unwrap_or_else(|_| default_device_name());
+    config.device_name = normalized;
+    config.device_name != previous
+}
+
+fn write_persisted_config(path: &Path, config: &PersistedConfig) -> Result<()> {
+    fs::write(path, serde_json::to_vec_pretty(config)?).context("无法保存 Cadilume 配置")
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BrandPreset {
+    Plex,
+    Emby,
+    Jellyfin,
+}
+
+impl Default for BrandPreset {
+    fn default() -> Self {
+        Self::Plex
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +171,7 @@ struct CachedConnection {
 #[derive(Debug, Clone)]
 struct CachedServer {
     token: String,
+    owned: bool,
     connections: Vec<CachedConnection>,
 }
 
@@ -101,8 +200,10 @@ pub struct PlexState {
     config_path: PathBuf,
     cache_dir: PathBuf,
     cache_lock: RwLock<()>,
+    config: Mutex<PersistedConfig>,
     client_identifier: String,
     close_to_tray: AtomicBool,
+    sync_recent_plays: AtomicBool,
     token: RwLock<Option<String>>,
     servers: RwLock<HashMap<String, CachedServer>>,
 }
@@ -111,17 +212,20 @@ impl PlexState {
     pub fn load(config_dir: PathBuf, app_cache_dir: PathBuf) -> Result<Self> {
         let config_path = config_dir.join("config.json");
         let cache_dir = initialize_artwork_cache_dir(&app_cache_dir)?;
-        let config = match fs::read_to_string(&config_path) {
-            Ok(raw) => {
-                serde_json::from_str::<PersistedConfig>(&raw).context("无法解析 Cadilume 配置")?
-            }
+        let (mut config, mut should_persist_config) = match fs::read_to_string(&config_path) {
+            Ok(raw) => (
+                serde_json::from_str::<PersistedConfig>(&raw).context("无法解析 Cadilume 配置")?,
+                false,
+            ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let config = PersistedConfig::default();
-                fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
-                config
+                (PersistedConfig::default(), true)
             }
             Err(error) => return Err(error).context("无法读取 Cadilume 配置"),
         };
+        should_persist_config |= normalize_persisted_device_name(&mut config);
+        if should_persist_config {
+            write_persisted_config(&config_path, &config)?;
+        }
 
         let token = keyring_entry()
             .ok()
@@ -138,8 +242,10 @@ impl PlexState {
             config_path,
             cache_dir,
             cache_lock: RwLock::new(()),
-            client_identifier: config.client_identifier,
+            config: Mutex::new(config.clone()),
+            client_identifier: config.client_identifier.clone(),
             close_to_tray: AtomicBool::new(config.close_behavior == CloseBehavior::Tray),
+            sync_recent_plays: AtomicBool::new(config.sync_recent_plays),
             token: RwLock::new(token),
             servers: RwLock::new(HashMap::new()),
         })
@@ -158,14 +264,57 @@ impl PlexState {
     }
 
     fn save_close_behavior(&self, behavior: CloseBehavior) -> Result<()> {
-        let config = PersistedConfig {
-            client_identifier: self.client_identifier.clone(),
-            close_behavior: behavior,
-        };
-        fs::write(&self.config_path, serde_json::to_vec_pretty(&config)?)?;
-        self.close_to_tray
-            .store(behavior == CloseBehavior::Tray, Ordering::SeqCst);
+        self.update_preferences(|config| config.close_behavior = behavior)
+    }
+
+    fn save_play_history_sync_enabled(&self, enabled: bool) -> Result<()> {
+        self.update_preferences(|config| config.sync_recent_plays = enabled)
+    }
+
+    fn save_brand_preset(&self, preset: BrandPreset) -> Result<()> {
+        self.update_preferences(|config| config.brand_preset = preset)
+    }
+
+    fn save_device_name(&self, device_name: String) -> Result<()> {
+        self.update_preferences(|config| config.device_name = device_name)
+    }
+
+    fn update_preferences(&self, update: impl FnOnce(&mut PersistedConfig)) -> Result<()> {
+        let mut config = self
+            .config
+            .lock()
+            .map_err(|_| anyhow!("配置写入锁定失败"))?;
+        let previous = config.clone();
+        update(&mut config);
+        if let Err(error) = write_persisted_config(&self.config_path, &config) {
+            *config = previous;
+            return Err(error);
+        }
+        self.close_to_tray.store(
+            config.close_behavior == CloseBehavior::Tray,
+            Ordering::SeqCst,
+        );
+        self.sync_recent_plays
+            .store(config.sync_recent_plays, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn sync_recent_plays(&self) -> bool {
+        self.sync_recent_plays.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn brand_preset(&self) -> BrandPreset {
+        self.config
+            .lock()
+            .map(|config| config.brand_preset)
+            .unwrap_or_default()
+    }
+
+    fn device_name(&self) -> String {
+        self.config
+            .lock()
+            .map(|config| config.device_name.clone())
+            .unwrap_or_else(|_| default_device_name())
     }
 
     pub(crate) fn plex_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -177,13 +326,8 @@ impl PlexState {
         &self,
         request: reqwest::RequestBuilder,
     ) -> reqwest::RequestBuilder {
-        request
-            .header("X-Plex-Product", PRODUCT_NAME)
-            .header("X-Plex-Version", PRODUCT_VERSION)
-            .header("X-Plex-Client-Identifier", &self.client_identifier)
-            .header("X-Plex-Platform", std::env::consts::OS)
-            .header("X-Plex-Device", "Desktop")
-            .header("X-Plex-Provides", "player,controller")
+        let device_name = self.device_name();
+        apply_plex_identity_headers(request, &self.client_identifier, &device_name)
     }
 
     async fn account(&self, token: &str) -> Result<Account> {
@@ -345,6 +489,22 @@ impl PlexState {
     }
 }
 
+fn apply_plex_identity_headers(
+    request: reqwest::RequestBuilder,
+    client_identifier: &str,
+    device_name: &str,
+) -> reqwest::RequestBuilder {
+    request
+        .header("X-Plex-Product", PRODUCT_NAME)
+        .header("X-Plex-Client-Title", PRODUCT_NAME)
+        .header("X-Plex-Version", PRODUCT_VERSION)
+        .header("X-Plex-Client-Identifier", client_identifier)
+        .header("X-Plex-Platform", std::env::consts::OS)
+        .header("X-Plex-Device", "Desktop")
+        .header("X-Plex-Device-Name", device_name)
+        .header("X-Plex-Provides", "player,controller")
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapResponse {
@@ -352,6 +512,9 @@ pub struct BootstrapResponse {
     authenticated: bool,
     account: Option<Account>,
     close_behavior: CloseBehavior,
+    device_name: String,
+    sync_recent_plays: bool,
+    brand_preset: BrandPreset,
 }
 
 #[derive(Debug, Serialize)]
@@ -466,6 +629,100 @@ pub struct ServerSummary {
     secure: bool,
 }
 
+/// The only session-history fields allowed to cross the native/WebView boundary.
+/// Account IDs, device IDs, history keys, PMS URIs, tokens, and media file paths
+/// deliberately never appear in this serializable shape.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackHistoryItem {
+    rating_key: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artist: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    album: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thumb: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    art: Option<String>,
+    viewed_at: u64,
+    device_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawPlaybackHistoryItem {
+    media_type: String,
+    rating_key: String,
+    title: String,
+    artist: Option<String>,
+    album: Option<String>,
+    thumb: Option<String>,
+    art: Option<String>,
+    viewed_at: u64,
+    account_id: String,
+    device_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistoryDevice {
+    client_identifier: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "MediaContainer")]
+struct XmlHistoryContainer {
+    #[serde(rename = "Track", default)]
+    tracks: Vec<XmlHistoryTrack>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XmlHistoryTrack {
+    #[serde(rename = "@type", default)]
+    media_type: Option<String>,
+    #[serde(rename = "@ratingKey", default)]
+    rating_key: Option<String>,
+    #[serde(rename = "@title", default)]
+    title: Option<String>,
+    #[serde(rename = "@grandparentTitle", default)]
+    artist: Option<String>,
+    #[serde(rename = "@parentTitle", default)]
+    album: Option<String>,
+    #[serde(rename = "@thumb", default)]
+    thumb: Option<String>,
+    #[serde(rename = "@parentThumb", default)]
+    parent_thumb: Option<String>,
+    #[serde(rename = "@grandparentThumb", default)]
+    grandparent_thumb: Option<String>,
+    #[serde(rename = "@art", default)]
+    art: Option<String>,
+    #[serde(rename = "@grandparentArt", default)]
+    grandparent_art: Option<String>,
+    #[serde(rename = "@viewedAt", default)]
+    viewed_at: Option<String>,
+    #[serde(rename = "@accountID", default)]
+    account_id: Option<String>,
+    #[serde(rename = "@deviceID", default)]
+    device_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "MediaContainer")]
+struct XmlDevicesContainer {
+    #[serde(rename = "Device", default)]
+    devices: Vec<XmlHistoryDevice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XmlHistoryDevice {
+    #[serde(rename = "@id", default)]
+    id: Option<String>,
+    #[serde(rename = "@clientIdentifier", default)]
+    client_identifier: Option<String>,
+    #[serde(rename = "@name", default)]
+    name: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct LyricStream {
     key: String,
@@ -571,6 +828,9 @@ pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse,
         } else {
             CloseBehavior::Quit
         },
+        device_name: state.device_name(),
+        sync_recent_plays: state.sync_recent_plays(),
+        brand_preset: state.brand_preset(),
     })
 }
 
@@ -744,7 +1004,11 @@ pub async fn discover_servers(state: State<'_, PlexState>) -> Result<Vec<ServerS
         });
         cache.insert(
             resource.client_identifier,
-            CachedServer { token, connections },
+            CachedServer {
+                token,
+                owned: resource.owned,
+                connections,
+            },
         );
     }
     summaries.sort_by_key(|server| (!server.owned, server.name.to_lowercase()));
@@ -775,19 +1039,89 @@ pub async fn server_get(
 }
 
 #[tauri::command]
+pub async fn get_playback_history(
+    server_id: String,
+    state: State<'_, PlexState>,
+) -> Result<Vec<PlaybackHistoryItem>, String> {
+    // Keep the privacy preference authoritative in the native process as well.
+    // A compromised or stale WebView cannot fetch remote history while disabled.
+    if !state.sync_recent_plays() {
+        return Ok(Vec::new());
+    }
+
+    let result: Result<Vec<PlaybackHistoryItem>> = async {
+        let account_token = state.token()?;
+        let account = state.account(&account_token).await?;
+        let account_id = account
+            .id
+            .ok_or_else(|| anyhow!("Plex 账号缺少可验证的标识"))?;
+        let server = cached_server(&state, &server_id)?;
+        let history_query = HashMap::from([
+            ("X-Plex-Container-Start".to_string(), "0".to_string()),
+            (
+                "X-Plex-Container-Size".to_string(),
+                MAX_REMOTE_HISTORY_ITEMS.to_string(),
+            ),
+            ("sort".to_string(), "viewedAt:desc".to_string()),
+        ]);
+        let history_body = state
+            .server_response(&server_id, "/status/sessions/history/all", &history_query)
+            .await?
+            .text()
+            .await?;
+        let devices_body = state
+            .server_response(&server_id, "/devices", &HashMap::new())
+            .await?
+            .text()
+            .await?;
+        let records = parse_history_body(&history_body)?;
+        let devices = parse_history_devices_body(&devices_body)?;
+
+        Ok(filter_remote_playback_history(
+            records,
+            &devices,
+            account_id,
+            server.owned,
+            state.client_identifier(),
+        ))
+    }
+    .await;
+
+    // Never expose a PMS URI, HTTP response, token, account ID, or device ID in
+    // an IPC error. The UI intentionally degrades this to a non-blocking hint.
+    result.map_err(|_| "无法读取其他设备的最近播放。请确认服务器允许访问播放历史。".to_string())
+}
+
+#[tauri::command]
 pub async fn create_playlist(
     server_id: String,
     title: String,
+    summary: String,
     state: State<'_, PlexState>,
 ) -> Result<Value, String> {
     let query = create_audio_playlist_query(&title).map_err(display_error)?;
-    state
+    let normalized_summary = normalize_playlist_summary(&summary).map_err(display_error)?;
+    let mut created = state
         .server_request_response(&server_id, Method::POST, "/playlists", &query)
         .await
         .map_err(display_error)?
         .json::<Value>()
         .await
-        .map_err(display_error)
+        .map_err(display_error)?;
+
+    if !normalized_summary.is_empty() {
+        let playlist_id = created_playlist_rating_key(&created)
+            .ok_or_else(|| "Plex 未返回可更新的歌单标识".to_string())?;
+        let path = format!("/playlists/{playlist_id}");
+        let summary_query = HashMap::from([("summary".to_string(), normalized_summary.clone())]);
+        state
+            .server_request_response(&server_id, Method::PUT, &path, &summary_query)
+            .await
+            .map_err(|error| format!("歌单已创建，但保存描述失败：{}", display_error(error)))?;
+        set_created_playlist_summary(&mut created, &normalized_summary);
+    }
+
+    Ok(created)
 }
 
 #[tauri::command]
@@ -1108,6 +1442,38 @@ pub fn set_close_behavior(
     state: State<'_, PlexState>,
 ) -> Result<(), String> {
     state.save_close_behavior(behavior).map_err(display_error)
+}
+
+#[tauri::command]
+pub fn set_device_name(device_name: String, state: State<'_, PlexState>) -> Result<String, String> {
+    let device_name = normalize_device_name(&device_name).map_err(display_error)?;
+    state
+        .save_device_name(device_name.clone())
+        .map_err(|_| "无法保存 Cadilume 设备名称。".to_string())?;
+    Ok(device_name)
+}
+
+#[tauri::command]
+pub fn set_play_history_sync_enabled(
+    enabled: bool,
+    state: State<'_, PlexState>,
+) -> Result<(), String> {
+    state
+        .save_play_history_sync_enabled(enabled)
+        .map_err(|_| "无法保存其他设备播放记录同步设置。".to_string())
+}
+
+#[tauri::command]
+pub fn set_brand_preset(
+    preset: BrandPreset,
+    state: State<'_, PlexState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    state
+        .save_brand_preset(preset)
+        .map_err(|_| "无法保存 Cadilume 视觉风格。".to_string())?;
+    crate::window::update_dock_icon(&app, preset);
+    Ok(())
 }
 
 async fn request_lyric_stream(
@@ -1488,6 +1854,230 @@ fn json_bool(value: Option<&Value>) -> Option<bool> {
             .or_else(|| value.as_i64().map(|value| value != 0))
             .or_else(|| value.as_str().and_then(parse_bool_text))
     })
+}
+
+fn parse_history_body(body: &str) -> Result<Vec<RawPlaybackHistoryItem>> {
+    let source = body.trim_start_matches('\u{feff}').trim();
+    if source.is_empty() {
+        return Ok(Vec::new());
+    }
+    if source.starts_with('{') || source.starts_with('[') {
+        let value = serde_json::from_str::<Value>(source).context("无法解析 Plex 播放历史 JSON")?;
+        return Ok(history_records_from_json(&value));
+    }
+    let container =
+        from_xml_str::<XmlHistoryContainer>(source).context("无法解析 Plex 播放历史 XML")?;
+    Ok(container
+        .tracks
+        .into_iter()
+        .map(raw_history_from_xml)
+        .collect())
+}
+
+fn parse_history_devices_body(body: &str) -> Result<HashMap<String, HistoryDevice>> {
+    let source = body.trim_start_matches('\u{feff}').trim();
+    if source.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let candidates = if source.starts_with('{') || source.starts_with('[') {
+        let value = serde_json::from_str::<Value>(source).context("无法解析 Plex 设备 JSON")?;
+        history_devices_from_json(&value)
+    } else {
+        let container =
+            from_xml_str::<XmlDevicesContainer>(source).context("无法解析 Plex 设备 XML")?;
+        container
+            .devices
+            .into_iter()
+            .filter_map(history_device_from_xml)
+            .collect()
+    };
+    Ok(candidates)
+}
+
+fn history_records_from_json(value: &Value) -> Vec<RawPlaybackHistoryItem> {
+    let root = value.get("MediaContainer").unwrap_or(value);
+    ["Metadata", "Track"]
+        .into_iter()
+        .flat_map(|key| json_children(root, key))
+        .map(raw_history_from_json)
+        .collect()
+}
+
+fn raw_history_from_json(value: &Value) -> RawPlaybackHistoryItem {
+    RawPlaybackHistoryItem {
+        media_type: json_string(value.get("type")).unwrap_or_default(),
+        rating_key: json_string(value.get("ratingKey")).unwrap_or_default(),
+        title: json_string(value.get("title")).unwrap_or_default(),
+        artist: clean_history_text(
+            json_string(value.get("grandparentTitle")).or_else(|| json_string(value.get("artist"))),
+            512,
+        ),
+        album: clean_history_text(
+            json_string(value.get("parentTitle")).or_else(|| json_string(value.get("album"))),
+            512,
+        ),
+        thumb: safe_history_artwork_path(
+            json_string(value.get("thumb"))
+                .or_else(|| json_string(value.get("parentThumb")))
+                .or_else(|| json_string(value.get("grandparentThumb"))),
+        ),
+        art: safe_history_artwork_path(
+            json_string(value.get("art")).or_else(|| json_string(value.get("grandparentArt"))),
+        ),
+        viewed_at: json_u64(value.get("viewedAt")).unwrap_or_default(),
+        account_id: json_history_identity(value.get("accountID")).unwrap_or_default(),
+        device_id: json_history_identity(value.get("deviceID")).unwrap_or_default(),
+    }
+}
+
+fn raw_history_from_xml(track: XmlHistoryTrack) -> RawPlaybackHistoryItem {
+    RawPlaybackHistoryItem {
+        media_type: track.media_type.unwrap_or_default(),
+        rating_key: track.rating_key.unwrap_or_default(),
+        title: track.title.unwrap_or_default(),
+        artist: clean_history_text(track.artist, 512),
+        album: clean_history_text(track.album, 512),
+        thumb: safe_history_artwork_path(
+            track
+                .thumb
+                .or(track.parent_thumb)
+                .or(track.grandparent_thumb),
+        ),
+        art: safe_history_artwork_path(track.art.or(track.grandparent_art)),
+        viewed_at: track
+            .viewed_at
+            .as_deref()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or_default(),
+        account_id: history_identity(track.account_id).unwrap_or_default(),
+        device_id: history_identity(track.device_id).unwrap_or_default(),
+    }
+}
+
+fn history_devices_from_json(value: &Value) -> HashMap<String, HistoryDevice> {
+    let root = value.get("MediaContainer").unwrap_or(value);
+    ["Device", "devices"]
+        .into_iter()
+        .flat_map(|key| json_children(root, key))
+        .filter_map(history_device_from_json)
+        .collect()
+}
+
+fn history_device_from_json(value: &Value) -> Option<(String, HistoryDevice)> {
+    history_device_from_fields(
+        json_string(value.get("id")),
+        json_string(value.get("clientIdentifier")),
+        json_string(value.get("name")).or_else(|| json_string(value.get("title"))),
+    )
+}
+
+fn history_device_from_xml(device: XmlHistoryDevice) -> Option<(String, HistoryDevice)> {
+    history_device_from_fields(device.id, device.client_identifier, device.name)
+}
+
+fn history_device_from_fields(
+    id: Option<String>,
+    client_identifier: Option<String>,
+    name: Option<String>,
+) -> Option<(String, HistoryDevice)> {
+    let id = history_identity(id)?;
+    let client_identifier = history_identity(client_identifier)?;
+    let name = clean_history_text(name, 160).unwrap_or_else(|| "其他设备".to_string());
+    Some((
+        id,
+        HistoryDevice {
+            client_identifier,
+            name,
+        },
+    ))
+}
+
+fn filter_remote_playback_history(
+    records: Vec<RawPlaybackHistoryItem>,
+    devices: &HashMap<String, HistoryDevice>,
+    current_account_id: i64,
+    server_is_owned: bool,
+    current_client_identifier: &str,
+) -> Vec<PlaybackHistoryItem> {
+    let current_account_id = current_account_id.to_string();
+    let current_client_identifier = current_client_identifier.trim();
+    let mut rows = records
+        .into_iter()
+        .filter(|record| record.media_type.eq_ignore_ascii_case("track"))
+        .filter(|record| valid_plex_identifier(&record.rating_key))
+        .filter(|record| record.viewed_at > 0)
+        .filter(|record| {
+            record.account_id == current_account_id || (server_is_owned && record.account_id == "1")
+        })
+        .filter_map(|record| {
+            let device = devices.get(&record.device_id)?;
+            if device.client_identifier == current_client_identifier {
+                return None;
+            }
+            let title = clean_history_text(Some(record.title), 512)?;
+            Some(PlaybackHistoryItem {
+                rating_key: record.rating_key,
+                title,
+                artist: record.artist,
+                album: record.album,
+                thumb: record.thumb,
+                art: record.art,
+                viewed_at: record.viewed_at,
+                device_name: device.name.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.viewed_at.cmp(&left.viewed_at));
+
+    let mut seen = HashSet::new();
+    rows.into_iter()
+        .filter(|row| {
+            seen.insert((
+                row.rating_key.clone(),
+                row.viewed_at,
+                row.device_name.clone(),
+            ))
+        })
+        .take(MAX_REMOTE_HISTORY_ITEMS)
+        .collect()
+}
+
+fn history_identity(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let value = value.trim();
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn json_history_identity(value: Option<&Value>) -> Option<String> {
+    let value = value.and_then(|value| match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    });
+    history_identity(value)
+}
+
+fn clean_history_text(value: Option<String>, maximum_characters: usize) -> Option<String> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    for character in trimmed.chars().filter(|character| !character.is_control()) {
+        if text.chars().count() >= maximum_characters {
+            break;
+        }
+        text.push(character);
+    }
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn safe_history_artwork_path(value: Option<String>) -> Option<String> {
+    value.filter(|path| valid_internal_image_path(path))
 }
 
 fn parse_bool_text(value: &str) -> Option<bool> {
@@ -1920,13 +2510,80 @@ fn audio_playlist_query() -> HashMap<String, String> {
 fn create_audio_playlist_query(title: &str) -> Result<HashMap<String, String>> {
     let title = title.trim();
     if title.is_empty() || title.chars().count() > 255 || title.chars().any(char::is_control) {
-        return Err(anyhow!("播放列表名称必须为 1–255 个有效字符"));
+        return Err(anyhow!("歌单名称必须为 1–255 个有效字符"));
     }
     Ok(HashMap::from([
         ("type".to_string(), "audio".to_string()),
         ("title".to_string(), title.to_string()),
         ("smart".to_string(), "0".to_string()),
     ]))
+}
+
+fn normalize_playlist_summary(summary: &str) -> Result<String> {
+    let summary = summary.trim();
+    if summary.chars().count() > 1000
+        || summary
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(anyhow!("歌单描述最多为 1000 个有效字符"));
+    }
+    Ok(summary.to_string())
+}
+
+fn created_playlist_record(value: &Value) -> Option<&serde_json::Map<String, Value>> {
+    let root = value.get("MediaContainer").unwrap_or(value);
+    if let Some(record) = root
+        .as_object()
+        .filter(|record| record.contains_key("ratingKey"))
+    {
+        return Some(record);
+    }
+    ["Metadata", "Playlist"]
+        .into_iter()
+        .find_map(|key| root.get(key)?.as_array()?.first()?.as_object())
+}
+
+fn created_playlist_record_mut(value: &mut Value) -> Option<&mut serde_json::Map<String, Value>> {
+    let has_media_container = value.get("MediaContainer").is_some();
+    let root = if has_media_container {
+        value.get_mut("MediaContainer")?
+    } else {
+        value
+    };
+    if root
+        .as_object()
+        .is_some_and(|record| record.contains_key("ratingKey"))
+    {
+        return root.as_object_mut();
+    }
+    if root.get("Metadata").is_some() {
+        return root
+            .get_mut("Metadata")?
+            .as_array_mut()?
+            .first_mut()?
+            .as_object_mut();
+    }
+    root.get_mut("Playlist")?
+        .as_array_mut()?
+        .first_mut()?
+        .as_object_mut()
+}
+
+fn created_playlist_rating_key(value: &Value) -> Option<String> {
+    match created_playlist_record(value)?.get("ratingKey")? {
+        Value::String(value) if valid_plex_identifier(value) => Some(value.clone()),
+        Value::Number(value) if valid_plex_identifier(&value.to_string()) => {
+            Some(value.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn set_created_playlist_summary(value: &mut Value, summary: &str) {
+    if let Some(record) = created_playlist_record_mut(value) {
+        record.insert("summary".to_string(), Value::String(summary.to_string()));
+    }
 }
 
 fn playlist_items_path(playlist_id: &str) -> Result<String> {
@@ -2006,6 +2663,172 @@ mod tests {
         }
     }
 
+    fn history_record(
+        media_type: &str,
+        rating_key: &str,
+        account_id: &str,
+        device_id: &str,
+        viewed_at: u64,
+    ) -> RawPlaybackHistoryItem {
+        RawPlaybackHistoryItem {
+            media_type: media_type.to_string(),
+            rating_key: rating_key.to_string(),
+            title: "远方的歌".to_string(),
+            artist: Some("歌手".to_string()),
+            album: Some("专辑".to_string()),
+            thumb: Some(format!("/library/metadata/{rating_key}/thumb")),
+            art: Some(format!("/library/metadata/{rating_key}/art")),
+            viewed_at,
+            account_id: account_id.to_string(),
+            device_id: device_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn persisted_config_migrates_device_name_and_defaults_new_preferences() {
+        let mut config: PersistedConfig =
+            serde_json::from_str(r#"{"clientIdentifier":"client-1","closeBehavior":"tray"}"#)
+                .expect("old config should remain readable");
+
+        assert!(normalize_persisted_device_name(&mut config));
+        assert!(!config.device_name.is_empty());
+        assert!(normalize_device_name(&config.device_name).is_ok());
+        assert!(!config.sync_recent_plays);
+        assert_eq!(config.brand_preset, BrandPreset::Plex);
+    }
+
+    #[test]
+    fn device_name_is_normalized_and_rejects_unsafe_values() {
+        assert_eq!(normalize_device_name("  客厅   Mac  ").unwrap(), "客厅 Mac");
+        for invalid in ["", "   ", "客厅\nMac"] {
+            assert!(normalize_device_name(invalid).is_err());
+        }
+        assert!(
+            normalize_device_name("设".repeat(MAX_DEVICE_NAME_CHARACTERS + 1).as_str()).is_err()
+        );
+    }
+
+    #[test]
+    fn plex_identity_headers_include_the_product_and_editable_device_name() {
+        let request = apply_plex_identity_headers(
+            reqwest::Client::new().get("https://example.test/"),
+            "cadilume-client-id",
+            "客厅 Mac",
+        )
+        .build()
+        .expect("identity headers should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Plex-Product")
+                .and_then(|value| value.to_str().ok()),
+            Some(PRODUCT_NAME)
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Plex-Client-Title")
+                .and_then(|value| value.to_str().ok()),
+            Some(PRODUCT_NAME)
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Plex-Client-Identifier")
+                .and_then(|value| value.to_str().ok()),
+            Some("cadilume-client-id")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Plex-Device-Name")
+                .map(|value| value.as_bytes()),
+            Some("客厅 Mac".as_bytes())
+        );
+    }
+
+    #[test]
+    fn remote_history_filters_accounts_devices_media_and_sensitive_fields() {
+        let devices = HashMap::from([
+            (
+                "phone".to_string(),
+                HistoryDevice {
+                    client_identifier: "plexamp-phone".to_string(),
+                    name: "Plexamp iPhone".to_string(),
+                },
+            ),
+            (
+                "self".to_string(),
+                HistoryDevice {
+                    client_identifier: "cadilume-client".to_string(),
+                    name: "Cadilume Mac".to_string(),
+                },
+            ),
+        ]);
+        let rows = vec![
+            history_record("track", "other-device", "42", "phone", 300),
+            history_record("track", "legacy-owner", "1", "phone", 200),
+            history_record("track", "own-device", "42", "self", 250),
+            history_record("track", "other-account", "99", "phone", 400),
+            history_record("movie", "video", "42", "phone", 500),
+            history_record("track", "unmapped-device", "42", "missing", 600),
+        ];
+
+        let owned =
+            filter_remote_playback_history(rows.clone(), &devices, 42, true, "cadilume-client");
+        assert_eq!(
+            owned
+                .iter()
+                .map(|item| item.rating_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["other-device", "legacy-owner"]
+        );
+        assert_eq!(owned[0].device_name, "Plexamp iPhone");
+
+        let shared = filter_remote_playback_history(rows, &devices, 42, false, "cadilume-client");
+        assert_eq!(
+            shared
+                .iter()
+                .map(|item| item.rating_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["other-device"]
+        );
+
+        let serialized = serde_json::to_value(&owned[0]).expect("history row should serialize");
+        for forbidden in ["accountId", "deviceId", "historyKey", "key", "mediaPath"] {
+            assert!(
+                serialized.get(forbidden).is_none(),
+                "{forbidden} must not reach IPC"
+            );
+        }
+        assert_eq!(serialized["ratingKey"], "other-device");
+        assert_eq!(serialized["deviceName"], "Plexamp iPhone");
+    }
+
+    #[test]
+    fn history_parsers_accept_json_and_xml_without_retaining_ids_for_output() {
+        let json = r#"{"MediaContainer":{"Metadata":[{"type":"track","ratingKey":"track-1","title":"Song","grandparentTitle":"Artist","parentTitle":"Album","viewedAt":123,"accountID":42,"deviceID":"device-1"}]}}"#;
+        let xml = r#"<MediaContainer><Track type="track" ratingKey="track-1" title="Song" grandparentTitle="Artist" parentTitle="Album" viewedAt="123" accountID="42" deviceID="device-1" /></MediaContainer>"#;
+
+        for records in [
+            parse_history_body(json).unwrap(),
+            parse_history_body(xml).unwrap(),
+        ] {
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].rating_key, "track-1");
+            assert_eq!(records[0].account_id, "42");
+            assert_eq!(records[0].device_id, "device-1");
+        }
+
+        let devices = parse_history_devices_body(
+            r#"<MediaContainer><Device id="device-1" clientIdentifier="other-client" name="客厅 Mac" /></MediaContainer>"#,
+        )
+        .unwrap();
+        assert_eq!(devices["device-1"].name, "客厅 Mac");
+        assert_eq!(devices["device-1"].client_identifier, "other-client");
+    }
+
     #[test]
     fn only_expected_server_paths_are_allowed() {
         assert!(allowed_server_path("/library/sections"));
@@ -2039,6 +2862,31 @@ mod tests {
         }
         assert!(create_audio_playlist_query("歌".repeat(256).as_str()).is_err());
         assert!(create_audio_playlist_query("歌".repeat(255).as_str()).is_ok());
+    }
+
+    #[test]
+    fn playlist_summary_is_trimmed_validated_and_applied_to_created_metadata() {
+        assert_eq!(
+            normalize_playlist_summary("  城市移动时听\n保持清醒  ").unwrap(),
+            "城市移动时听\n保持清醒"
+        );
+        assert!(normalize_playlist_summary("\0").is_err());
+        assert!(normalize_playlist_summary("描述".repeat(501).as_str()).is_err());
+
+        let mut response = serde_json::json!({
+            "MediaContainer": {
+                "Metadata": [{ "ratingKey": "playlist-99", "title": "通勤音乐" }]
+            }
+        });
+        assert_eq!(
+            created_playlist_rating_key(&response).as_deref(),
+            Some("playlist-99")
+        );
+        set_created_playlist_summary(&mut response, "城市移动时听");
+        assert_eq!(
+            response["MediaContainer"]["Metadata"][0]["summary"].as_str(),
+            Some("城市移动时听")
+        );
     }
 
     #[test]
@@ -2079,6 +2927,8 @@ mod tests {
             PersistedConfig::default().close_behavior,
             CloseBehavior::Tray
         );
+        assert!(!PersistedConfig::default().device_name.is_empty());
+        assert_eq!(PersistedConfig::default().brand_preset, BrandPreset::Plex);
     }
 
     #[test]

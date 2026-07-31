@@ -15,6 +15,12 @@ license = "MIT"
 name = "cadilume_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Keep the Rust crate identifier conventional while giving the executable the
+# same capitalized product name that macOS exposes to users in development.
+[[bin]]
+name = "Cadilume"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -34,6 +40,9 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3.2", features = ["NSData"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }

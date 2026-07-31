@@ -1,5 +1,18 @@
 # LEARNINGS
 
+## 2026-07-31 — Tauri 开发态与已安装版会形成两个独立 Dock 进程
+
+- `/Applications/Cadilume.app` 与 `target/debug/Cadilume` 是两个不同的 macOS 应用进程；即使它们共享产品名或 Bundle ID，Dock 也会显示两个图标。Vite / `pnpm dev` 本身不会产生 Dock 图标。
+- 用户要求真实开发态验收且只保留一个应用时，先只读确认已安装版与开发态 PID；经用户明确授权后退出已安装版，再启动唯一的 `pnpm tauri dev -c '{"build":{"beforeDevCommand":"true"}}' --no-dev-server-wait`。验收后保持用户指定的那一条，不要并行重启另一版。
+- 原生 UI 验收以 macOS Accessibility 树和可访问控件状态为准，不截图。自定义 Web Portal 的选项在 AX 中可被发现，但 AXPress 不一定等同 WKWebView 中的真实 pointer click；不要仅因该自动化局限判定业务回调失效，需结合浏览器交互、Rust 命令测试与已验证的真实路径判断。
+
+## 2026-07-31 — Provider 边界与中央歌词层的收口方式
+
+- `musicGateway.ts` 是跨平台预留的合适外部边界：让当前 Plex adapter 同时负责按需歌曲解析、loopback stream、timeline、scrobble、歌词和协议错误分类；`usePlayer` / `useLyrics` 只调用该层。歌词归一输入应使用 `MusicLyricsPayload` 等通用形状，Plex 类型仅作为兼容别名，避免将未来 provider 的条件分支散入播放状态机或歌词 UI。
+- 视觉品牌和媒体 provider 必须严格分离：Emby/Jellyfin 色卡只是 CSS preset，不能据此更改网络 adapter、凭据、登录或 capability；Companion 仅保留显式 capability 位，不能被表述为已实现。
+- 设置卡片的 `overflow: hidden` 会裁切任何非 Portal 菜单，单纯增加 z-index 无法解决。Radix Select 可继续使用其 Portal；自定义品牌菜单应通过 `createPortal(document.body)` 固定定位，并在窗口 resize 与捕获阶段 scroll 时依据触发器重新定位，保留 outside-click、Escape 和焦点回退。
+- 主窗体中央歌词不应通过新增 grid 列实现：把它绝对定位在标题栏与固定播放器之间、在中央内容区域全高展示，外围 `pointer-events:none`、面板本身恢复 pointer events。这样不挤压资料库，也可满足无 scrim、无 Escape、无关闭按钮、只由底栏歌词按钮切换；歌词滚动区单独配置使用 accent token 的窄滚动条与 keyboard focus 样式。
+
 ## 2026-07-30 — 播放列表创建、顶部身份与连接提示
 
 - Plex `POST /playlists` 可创建空白普通播放列表；Cadilume 通过专用 Rust/Tauri command 传入 `type=audio`、清理后的 `title` 和 `smart=0`，由当前服务器专属 token 服从 PMS ACL。浏览器演示只维护内存中的演示列表，不能把该路径改成 WebView 直连。

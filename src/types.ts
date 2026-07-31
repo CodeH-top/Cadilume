@@ -1,7 +1,9 @@
 export type CloseBehavior = "tray" | "quit";
 export type LibraryView = "home" | "albums" | "artists" | "tracks" | "search" | "settings";
 export type StreamQuality = "auto" | "original" | "320" | "256" | "192";
-export type ThemeMode = "system" | "light" | "dark";
+export type ThemeMode = "light" | "dark";
+/** Fixed Cadilume visual presets. These are visual-only and never change the active media provider. */
+export type BrandPreset = "plex" | "emby" | "jellyfin";
 
 export interface CacheStatus {
   sizeBytes: number;
@@ -24,6 +26,9 @@ export interface BootstrapResponse {
   authenticated: boolean;
   account?: PlexAccount;
   closeBehavior: CloseBehavior;
+  deviceName: string;
+  syncRecentPlays: boolean;
+  brandPreset: BrandPreset;
 }
 
 export interface PlexPin {
@@ -86,6 +91,23 @@ export interface PlexItem {
   imageUrl?: string;
 }
 
+/**
+ * A privacy-filtered item from the selected PMS' session history.
+ *
+ * Cadilume only receives history for the signed-in account and excludes this
+ * client's own identifier before this data reaches the WebView.
+ */
+export interface PlexPlaybackHistoryItem {
+  ratingKey: string;
+  title: string;
+  artist?: string;
+  album?: string;
+  thumb?: string;
+  art?: string;
+  viewedAt: number;
+  deviceName: string;
+}
+
 export interface PlexItemPage {
   items: PlexItem[];
   start: number;
@@ -124,21 +146,31 @@ export interface PlexHub {
   items: PlexItem[];
 }
 
-export interface PlexLyricLine {
+/** Provider-neutral lyric line after a server adapter has normalized its payload. */
+export interface MusicLyricLine {
   startMs?: number;
   endMs?: number;
   text: string;
 }
 
-export interface PlexLyricsPayload {
+/**
+ * Portable lyrics payload consumed by Cadilume's presentation layer.
+ * Individual provider adapters are responsible for translating their protocol
+ * into this small shape before it reaches `useLyrics`.
+ */
+export interface MusicLyricsPayload {
   provider?: string;
   timed: boolean;
   author?: string;
   by?: string;
   formatHint?: string;
   rawText?: string;
-  lines: PlexLyricLine[];
+  lines: MusicLyricLine[];
 }
+
+/** Plex terminology is retained as a source-compatibility alias only. */
+export type PlexLyricLine = MusicLyricLine;
+export type PlexLyricsPayload = MusicLyricsPayload;
 
 export interface NowPlaying {
   track: PlexItem;
@@ -146,7 +178,7 @@ export interface NowPlaying {
 }
 
 export function trackArtist(track: PlexItem): string {
-  return track.grandparentTitle || track.parentTitle || "未知艺术家";
+  return track.grandparentTitle || track.parentTitle || "未知歌手";
 }
 
 export function trackAlbum(track: PlexItem): string {

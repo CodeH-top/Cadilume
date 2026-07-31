@@ -5,6 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 icons_dir="$project_root/src-tauri/icons"
 source_icon="$icons_dir/app-icon.svg"
+preset_dir="$icons_dir/presets"
 tray_source="$icons_dir/tray-template.svg"
 tray_icon="$icons_dir/tray-template.png"
 layered_icon="$icons_dir/Cadilume.icon"
@@ -47,6 +48,17 @@ pnpm tauri icon "$source_icon" --output "$icons_dir"
 # Rebuild the legacy ICNS explicitly so older macOS releases and the DMG volume
 # icon retain a true 1024px Retina slot. actool's layered-icon fallback omits it.
 sips -s format png "$source_icon" --out "$master_icon" >/dev/null
+
+# The packaged application always starts with the Plex-yellow icon. The three
+# fixed brand PNGs are also compiled into the native binary so AppKit can swap
+# the running Dock icon without relying on service logos or external files.
+for preset_source in "$preset_dir"/*.svg; do
+  preset_name=$(basename "$preset_source" .svg)
+  preset_output="$preset_dir/$preset_name.png"
+  sips -s format png "$preset_source" --out "$preset_output" >/dev/null
+  test "$(sips -g pixelWidth "$preset_output" | awk '/pixelWidth/ {print $2}')" = "1024"
+  test "$(sips -g pixelHeight "$preset_output" | awk '/pixelHeight/ {print $2}')" = "1024"
+done
 
 resize_icon() {
   size=$1

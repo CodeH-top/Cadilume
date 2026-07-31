@@ -27,3 +27,8 @@
 - Drive browsing and capabilities from `/media/providers` instead of fixed legacy paths.
 - Add server-backed playQueues and universal playback decision.
 - Add an isolated experimental Managed User home-switch adapter.
+
+## 2026-07-31 — 已完成归档与剩余平台功能
+
+- 跨设备历史（默认关闭、脱敏、非 Plexamp 私有云协议）、两态主题、固定 Plex 黄 / Emby 绿 / Jellyfin 蓝预设、纯唱片 Logo、macOS Dock 图标逻辑，以及 provider adapter 边界均已进入已完成计划记录，不再作为待开发 Feature。
+- 仍未实施且必须单独立项的仅为 Plex Companion controller / receiver（L1）和 Emby / Jellyfin 实际认证、浏览、播放与歌词接入（L2）。现有配色、Logo 或 adapter 接口均不代表这些服务已支持。

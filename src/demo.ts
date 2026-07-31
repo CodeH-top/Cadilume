@@ -40,6 +40,9 @@ export const demoBootstrap: BootstrapResponse = {
   clientIdentifier: "demo-client",
   authenticated: true,
   closeBehavior: "tray",
+  deviceName: "演示 Mac",
+  syncRecentPlays: false,
+  brandPreset: "plex",
   account: {
     id: 1,
     username: "hogan",
@@ -129,7 +132,7 @@ const demoPlaylistDefinitions: DemoPlaylistDefinition[] = [
   { id: "playlist-night", title: "深夜驾驶", summary: "夜色、公路与低亮度灯光", smart: false, readOnly: false, trackIndexes: [0, 3, 6, 9, 12, 15] },
   { id: "playlist-weekend", title: "周末客厅", summary: "无需跳过的轻松播放顺序", smart: false, readOnly: false, trackIndexes: [1, 4, 7, 10, 13, 16] },
   { id: "playlist-favorites", title: "长久收藏", summary: "反复回到的私人收藏", smart: false, readOnly: false, trackIndexes: [2, 5, 8, 11, 14, 17] },
-  { id: "playlist-rain", title: "雨天窗边", summary: "适合阴雨天气的温和播放列表", smart: false, readOnly: false, trackIndexes: [0, 4, 8, 12, 16] },
+  { id: "playlist-rain", title: "雨天窗边", summary: "适合阴雨天气的温和歌单", smart: false, readOnly: false, trackIndexes: [0, 4, 8, 12, 16] },
   { id: "playlist-road", title: "远途播放", summary: "为一段更长的旅程准备", smart: false, readOnly: false, trackIndexes: [1, 5, 9, 13, 17] },
   { id: "playlist-smart-recent", title: "最近加入", summary: "自动收录最近进入媒体库的歌曲", smart: true, readOnly: false, trackIndexes: [12, 13, 14, 15, 16, 17] },
   { id: "playlist-smart-unheard", title: "还没听过", summary: "自动寻找尚未播放的歌曲", smart: true, readOnly: false, trackIndexes: [6, 7, 8, 9, 10, 11] },

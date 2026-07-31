@@ -12,7 +12,7 @@ use tauri::{
 };
 use tokio::sync::oneshot;
 
-use crate::plex::PlexState;
+use crate::plex::{BrandPreset, PlexState};
 
 const TRAY_ID: &str = "cadilume-tray";
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -23,9 +23,48 @@ const EXIT_ACK_TIMEOUT: Duration = Duration::from_millis(750);
 const MENU_BAR_ICON_BYTES: &[u8] = include_bytes!("../icons/tray-template.png");
 
 #[cfg(target_os = "macos")]
+const DOCK_ICON_PLEX_BYTES: &[u8] = include_bytes!("../icons/presets/plex.png");
+#[cfg(target_os = "macos")]
+const DOCK_ICON_EMBY_BYTES: &[u8] = include_bytes!("../icons/presets/emby.png");
+#[cfg(target_os = "macos")]
+const DOCK_ICON_JELLYFIN_BYTES: &[u8] = include_bytes!("../icons/presets/jellyfin.png");
+
+#[cfg(target_os = "macos")]
 fn menu_bar_icon() -> tauri::Result<tauri::image::Image<'static>> {
     tauri::image::Image::from_bytes(MENU_BAR_ICON_BYTES)
 }
+
+#[cfg(target_os = "macos")]
+fn dock_icon_bytes(preset: BrandPreset) -> &'static [u8] {
+    match preset {
+        BrandPreset::Plex => DOCK_ICON_PLEX_BYTES,
+        BrandPreset::Emby => DOCK_ICON_EMBY_BYTES,
+        BrandPreset::Jellyfin => DOCK_ICON_JELLYFIN_BYTES,
+    }
+}
+
+/// macOS owns its Dock image through AppKit, so changing the current visual
+/// preset can update the running application without changing the packaged
+/// default. Other platforms silently retain their bundle icon.
+#[cfg(target_os = "macos")]
+pub(crate) fn update_dock_icon<R: Runtime>(app: &AppHandle<R>, preset: BrandPreset) {
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let icon_bytes = dock_icon_bytes(preset);
+    let _ = app.run_on_main_thread(move || {
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        let app = NSApplication::sharedApplication(mtm);
+        let data = NSData::with_bytes(icon_bytes);
+        if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
+            unsafe { app.setApplicationIconImage(Some(&icon)) };
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn update_dock_icon<R: Runtime>(_app: &AppHandle<R>, _preset: BrandPreset) {}
 
 #[derive(Default)]
 pub(crate) struct QuitCoordinator {
@@ -82,6 +121,13 @@ fn should_reveal_main_window_on_reopen(_has_visible_windows: bool) -> bool {
 }
 
 pub fn handle_run_event<R: Runtime>(app: &AppHandle<R>, event: tauri::RunEvent) {
+    #[cfg(target_os = "macos")]
+    if matches!(&event, tauri::RunEvent::Ready) {
+        if let Some(state) = app.try_state::<PlexState>() {
+            update_dock_icon(app, state.brand_preset());
+        }
+    }
+
     #[cfg(target_os = "macos")]
     if let tauri::RunEvent::Reopen {
         has_visible_windows,
@@ -203,7 +249,9 @@ mod tests {
     use super::{main_close_action, MainCloseAction, QuitCoordinator};
 
     #[cfg(target_os = "macos")]
-    use super::{menu_bar_icon, should_reveal_main_window_on_reopen};
+    use super::{dock_icon_bytes, menu_bar_icon, should_reveal_main_window_on_reopen};
+    #[cfg(target_os = "macos")]
+    use crate::plex::BrandPreset;
 
     #[test]
     fn main_window_close_behavior_maps_to_an_explicit_process_action() {
@@ -225,6 +273,23 @@ mod tests {
     fn dock_reopen_always_reveals_main_window() {
         assert!(should_reveal_main_window_on_reopen(false));
         assert!(should_reveal_main_window_on_reopen(true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fixed_brand_dock_icons_are_distinct_retina_pngs() {
+        let plex = tauri::image::Image::from_bytes(dock_icon_bytes(BrandPreset::Plex))
+            .expect("Plex-yellow Dock icon should decode");
+        let emby = tauri::image::Image::from_bytes(dock_icon_bytes(BrandPreset::Emby))
+            .expect("Emby-green Dock icon should decode");
+        let jellyfin = tauri::image::Image::from_bytes(dock_icon_bytes(BrandPreset::Jellyfin))
+            .expect("Jellyfin-blue Dock icon should decode");
+
+        for icon in [&plex, &emby, &jellyfin] {
+            assert_eq!((icon.width(), icon.height()), (1024, 1024));
+        }
+        assert_ne!(plex.rgba(), emby.rgba());
+        assert_ne!(emby.rgba(), jellyfin.rgba());
     }
 
     #[cfg(target_os = "macos")]
