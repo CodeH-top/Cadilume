@@ -42,7 +42,7 @@ export const demoBootstrap: BootstrapResponse = {
   closeBehavior: "tray",
   deviceName: "演示 Mac",
   syncRecentPlays: false,
-  brandPreset: "plex",
+  brandPreset: "amber",
   account: {
     id: 1,
     username: "hogan",

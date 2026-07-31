@@ -568,9 +568,9 @@ describe("Cadilume visual presets", () => {
   it("persists the fixed visual preset through its dedicated native command", async () => {
     invokeMock.mockResolvedValueOnce(undefined);
 
-    await expect(setBrandPreset("jellyfin")).resolves.toBeUndefined();
+    await expect(setBrandPreset("azure")).resolves.toBeUndefined();
 
-    expect(invokeMock).toHaveBeenCalledWith("set_brand_preset", { preset: "jellyfin" });
+    expect(invokeMock).toHaveBeenCalledWith("set_brand_preset", { preset: "azure" });
   });
 });
 

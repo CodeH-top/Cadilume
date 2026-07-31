@@ -2,10 +2,21 @@ import type { BrandPreset } from "./types";
 
 export const BRAND_STORAGE_KEY = "cadilume-brand";
 
-export const BRAND_PRESETS: readonly BrandPreset[] = ["plex", "emby", "jellyfin"];
+export const BRAND_PRESETS: readonly BrandPreset[] = ["amber", "verdant", "azure"];
+
+const legacyPresetMigration: Record<string, BrandPreset> = {
+  plex: "amber",
+  emby: "verdant",
+  jellyfin: "azure",
+};
 
 export function isBrandPreset(value: unknown): value is BrandPreset {
   return typeof value === "string" && BRAND_PRESETS.includes(value as BrandPreset);
+}
+
+export function normalizeBrandPreset(value: unknown): BrandPreset | undefined {
+  if (isBrandPreset(value)) return value;
+  return typeof value === "string" ? legacyPresetMigration[value] : undefined;
 }
 
 export function readInitialBrandPreset(): BrandPreset {
@@ -16,7 +27,7 @@ export function readInitialBrandPreset(): BrandPreset {
     // Storage can be unavailable while the app still needs a deterministic palette.
   }
 
-  const preset = isBrandPreset(storedPreset) ? storedPreset : "plex";
+  const preset = normalizeBrandPreset(storedPreset) || "amber";
   if (storedPreset !== preset) {
     try {
       localStorage.setItem(BRAND_STORAGE_KEY, preset);

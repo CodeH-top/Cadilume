@@ -90,7 +90,7 @@ HTMLAudioElement
 - `src/musicGateway.ts` 是播放器与歌词的唯一 provider 入口：`MusicProviderGateway` 固化 provider ID、能力声明、`MusicLibraryGateway`、`PlaybackGateway`、`LyricsGateway` 和统一错误映射。`usePlayer` / `useLyrics` 不直接调用 Plex API。
 - 当前只有 `plexMusicGateway` 实现该契约。它在本机回环流、timeline、scrobble、歌词和“跨设备历史点击后重新读取歌曲”之间转译 PMS 数据；队列与歌词 UI 只消费可播放歌曲和通用歌词结构，不持有服务端 token、PMS URL 或协议分支。
 - `MusicLyricsPayload` 是 provider 已翻译后的可移植歌词形状；LRC、SRT、VTT、纯文本和毫秒时间轴归一逻辑不依赖 Plex 名称。Plex 类型别名仅为当前兼容层，不是新 adapter 的约束。
-- Emby/Jellyfin adapter 以后必须独立提供认证、资料库、可播放媒体、timeline/scrobble、歌词和错误映射；当前不添加 URL、token 存储、登录入口、网络请求或兼容性声明。Plex 黄、Emby 绿、Jellyfin 蓝仅是视觉预设，永不选择或切换 provider。
+- 后续其他平台 adapter 必须独立提供认证、资料库、可播放媒体、timeline/scrobble、歌词和错误映射；当前不添加 URL、token 存储、登录入口、网络请求或兼容性声明。琥珀金、雨林绿、澄海蓝仅是 Cadilume 视觉预设，永不选择或切换 provider。
 - Plex Companion controller / receiver 不属于该边界的当前能力，`canControlCompanion=false` 只用于显式保留未来能力位，不代表已经实现发射或接收。
 
 ## 平台输出

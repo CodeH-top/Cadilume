@@ -62,7 +62,7 @@ impl Default for PersistedConfig {
             close_behavior: CloseBehavior::Tray,
             device_name: default_device_name(),
             sync_recent_plays: false,
-            brand_preset: BrandPreset::Plex,
+            brand_preset: BrandPreset::Amber,
         }
     }
 }
@@ -149,14 +149,17 @@ fn write_persisted_config(path: &Path, config: &PersistedConfig) -> Result<()> {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BrandPreset {
-    Plex,
-    Emby,
-    Jellyfin,
+    #[serde(alias = "plex")]
+    Amber,
+    #[serde(alias = "emby")]
+    Verdant,
+    #[serde(alias = "jellyfin")]
+    Azure,
 }
 
 impl Default for BrandPreset {
     fn default() -> Self {
-        Self::Plex
+        Self::Amber
     }
 }
 
@@ -1471,7 +1474,7 @@ pub fn set_brand_preset(
 ) -> Result<(), String> {
     state
         .save_brand_preset(preset)
-        .map_err(|_| "无法保存 Cadilume 视觉风格。".to_string())?;
+        .map_err(|_| "无法保存视觉风格。".to_string())?;
     crate::window::update_dock_icon(&app, preset);
     Ok(())
 }
@@ -2164,7 +2167,7 @@ fn ensure_plain_cache_directory(path: &Path) -> Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 ensure_plain_cache_directory(path)
             }
-            Err(error) => Err(error).context("无法创建图片缓存目录"),
+            Err(error) => Err(anyhow!("无法创建图片缓存目录 {}：{error}", path.display())),
         },
         Err(error) => Err(error).context("无法检查图片缓存目录"),
     }
@@ -2686,15 +2689,16 @@ mod tests {
 
     #[test]
     fn persisted_config_migrates_device_name_and_defaults_new_preferences() {
-        let mut config: PersistedConfig =
-            serde_json::from_str(r#"{"clientIdentifier":"client-1","closeBehavior":"tray"}"#)
-                .expect("old config should remain readable");
+        let mut config: PersistedConfig = serde_json::from_str(
+            r#"{"clientIdentifier":"client-1","closeBehavior":"tray","brandPreset":"plex"}"#,
+        )
+        .expect("old config should remain readable");
 
         assert!(normalize_persisted_device_name(&mut config));
         assert!(!config.device_name.is_empty());
         assert!(normalize_device_name(&config.device_name).is_ok());
         assert!(!config.sync_recent_plays);
-        assert_eq!(config.brand_preset, BrandPreset::Plex);
+        assert_eq!(config.brand_preset, BrandPreset::Amber);
     }
 
     #[test]
@@ -2928,7 +2932,7 @@ mod tests {
             CloseBehavior::Tray
         );
         assert!(!PersistedConfig::default().device_name.is_empty());
-        assert_eq!(PersistedConfig::default().brand_preset, BrandPreset::Plex);
+        assert_eq!(PersistedConfig::default().brand_preset, BrandPreset::Amber);
     }
 
     #[test]

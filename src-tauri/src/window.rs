@@ -23,11 +23,11 @@ const EXIT_ACK_TIMEOUT: Duration = Duration::from_millis(750);
 const MENU_BAR_ICON_BYTES: &[u8] = include_bytes!("../icons/tray-template.png");
 
 #[cfg(target_os = "macos")]
-const DOCK_ICON_PLEX_BYTES: &[u8] = include_bytes!("../icons/presets/plex.png");
+const DOCK_ICON_AMBER_BYTES: &[u8] = include_bytes!("../icons/presets/amber.png");
 #[cfg(target_os = "macos")]
-const DOCK_ICON_EMBY_BYTES: &[u8] = include_bytes!("../icons/presets/emby.png");
+const DOCK_ICON_VERDANT_BYTES: &[u8] = include_bytes!("../icons/presets/verdant.png");
 #[cfg(target_os = "macos")]
-const DOCK_ICON_JELLYFIN_BYTES: &[u8] = include_bytes!("../icons/presets/jellyfin.png");
+const DOCK_ICON_AZURE_BYTES: &[u8] = include_bytes!("../icons/presets/azure.png");
 
 #[cfg(target_os = "macos")]
 fn menu_bar_icon() -> tauri::Result<tauri::image::Image<'static>> {
@@ -37,9 +37,9 @@ fn menu_bar_icon() -> tauri::Result<tauri::image::Image<'static>> {
 #[cfg(target_os = "macos")]
 fn dock_icon_bytes(preset: BrandPreset) -> &'static [u8] {
     match preset {
-        BrandPreset::Plex => DOCK_ICON_PLEX_BYTES,
-        BrandPreset::Emby => DOCK_ICON_EMBY_BYTES,
-        BrandPreset::Jellyfin => DOCK_ICON_JELLYFIN_BYTES,
+        BrandPreset::Amber => DOCK_ICON_AMBER_BYTES,
+        BrandPreset::Verdant => DOCK_ICON_VERDANT_BYTES,
+        BrandPreset::Azure => DOCK_ICON_AZURE_BYTES,
     }
 }
 
@@ -278,18 +278,18 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn fixed_brand_dock_icons_are_distinct_retina_pngs() {
-        let plex = tauri::image::Image::from_bytes(dock_icon_bytes(BrandPreset::Plex))
-            .expect("Plex-yellow Dock icon should decode");
-        let emby = tauri::image::Image::from_bytes(dock_icon_bytes(BrandPreset::Emby))
-            .expect("Emby-green Dock icon should decode");
-        let jellyfin = tauri::image::Image::from_bytes(dock_icon_bytes(BrandPreset::Jellyfin))
-            .expect("Jellyfin-blue Dock icon should decode");
+        let amber = tauri::image::Image::from_bytes(dock_icon_bytes(BrandPreset::Amber))
+            .expect("amber Dock icon should decode");
+        let verdant = tauri::image::Image::from_bytes(dock_icon_bytes(BrandPreset::Verdant))
+            .expect("verdant Dock icon should decode");
+        let azure = tauri::image::Image::from_bytes(dock_icon_bytes(BrandPreset::Azure))
+            .expect("azure Dock icon should decode");
 
-        for icon in [&plex, &emby, &jellyfin] {
+        for icon in [&amber, &verdant, &azure] {
             assert_eq!((icon.width(), icon.height()), (1024, 1024));
         }
-        assert_ne!(plex.rgba(), emby.rgba());
-        assert_ne!(emby.rgba(), jellyfin.rgba());
+        assert_ne!(amber.rgba(), verdant.rgba());
+        assert_ne!(verdant.rgba(), azure.rgba());
     }
 
     #[cfg(target_os = "macos")]

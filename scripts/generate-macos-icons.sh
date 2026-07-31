@@ -49,8 +49,8 @@ pnpm tauri icon "$source_icon" --output "$icons_dir"
 # icon retain a true 1024px Retina slot. actool's layered-icon fallback omits it.
 sips -s format png "$source_icon" --out "$master_icon" >/dev/null
 
-# The packaged application always starts with the Plex-yellow icon. The three
-# fixed brand PNGs are also compiled into the native binary so AppKit can swap
+# The packaged application always starts with the amber icon. The three fixed
+# Cadilume color PNGs are compiled into the native binary so AppKit can swap
 # the running Dock icon without relying on service logos or external files.
 for preset_source in "$preset_dir"/*.svg; do
   preset_name=$(basename "$preset_source" .svg)

@@ -51,8 +51,8 @@ import {
   X,
 } from "lucide-react";
 import * as Select from "@radix-ui/react-select";
-import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
-import { createPortal, flushSync } from "react-dom";
+import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import { flushSync } from "react-dom";
 import {
   artworkUrl,
   addTrackToPlaylist,
@@ -118,7 +118,7 @@ import { detectOutputPlatform, useOutputDevices } from "./useOutputDevices";
 import { useLyrics } from "./useLyrics";
 import { usePlexLogin } from "./usePlexLogin";
 import { BrandIcon } from "./BrandIcon";
-import { applyBrandPreset, BRAND_STORAGE_KEY, isBrandPreset, persistBrandPreset, readInitialBrandPreset } from "./brand";
+import { applyBrandPreset, BRAND_STORAGE_KEY, normalizeBrandPreset, persistBrandPreset, readInitialBrandPreset } from "./brand";
 import { applyThemeMode, readInitialThemeMode } from "./theme";
 
 type Icon = typeof Album;
@@ -130,10 +130,10 @@ const navigation: Array<{ id: LibraryView; label: string; icon: Icon }> = [
   { id: "tracks", label: "歌曲", icon: Music2 },
 ];
 
-const BRAND_PRESET_OPTIONS: ReadonlyArray<{ preset: BrandPreset; label: string; description: string }> = [
-  { preset: "plex", label: "Plex 黄", description: "暖黄唱片" },
-  { preset: "emby", label: "Emby 绿", description: "清新绿调" },
-  { preset: "jellyfin", label: "Jellyfin 蓝", description: "澄澈蓝调" },
+const BRAND_PRESET_OPTIONS: ReadonlyArray<{ preset: BrandPreset; label: string }> = [
+  { preset: "amber", label: "琥珀金" },
+  { preset: "verdant", label: "雨林绿" },
+  { preset: "azure", label: "澄海蓝" },
 ];
 
 const ArtworkServerContext = createContext<string | undefined>(undefined);
@@ -247,7 +247,7 @@ function MainApplication({
     // just-persisted manual choice; each session response is authoritative once.
     if (session === syncedBrandSessionRef.current) return;
     syncedBrandSessionRef.current = session;
-    if (isBrandPreset(session?.brandPreset)) syncBrandPreset(session.brandPreset);
+    if (session?.brandPreset) syncBrandPreset(session.brandPreset);
   }, [session, syncBrandPreset]);
 
   if (uiPreview === "splash") return <AppFrame><SplashScreen /></AppFrame>;
@@ -344,6 +344,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [remoteHistoryError, setRemoteHistoryError] = useState<string>();
   const [quality, setQuality] = useState<StreamQuality>(() => readStoredQuality(initialPlaybackSession?.quality));
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>();
+  const [cacheStatusError, setCacheStatusError] = useState<string>();
   const [cacheBusy, setCacheBusy] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
   const [sourcesSyncing, setSourcesSyncing] = useState(false);
@@ -360,6 +361,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const artistDirectoryRequestRef = useRef(0);
   const historyRequestRef = useRef(0);
   const historyPreferenceRequestRef = useRef(0);
+  const cacheStatusRequestRef = useRef(0);
   const preferredPlaybackServerId = initialPlaybackSession?.serverId;
   const player = usePlayer(serverId, quality);
   const outputDevices = useOutputDevices(player.setOutputSinkId);
@@ -837,10 +839,15 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   };
 
   const refreshCacheStatus = useCallback(async () => {
+    const requestId = ++cacheStatusRequestRef.current;
+    setCacheStatusError(undefined);
     try {
-      setCacheStatus(await getCacheStatus());
+      const status = await getCacheStatus();
+      if (cacheStatusRequestRef.current === requestId) setCacheStatus(status);
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      if (cacheStatusRequestRef.current !== requestId) return;
+      setCacheStatus(undefined);
+      setCacheStatusError(reason instanceof Error ? reason.message : String(reason));
     }
   }, []);
 
@@ -1048,13 +1055,17 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   };
 
   const clearCache = async () => {
+    cacheStatusRequestRef.current += 1;
     setCacheBusy(true);
+    setCacheStatusError(undefined);
     try {
       setCacheStatus(await clearArtworkCache());
       artworkCache.clear();
       setNotice("封面磁盘缓存已清理；当前页面已显示的封面会保留到下次加载。");
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setCacheStatusError(message);
+      setNotice(message);
     } finally {
       setCacheBusy(false);
     }
@@ -1176,12 +1187,15 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   }, [dismissPlaybackFailure, navigateToView]);
 
   const changeBrandPreset = useCallback<BrandPresetChange>(async (preset, origin) => {
+    if (preset === brandPreset) return;
     try {
       await onBrandPreset(preset, origin);
+      const label = BRAND_PRESET_OPTIONS.find((option) => option.preset === preset)?.label || "所选配色";
+      setNotice(`已切换为${label}。`);
     } catch {
-      setNotice("无法保存 Cadilume 视觉风格，已保留当前配色。");
+      setNotice("无法保存视觉风格，已保留当前配色。");
     }
-  }, [onBrandPreset]);
+  }, [brandPreset, onBrandPreset]);
 
   return (
     <ArtworkServerContext.Provider value={serverId}>
@@ -1290,6 +1304,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
               quality={quality}
               prebufferNext={player.prebufferNext}
               cacheStatus={cacheStatus}
+              cacheStatusError={cacheStatusError}
               cacheBusy={cacheBusy}
               sourcesSyncing={sourcesSyncing}
               syncRecentPlays={syncRecentPlays}
@@ -1510,6 +1525,7 @@ interface ContentViewProps {
   quality: StreamQuality;
   prebufferNext: boolean;
   cacheStatus?: CacheStatus;
+  cacheStatusError?: string;
   cacheBusy: boolean;
   sourcesSyncing: boolean;
   syncRecentPlays: boolean;
@@ -2390,22 +2406,36 @@ function SearchResults({ hubs, query, artists, onOpen, onOpenArtist, onPlayTrack
 }
 
 function SettingsView(props: ContentViewProps) {
+  const cacheSummary = props.cacheStatus
+    ? formatBytes(props.cacheStatus.sizeBytes)
+    : props.cacheStatusError ? "暂时无法统计"
+      : "正在统计…";
+  const cacheDescription = props.cacheStatus ? `${props.cacheStatus.fileCount} 个缓存文件` : undefined;
   return (
     <div className="settings-page">
       <div className="page-heading"><h1>设置</h1></div>
-      <SettingsGroup icon={<Palette size={18} />} title="Cadilume 视觉风格">
+      <SettingsGroup icon={<Palette size={18} />} title="视觉风格">
         <div className="field-row">
           <span><strong>配色</strong><small>仅更改配色，不连接服务。</small></span>
-          <BrandPresetMenu preset={props.brandPreset} onChange={props.onBrandPreset} presentation="settings" />
+          <div className="choice-grid choice-grid--compact choice-grid--visual" role="radiogroup" aria-label="视觉风格">
+            {BRAND_PRESET_OPTIONS.map((option) => {
+              const active = props.brandPreset === option.preset;
+              return <ChoiceCard key={option.preset} radio active={active} title={option.label} icon={<span className="visual-preset-swatch" data-preset={option.preset} aria-hidden="true" />} onClick={(event) => {
+                if (active) return;
+                const bounds = event.currentTarget.getBoundingClientRect();
+                void props.onBrandPreset(option.preset, { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 });
+              }} />;
+            })}
+          </div>
         </div>
       </SettingsGroup>
       <SettingsGroup icon={<Laptop size={18} />} title="设备">
         <DeviceNameSetting value={props.deviceName} onEdit={props.onEditDeviceName} />
       </SettingsGroup>
       <SettingsGroup icon={<Minimize2 size={18} />} title="关闭主窗口时">
-        <div className="choice-grid">
-          <ChoiceCard active={props.closeBehavior === "tray"} title="最小化到托盘 / 菜单栏" icon={<Radio size={20} />} onClick={() => props.onCloseBehavior("tray")} />
-          <ChoiceCard active={props.closeBehavior === "quit"} title="退出程序" icon={<Power size={20} />} onClick={() => props.onCloseBehavior("quit")} />
+        <div className="choice-grid choice-grid--compact" role="radiogroup" aria-label="关闭主窗口时">
+          <ChoiceCard radio active={props.closeBehavior === "tray"} title="最小化到托盘 / 菜单栏" icon={<Radio size={20} />} onClick={() => props.onCloseBehavior("tray")} />
+          <ChoiceCard radio active={props.closeBehavior === "quit"} title="退出程序" icon={<Power size={20} />} onClick={() => props.onCloseBehavior("quit")} />
         </div>
       </SettingsGroup>
       <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放">
@@ -2423,7 +2453,7 @@ function SettingsView(props: ContentViewProps) {
       </SettingsGroup>
       <SettingsGroup icon={<Database size={18} />} title="封面缓存">
         <div className="cache-row">
-          <span><strong>{props.cacheStatus ? formatBytes(props.cacheStatus.sizeBytes) : "正在统计…"}</strong><small>{props.cacheStatus ? `${props.cacheStatus.fileCount} 个缓存文件` : "读取缓存状态"}</small></span>
+          <span aria-live="polite"><strong>{cacheSummary}</strong>{cacheDescription && <small>{cacheDescription}</small>}</span>
           <button className="danger-button" type="button" disabled={props.cacheBusy || !props.cacheStatus?.fileCount} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
         </div>
       </SettingsGroup>
@@ -2645,8 +2675,8 @@ function SettingsSelect({ label, value, placeholder, disabled, options, onValueC
   );
 }
 
-function ChoiceCard({ active, title, icon, onClick }: { active: boolean; title: string; icon: ReactNode; onClick: () => void }) {
-  return <button className={`choice-card ${active ? "active" : ""}`} onClick={onClick}>{icon}<strong>{title}</strong>{active && <Check className="choice-check" size={16} />}</button>;
+function ChoiceCard({ active, title, icon, onClick, radio = false }: { active: boolean; title: string; icon: ReactNode; onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void; radio?: boolean }) {
+  return <button type="button" className={`choice-card ${active ? "active" : ""}`} role={radio ? "radio" : undefined} aria-checked={radio ? active : undefined} onClick={onClick}>{icon}<strong>{title}</strong>{active && <Check className="choice-check" size={16} />}</button>;
 }
 
 function ThemeCycleButton({ mode, resolvedTheme, onChange }: { mode: ThemeMode; resolvedTheme: ResolvedTheme; onChange: ThemeModeChange }) {
@@ -3324,148 +3354,6 @@ function IconButton({ label, active = false, disabled = false, onClick, children
   return <button type="button" className={`icon-button ${active ? "active" : ""}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
-function BrandPresetMenu({ preset, onChange, presentation = "toolbar" }: { preset: BrandPreset; onChange: BrandPresetChange; presentation?: "toolbar" | "settings" }) {
-  const [open, setOpen] = useState(false);
-  const [popoverPosition, setPopoverPosition] = useState<CSSProperties>();
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const firstOptionRef = useRef<HTMLButtonElement>(null);
-  const selectedOption = BRAND_PRESET_OPTIONS.find((option) => option.preset === preset) ?? BRAND_PRESET_OPTIONS[0];
-
-  const resolvePopoverPosition = useCallback((): CSSProperties | undefined => {
-    const trigger = triggerRef.current;
-    if (!trigger) return undefined;
-
-    const bounds = trigger.getBoundingClientRect();
-    const viewportPadding = 12;
-    const menuWidth = 232;
-    const estimatedMenuHeight = 224;
-    const spaceBelow = Math.max(0, window.innerHeight - bounds.bottom - viewportPadding);
-    const spaceAbove = Math.max(0, bounds.top - viewportPadding);
-    const opensAbove = spaceBelow < estimatedMenuHeight && spaceAbove > spaceBelow;
-    const left = Math.round(Math.min(
-      Math.max(viewportPadding, bounds.right - menuWidth),
-      Math.max(viewportPadding, window.innerWidth - menuWidth - viewportPadding),
-    ));
-    const availableHeight = Math.max(132, Math.floor((opensAbove ? spaceAbove : spaceBelow) - 10));
-
-    return opensAbove
-      ? {
-          bottom: Math.max(viewportPadding, Math.round(window.innerHeight - bounds.top + 10)),
-          left,
-          maxHeight: availableHeight,
-          transformOrigin: "right bottom",
-        }
-      : {
-          top: Math.min(window.innerHeight - viewportPadding, Math.round(bounds.bottom + 10)),
-          left,
-          maxHeight: availableHeight,
-          transformOrigin: "right top",
-        };
-  }, []);
-
-  const close = useCallback((restoreFocus = false) => {
-    setOpen(false);
-    if (restoreFocus) {
-      window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    const updatePosition = () => setPopoverPosition(resolvePopoverPosition());
-    updatePosition();
-    const frame = window.requestAnimationFrame(() => firstOptionRef.current?.focus({ preventScroll: true }));
-    const dismissOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (!menuRef.current?.contains(target) && !triggerRef.current?.contains(target)) close();
-    };
-    const dismissOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      close(true);
-    };
-    window.addEventListener("pointerdown", dismissOnOutsidePointer);
-    window.addEventListener("keydown", dismissOnEscape);
-    window.addEventListener("resize", updatePosition);
-    window.addEventListener("scroll", updatePosition, true);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener("pointerdown", dismissOnOutsidePointer);
-      window.removeEventListener("keydown", dismissOnEscape);
-      window.removeEventListener("resize", updatePosition);
-      window.removeEventListener("scroll", updatePosition, true);
-    };
-  }, [close, open, resolvePopoverPosition]);
-
-  const choosePreset = (nextPreset: BrandPreset) => {
-    if (nextPreset === preset) {
-      close(true);
-      return;
-    }
-    const bounds = triggerRef.current?.getBoundingClientRect();
-    close(true);
-    void onChange(nextPreset, bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : undefined);
-  };
-
-  return (
-    <div className="brand-preset-menu">
-      <button
-        ref={triggerRef}
-        className={`icon-button brand-preset-trigger brand-preset-trigger--${presentation} ${open ? "is-open" : ""}`.trim()}
-        type="button"
-        aria-label={`Cadilume 视觉风格：${selectedOption.label}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls="cadilume-brand-preset-menu"
-        title={`Cadilume 视觉风格：${selectedOption.label}`}
-        onClick={() => {
-          if (open) {
-            close(true);
-            return;
-          }
-          setPopoverPosition(resolvePopoverPosition());
-          setOpen(true);
-        }}
-      >
-        <Palette size={18} strokeWidth={1.9} aria-hidden="true" />
-        {presentation === "settings" && <span className="brand-preset-trigger-label">{selectedOption.label}</span>}
-        {presentation === "settings" && <ChevronDown className="brand-preset-trigger-chevron" size={15} strokeWidth={2} aria-hidden="true" />}
-      </button>
-      {open && createPortal(
-        <div ref={menuRef} id="cadilume-brand-preset-menu" className="brand-preset-popover" style={popoverPosition} role="menu" aria-label="Cadilume 视觉风格">
-          <div className="brand-preset-popover-heading">
-            <strong>Cadilume 视觉风格</strong>
-            <span>仅更改配色，不连接服务</span>
-          </div>
-          <div className="brand-preset-options">
-            {BRAND_PRESET_OPTIONS.map((option, index) => {
-              const active = option.preset === preset;
-              return (
-                <button
-                  key={option.preset}
-                  ref={index === 0 ? firstOptionRef : undefined}
-                  className={`brand-preset-option ${active ? "is-active" : ""}`.trim()}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={active}
-                  onClick={() => choosePreset(option.preset)}
-                >
-                  <span className="brand-preset-swatch" data-brand={option.preset} aria-hidden="true" />
-                  <span><strong>{option.label}</strong><small>{option.description}</small></span>
-                  {active && <Check size={16} strokeWidth={2.3} aria-hidden="true" />}
-                </button>
-              );
-            })}
-          </div>
-        </div>,
-        document.body,
-      )}
-    </div>
-  );
-}
-
 function SourceSyncOverlay() {
   return (
     <div className="source-sync-overlay" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">
@@ -3684,19 +3572,25 @@ function playAppearanceReveal(origin: ThemeTransitionOrigin, previousAppearance:
 
   return new Promise((resolve) => {
     let completed = false;
+    let animation: Animation | undefined;
+    let frame: number | undefined;
+    let timeout: number | undefined;
     const release = () => {
       if (completed) return;
       completed = true;
-      window.clearTimeout(timeout);
+      if (timeout !== undefined) window.clearTimeout(timeout);
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+      animation?.cancel();
       appRoot.classList.remove("theme-transition-reveal-target");
       appRoot.style.removeProperty("clip-path");
       snapshot.remove();
       resolve();
     };
-    const timeout = window.setTimeout(release, 800);
-    requestAnimationFrame(() => {
+    timeout = window.setTimeout(release, 800);
+    frame = requestAnimationFrame(() => {
+      if (completed) return;
       try {
-        const animation = appRoot.animate(
+        animation = appRoot.animate(
           { clipPath: [circleStart, circleEnd] },
           { duration: 500, easing: "cubic-bezier(0.2, 0.74, 0.22, 1)", fill: "both" },
         );
@@ -3726,17 +3620,21 @@ function useAppearance() {
         if (nextTheme === "light" || nextTheme === "dark") setThemeMode(nextTheme);
         return;
       }
-      if (event.key === BRAND_STORAGE_KEY && isBrandPreset(event.newValue)) setBrandPreset(event.newValue);
+      if (event.key === BRAND_STORAGE_KEY) {
+        const preset = normalizeBrandPreset(event.newValue);
+        if (preset) setBrandPreset(preset);
+      }
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  const syncBrandPreset = useCallback((next: BrandPreset) => {
-    if (!isBrandPreset(next) || next === brandPreset) return;
-    persistBrandPreset(next);
-    applyBrandPreset(next);
-    setBrandPreset(next);
+  const syncBrandPreset = useCallback((next: unknown) => {
+    const preset = normalizeBrandPreset(next);
+    if (!preset || preset === brandPreset) return;
+    persistBrandPreset(preset);
+    applyBrandPreset(preset);
+    setBrandPreset(preset);
   }, [brandPreset]);
 
   const updateTheme = useCallback<ThemeModeChange>((next, origin) => {
@@ -3769,19 +3667,19 @@ function useAppearance() {
   const updateBrandPreset = useCallback<BrandPresetChange>(async (next, origin) => {
     if (transitionLockRef.current || next === brandPreset) return;
     transitionLockRef.current = true;
-    try {
-      await saveBrandPreset(next);
+    const applyAtomically = () => {
       persistBrandPreset(next);
-      const applyAtomically = () => {
-        applyAppearance({ theme: themeMode, brand: next });
-        setBrandPreset(next);
-      };
+      applyAppearance({ theme: themeMode, brand: next });
+      setBrandPreset(next);
+    };
+    try {
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       if (!origin || reducedMotion) {
         applyAtomically();
-        return;
+      } else {
+        await playAppearanceReveal(origin, { theme: themeMode, brand: brandPreset }, applyAtomically);
       }
-      await playAppearanceReveal(origin, { theme: themeMode, brand: brandPreset }, applyAtomically);
+      await saveBrandPreset(next);
     } finally {
       transitionLockRef.current = false;
     }

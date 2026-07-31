@@ -3,7 +3,7 @@ export type LibraryView = "home" | "albums" | "artists" | "tracks" | "search" | 
 export type StreamQuality = "auto" | "original" | "320" | "256" | "192";
 export type ThemeMode = "light" | "dark";
 /** Fixed Cadilume visual presets. These are visual-only and never change the active media provider. */
-export type BrandPreset = "plex" | "emby" | "jellyfin";
+export type BrandPreset = "amber" | "verdant" | "azure";
 
 export interface CacheStatus {
   sizeBytes: number;

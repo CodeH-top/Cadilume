@@ -19,6 +19,10 @@
 - [ACT-015] Any Plex playlist creation or mutation must cross a dedicated Rust/Tauri command and use the selected server's scoped token; browser/demo mode may emulate the result, but WebView code must never call PMS directly.
 - [ACT-016] Cadilume 的 localhost、演示页面与本地 UI 预览/验收默认使用 Codex 内部浏览器；只有确实需要读取 Plex 网页、复用 Plex 登录态或对照 Plex Web 可见行为时才使用 Chrome。此项目级规则覆盖全局的默认 Chrome 偏好。
   Source: user correction on 2026-07-30.
+- [ACT-017] 默认不要为设置项、状态或普通操作自动生成小号补充说明；仅在风险、不可逆操作、必要前置条件或用户明确要求时使用。现有说明先保留，只有用户逐项指定时才删除或改写。
+  Source: user correction on 2026-07-31.
+- [ACT-018] 用户可见的视觉风格只能称为“琥珀金 / 雨林绿 / 澄海蓝”，不得以第三方产品或其配色命名；它是设置页内固定、紧凑、右对齐的三项单选，不是下拉菜单，切换成功须给出短提示。关闭主窗口的两项选择沿用同一紧凑单选布局。
+  Source: explicit user correction on 2026-07-31.
 
 ## Validation
 

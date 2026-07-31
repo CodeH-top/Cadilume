@@ -9,8 +9,8 @@
 ## 2026-07-31 — Provider 边界与中央歌词层的收口方式
 
 - `musicGateway.ts` 是跨平台预留的合适外部边界：让当前 Plex adapter 同时负责按需歌曲解析、loopback stream、timeline、scrobble、歌词和协议错误分类；`usePlayer` / `useLyrics` 只调用该层。歌词归一输入应使用 `MusicLyricsPayload` 等通用形状，Plex 类型仅作为兼容别名，避免将未来 provider 的条件分支散入播放状态机或歌词 UI。
-- 视觉品牌和媒体 provider 必须严格分离：Emby/Jellyfin 色卡只是 CSS preset，不能据此更改网络 adapter、凭据、登录或 capability；Companion 仅保留显式 capability 位，不能被表述为已实现。
-- 设置卡片的 `overflow: hidden` 会裁切任何非 Portal 菜单，单纯增加 z-index 无法解决。Radix Select 可继续使用其 Portal；自定义品牌菜单应通过 `createPortal(document.body)` 固定定位，并在窗口 resize 与捕获阶段 scroll 时依据触发器重新定位，保留 outside-click、Escape 和焦点回退。
+- 视觉配色和媒体 provider 必须严格分离：琥珀金、雨林绿、澄海蓝只是 Cadilume 的 CSS preset，不能据此更改网络 adapter、凭据、登录或 capability；Companion 仅保留显式 capability 位，不能被表述为已实现。
+- 设置卡片的 `overflow: hidden` 会裁切任何非 Portal 菜单，单纯增加 z-index 无法解决。Radix Select 可继续使用其 Portal；视觉风格固定为卡片内三个紧凑单选按钮，不再实现为菜单。若未来确有其他自定义菜单，仍应通过 `createPortal(document.body)` 固定定位，并在窗口 resize 与捕获阶段 scroll 时依据触发器重新定位，保留 outside-click、Escape 和焦点回退。
 - 主窗体中央歌词不应通过新增 grid 列实现：把它绝对定位在标题栏与固定播放器之间、在中央内容区域全高展示，外围 `pointer-events:none`、面板本身恢复 pointer events。这样不挤压资料库，也可满足无 scrim、无 Escape、无关闭按钮、只由底栏歌词按钮切换；歌词滚动区单独配置使用 accent token 的窄滚动条与 keyboard focus 样式。
 
 ## 2026-07-30 — 播放列表创建、顶部身份与连接提示
