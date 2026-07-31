@@ -4,7 +4,7 @@
 
 - [ACT-001] Keep native window decorations enabled; never replace the macOS/Windows title bar with a fake mobile frame.
 - [ACT-002] Keep the independent volume and mute controls visible in the fixed player bar at the minimum desktop window size.
-- [ACT-003] Persist `tray` vs `quit` close behavior. The Windows tray/macOS menu bar must expose an explicit application quit action; settings configures close behavior and exposes only danger-colored account logout, not a duplicate application quit action.
+- [ACT-003] 主窗口关闭统一执行原生最小化并继续播放，不再提供 `tray` / `quit` 状态选择；macOS 菜单栏 / Windows 通知区域状态图标显示与否是独立、持久化偏好。状态图标开启时保留唯一的原生显式退出入口，关闭时窗口仍须能从 Dock / 任务栏恢复，不能形成不可见后台进程。
 - [ACT-004] Plex account token stays in Keychain/Credential Manager. PMS calls use each resource's per-server `accessToken`, especially for `owned:false` shared servers.
 - [ACT-005] Do not client-gate basic authorized music by `subscription.active`; respect server ACL failures and feature-specific Plex Pass gates.
 - [ACT-006] v0.1 WebView audio is an MVP boundary. Do not claim strict gapless, background queue authority, output-device control, or complete Windows SMTC until the Rust native playback core exists.
