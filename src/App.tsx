@@ -44,9 +44,6 @@ import {
   Sun,
   Trash2,
   TriangleAlert,
-  Volume1,
-  Volume2,
-  VolumeX,
   WifiOff,
   X,
 } from "lucide-react";
@@ -117,6 +114,7 @@ import { BrandIcon } from "./BrandIcon";
 import { applyBrandPreset, BRAND_STORAGE_KEY, normalizeBrandPreset, persistBrandPreset, readInitialBrandPreset } from "./brand";
 import { GlobalNotificationQueue, useGlobalNotificationQueue } from "./NotificationQueue";
 import { applyThemeMode, readInitialThemeMode } from "./theme";
+import { SharedVolumeControl } from "./VolumeControl";
 
 type Icon = typeof Album;
 
@@ -1139,6 +1137,18 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     });
   }, []);
 
+  const toggleQueuePanel = useCallback(() => {
+    if (!player.current || player.queue.length === 0) return;
+    setPlaylistTrack(undefined);
+    setSidePanel((value) => value === "queue" ? null : "queue");
+  }, [player.current, player.queue.length]);
+
+  const toggleLyricsPanel = useCallback(() => {
+    if (!canToggleLyrics) return;
+    setPlaylistTrack(undefined);
+    setSidePanel((value) => value === "lyrics" ? null : "lyrics");
+  }, [canToggleLyrics]);
+
   const dismissPlaybackFailure = useCallback(() => {
     setPlaybackFailurePreview(undefined);
     player.dismissPlaybackFailure();
@@ -1313,7 +1323,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
             open={queuePanelOpen}
             queue={player.queue}
             currentIndex={player.currentIndex}
-            onClose={() => setSidePanel((current) => current === "queue" ? null : current)}
             onSelect={(track) => player.playContext(track, player.queue)}
             onRemove={player.removeFromQueue}
           />
@@ -1347,16 +1356,14 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         loading={playbackLoading}
         buffering={player.buffering}
         artwork={<Artwork item={player.current} size="immersive" />}
-        backgroundArtwork={<Artwork item={player.current} size="backdrop" />}
         progressSeconds={player.progress}
         durationSeconds={player.duration}
         shuffle={player.shuffle}
         repeat={player.repeat}
         muted={player.muted}
         volume={player.volume}
-        lyrics={nowPlayingLyrics}
-        queue={player.queue}
-        currentQueueIndex={player.currentIndex}
+        queueOpen={queuePanelOpen}
+        queueAvailable={hasQueue}
         theme={themeMode}
         onSeek={player.seek}
         onShuffleChange={player.setShuffle}
@@ -1366,12 +1373,9 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         onRepeatChange={player.setRepeat}
         onMutedChange={player.setMuted}
         onVolumeChange={player.setVolume}
-        onSelectQueueIndex={(index) => {
-          const track = player.queue[index];
-          if (track) player.playContext(track, player.queue);
-        }}
+        onToggleQueue={toggleQueuePanel}
         onClose={closeNowPlaying}
-        escapeEnabled={!playlistTrack && !activePlaybackFailure}
+        escapeEnabled={!playlistTrack && !activePlaybackFailure && !queuePanelOpen && !lyricsPanelOpen}
         onAddToPlaylist={() => {
           if (!player.current) return;
           setSidePanel(null);
@@ -1438,22 +1442,12 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         canToggleLyrics={canToggleLyrics}
         onOpenNowPlaying={() => {
           if (!player.current) return;
-          setSidePanel(null);
+          setSidePanel((value) => value === "devices" ? null : value);
           setPlaylistTrack(undefined);
           setNowPlayingOpen(true);
         }}
-        onToggleQueue={() => {
-          if (!player.current || player.queue.length === 0) return;
-          setNowPlayingOpen(false);
-          setPlaylistTrack(undefined);
-          setSidePanel((value) => value === "queue" ? null : "queue");
-        }}
-        onToggleLyrics={() => {
-          if (!canToggleLyrics) return;
-          setNowPlayingOpen(false);
-          setPlaylistTrack(undefined);
-          setSidePanel((value) => value === "lyrics" ? null : "lyrics");
-        }}
+        onToggleQueue={toggleQueuePanel}
+        onToggleLyrics={toggleLyricsPanel}
         onOutputAction={() => {
           setNowPlayingOpen(false);
           setPlaylistTrack(undefined);
@@ -2596,10 +2590,10 @@ function ThemeCycleButton({ mode, resolvedTheme, onChange }: { mode: ThemeMode; 
   return <button ref={triggerRef} className="icon-button theme-cycle-button" type="button" aria-label={`${currentLabel}；点击切换为${nextLabel}`} title={`${currentLabel}；点击切换为${nextLabel}`} onClick={cycle}><CurrentIcon size={18} strokeWidth={1.9} aria-hidden="true" /></button>;
 }
 
-function QueuePanel({ open, queue, currentIndex, onClose, onSelect, onRemove }: { open: boolean; queue: PlexItem[]; currentIndex: number; onClose: () => void; onSelect: (track: PlexItem) => void; onRemove: (index: number) => void }) {
+function QueuePanel({ open, queue, currentIndex, onSelect, onRemove }: { open: boolean; queue: PlexItem[]; currentIndex: number; onSelect: (track: PlexItem) => void; onRemove: (index: number) => void }) {
   return (
     <aside className="queue-panel" data-panel-state={open ? "open" : "closing"} role="dialog" aria-modal="true" aria-label="播放队列">
-      <header><h2>播放队列</h2><IconButton label="关闭播放队列" onClick={onClose}><X size={16} /></IconButton></header>
+      <header><h2>播放队列</h2></header>
       <div className="queue-list">
         {queue.length ? queue.map((track, index) => (
           <div className={`queue-item ${index === currentIndex ? "active" : ""}`} key={`${track.ratingKey}-${index}`}>
@@ -3046,9 +3040,7 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
   onToggleLyrics: () => void;
   onOutputAction: () => void;
 }) {
-  const volumeIcon = player.muted || player.volume === 0 ? <VolumeX size={18} /> : player.volume < 0.5 ? <Volume1 size={18} /> : <Volume2 size={18} />;
   const progressFill = rangeFillPercent(player.progress, player.duration);
-  const volumeFill = rangeFillPercent(player.muted ? 0 : player.volume, 1);
   const playbackBusy = loading || buffering;
   const playbackLabel = playbackControlLabel({ playing: player.playing, loading, buffering });
   const cycleRepeat = () => player.setRepeat(player.repeat === "off" ? "all" : player.repeat === "all" ? "one" : "off");
@@ -3095,13 +3087,7 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
         </IconButton>
         <IconButton label="播放队列" active={queueOpen} disabled={!canToggleQueue} onClick={onToggleQueue}><ListMusic size={19} /></IconButton>
         {outputPlatform !== "macos" && <IconButton label="播放设备" active={devicesOpen} onClick={onOutputAction}><Speaker size={18} /></IconButton>}
-        <div className="volume-control">
-          <IconButton label={player.muted ? "取消静音" : "静音"} onClick={() => player.setMuted(!player.muted)}>{volumeIcon}</IconButton>
-          <div className="volume-popover">
-            <input aria-label="播放器独立音量" aria-orientation="vertical" aria-valuetext={`${Math.round((player.muted ? 0 : player.volume) * 100)}%`} title={`音量 ${Math.round((player.muted ? 0 : player.volume) * 100)}%`} type="range" min="0" max="1" step="0.01" value={player.muted ? 0 : player.volume} style={{ "--range-progress": `${volumeFill}%` } as CSSProperties} onChange={(event) => player.setVolume(Number(event.target.value))} />
-            <output aria-live="polite">{Math.round((player.muted ? 0 : player.volume) * 100)}%</output>
-          </div>
-        </div>
+        <SharedVolumeControl variant="compact" volume={player.volume} muted={player.muted} onMutedChange={player.setMuted} onVolumeChange={player.setVolume} />
       </div>
     </footer>
   );
