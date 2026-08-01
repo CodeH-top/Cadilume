@@ -606,13 +606,29 @@
 
 #### R15 — History Back 连续性与路由页全量 KeepAlive 缓存（P0，R14 后、R13 前、L1/L2 前）
 
-1. 彻底替换当前由 `route` state、`ContentView` 和会重挂的共享 `.route-content` 组成的切页方式，建立页面级 `RouteCache` / KeepAlive host。缓存单元是每一个已访问的 History entry，而不是规范化 hash、数据请求结果或单个 `scrollTop` 数字：同一 URL 的不同历史条目必须保有彼此独立的页面实例。
+**技术选型确认（2026-08-01，用户确认采用 React Router）**
+
+- 路由层迁移到 `react-router-dom@^7` 的 `createHashRouter` + `RouterProvider`，保留现有 `#/home`、`#/artists/:ratingKey`、歌曲 query 等 URL 契约，避免为 Tauri 静态资源引入服务器端 history fallback。所有应用内跳转统一改用 React Router 的 `Link` / `NavLink` / `useNavigate`；不再由业务组件直接调用 `window.history.pushState`、`replaceState` 或自行监听 `popstate`。
+- 缓存层引入 `keepalive-for-react@^5` 的核心 `KeepAlive`，由 React Router 的布局路由通过 `useLocation` / `useOutlet` 提供当前页面出口。运行时缓存键优先使用 React Router 为每个 History entry 生成的 `location.key`，同 URL 的不同 PUSH entry 也必须不同；同时在 `location.state` 合并 Cadilume 自己的 `cadilumeEntryId` 与可序列化恢复快照，供刷新 / 重启后的有限水合使用。`keepalive-for-react-router` 适配包只有在 POC 证明能保留自定义 entry key、生命周期和出口结构后才采用，不能把它当作缓存契约本身。
+- KeepAlive 初始固定为 `max={Infinity}`、`maxAliveTime={0}`、`transition={false}`、`enableActivity={false}`；当前上下文只允许在登出、切换服务器 / 资料库或用户明确清空时调用 `aliveRef.destroyAll()`。开发态 StrictMode 兼容性必须先在 POC 中解决，不能带着已知警告直接进入真实验收。
+- 内部滚动不再单独伪造一套按 hash 保存数字的“滚动恢复”。每个叶子路由组件必须拥有自己的滚动容器；只要该容器属于 KeepAlive 保留的页面 DOM，`scrollTop`、嵌套滚动容器、sticky 状态、分页 / 筛选 / 展开和焦点锚点都应随同一组件实例原样保留。隐藏页只退出布局、交互和无障碍树，不得卸载或重建滚动容器；POC 必须用 DOM 节点身份与离开 / 返回前后的实际 `scrollTop` 证明这一点。
+
+**执行拆分**
+
+- **R15a — 依赖与路由骨架**：引入 `react-router-dom@^7` 与 `keepalive-for-react@^5`；用 `createHashRouter` 保留当前 hash URL，建立壳层布局路由、资料库叶子路由、详情参数路由和设置路由，先让 `Link` / `NavLink` / `useNavigate` 完整接管导航。
+- **R15b — History entry 身份**：以 `useLocation().key` 区分运行时页面实例；通过 `location.state` 合并 `cadilumeEntryId`、父 entry 和可序列化快照，覆盖 PUSH、REPLACE、POP、直接进入和非法详情回退。
+- **R15c — KeepAlive host 与页面拆分**：在壳层布局的 `<Outlet>` 外建立 KeepAlive host；把当前 `MusicShell` 中的列表、详情、分页、筛选、展开、焦点和局部请求状态下沉到各叶子 RoutePage，避免共享 props 或 revision 让缓存页重挂。
+- **R15d — 组件内滚动保留**：每个 RoutePage 内部建立唯一稳定的 `.route-page-scroll`（及必要的嵌套滚动容器），移除共享 `.route-content` 和运行时 `scrollTop` Map。返回时必须复用同一 DOM 节点，直接保留浏览器原生 `scrollTop`、sticky、焦点和内部 UI 状态；只有刷新 / 重启水合才允许使用一次性快照恢复。
+- **R15e — 隐藏页与上下文生命周期**：非活动 KeepAlive 节点采用 `hidden` / `inert` / `aria-hidden` 组合退出布局和无障碍树，激活时恢复焦点；登出、切换服务器 / 资料库和明确清空时调用 `destroyAll()`，显式资料刷新不得销毁页面实例。
+- **R15f — 回归与唯一开发态验收**：先用内部浏览器验证 `location.key`、DOM 身份、组件内滚动及 Back / Forward，再复用唯一 Tauri 开发链验证真实 WebView；不截图、不启动第二条开发链。
+
+1. 彻底替换当前由 `route` state、`ContentView` 和会重挂的共享 `.route-content` 组成的切页方式，建立 React Router 布局路由 + 页面级 `KeepAlive` host。缓存单元是每一个已访问的 History entry，而不是规范化 hash、数据请求结果或单个 `scrollTop` 数字：同一 URL 的不同历史条目必须保有彼此独立的页面实例。
 2. 对当前服务器 / 资料库上下文中的每个已访问页面做全量运行时缓存，不设按数量或 LRU 的自动淘汰。缓存必须保留实际 React 子树和 DOM，而不只是可重建的数据快照；页面本地的已加载数据、分页、筛选 / 排序、选中态、标签页、折叠状态、局部 loading / error、焦点锚点、sticky 状态及滚动位置均须原样保留。返回页面时必须重新激活同一实例，不能重新请求、重新挂载或以“重新渲染后补回状态”冒充缓存。
-3. 每个路由页面自行拥有稳定的内容滚动视口和滚动状态；应用 shell 只提供导航与页面出口，`window`、`.workspace` 或通用 `.route-content` 不得再充当各页面共用的可滚动主体。非活动缓存页必须留在内存但退出布局、鼠标 / 键盘交互和无障碍树（例如以 `hidden`、`inert`、`aria-hidden` 的组合管理）；只有活动页可参与布局、滚动和焦点。React Router 的 `<Outlet>` 仅是出口，不可被当作内建 KeepAlive；无论保留自定义路由还是迁移路由库，都必须满足这一缓存契约。
-4. 初始化、`pushState`、`replaceState` 与 `popstate` 必须保留并合并既有应用 state，为每个历史条目持久化稳定 entry id 及可序列化的恢复快照。进入详情前先同步冻结来源页状态，再创建详情 entry；详情“返回”继续使用真正的 `history.back()`，浏览器 Back / Forward 与应用内返回均重新激活对应缓存实例。完整 React/DOM 实例只在当前应用进程中保留；硬刷新、应用重启或明确的上下文重置后，才允许从 entry 快照重新水合，不能把这一边界误称为运行时 KeepAlive。
+3. 每个叶子路由页面自行拥有稳定的内容滚动视口和滚动状态（例如 `.route-page-scroll`）；应用 shell 只提供导航、固定播放器和 `<Outlet>` 出口，`window`、`.workspace` 或通用 `.route-content` 不得再充当各页面共用的可滚动主体。React Router 的 `<Outlet>` 负责匹配出口，KeepAlive host 负责保留出口实例，两者职责不能混淆。非活动缓存页必须留在内存但退出布局、鼠标 / 键盘交互和无障碍树（例如以 `hidden`、`inert`、`aria-hidden` 的组合管理）；只有活动页可参与布局、滚动和焦点。不得使用全局 `<ScrollRestoration>` 或全局 `scroll-behavior` 冒充页面实例缓存；平滑滚动只用于用户主动的字母索引等锚点操作。
+4. React Router 负责初始化、PUSH、REPLACE 与 POP；导航必须通过其 API 合并既有 location state，并为每个历史条目保留 `cadilumeEntryId` 及可序列化恢复快照。进入详情前先同步冻结来源页状态，再通过 `useNavigate` 创建详情 entry；详情“返回”继续使用真正的 `navigate(-1)` / 浏览器 Back，Back / Forward 与应用内返回均重新激活对应缓存实例。完整 React/DOM 实例只在当前应用进程中保留；硬刷新、应用重启或明确的上下文重置后，才允许从 entry 快照重新水合，不能把这一边界误称为运行时 KeepAlive。
 5. 只有登出、切换服务器、切换资料库或用户明确清空页面缓存时才销毁该上下文的页面实例。显式“刷新资料”可以在既有实例内更新数据，但不得无故抹掉其分页、筛选、展开、焦点或 History entry；不能以 source revision、后台刷新或内存压力为由悄悄把已访问页退化为重建页。没有可返回父条目时的安全 fallback 也要保留既有 state，不能用 `replaceState(null, ...)` 丢失返回语义。
-6. 消除滚动与切页竞态：离开前同步快照活动页的实际视口，滚动事件绑定创建该 DOM 实例时的不可变 entry id，旧详情 DOM 绝不能将自身 `scrollTop` 写入返回的歌手列表 entry。缓存页重新激活后，首帧就应保有原有 DOM 滚动位置；仅在重启后的快照水合或内容高度不足时作一次有界、无动画的精确恢复。移除路由视口上的全局 `scroll-behavior: smooth`，平滑效果只保留给用户主动的字母索引等锚点操作，绝不能出现 `0 → 目标值` 的可见轨迹。
-7. 补齐纯函数、组件和端到端回归：验证相同 hash 的不同 entry、页面实例身份不变、DOM 不卸载、数据不重复请求、详情入口、应用 Back、浏览器 Back / Forward、安全 fallback、显式刷新、上下文销毁与旧 DOM 不污染新 entry。内部浏览器在 `1280×820` 对歌手、专辑、歌单、歌曲列表及详情页分别改变分页 / 标签 / 展开 / 焦点 / 滚动后往返；首帧及随后 300ms 的状态均须与离开前一致（滚动允许 1px 浮点误差）。最后仅复用唯一已获授权的 Tauri 开发链做无截图原生验收。
+6. 消除滚动与切页竞态：页面离开时不把运行时滚动退化成共享 Map；滚动事件必须绑定创建该 DOM 实例时的不可变 entry id，旧详情 DOM 绝不能将自身状态写入返回的歌手列表 entry。KeepAlive 页面重新激活后，首帧就应直接使用同一个滚动容器及其原有 `scrollTop`；仅在重启后的快照水合或内容高度不足时作一次有界、无动画的精确恢复。移除路由视口上的全局 `scroll-behavior: smooth`，绝不能出现 `0 → 目标值` 的可见轨迹。
+7. 补齐纯函数、组件和端到端回归：验证 React Router `location.key` 对相同 URL 不同 entry 的区分、页面实例身份不变、滚动容器 DOM 不卸载、`scrollTop` / 嵌套滚动 / sticky 状态不变、数据不重复请求、详情入口、应用 `navigate(-1)`、浏览器 Back / Forward、安全 fallback、显式刷新、上下文销毁与旧 DOM 不污染新 entry。内部浏览器在 `1280×820` 对歌手、专辑、歌单、歌曲列表及详情页分别改变分页 / 标签 / 展开 / 焦点 / 内部滚动后往返；首帧及随后 300ms 的 DOM 节点身份、实际滚动值和页面状态均须与离开前一致（滚动允许 1px 浮点误差）。最后仅复用唯一已获授权的 Tauri 开发链做无截图原生验收。
 
 验收：从滚动后的歌手列表进入详情并返回时，原歌手列表作为同一页面实例立即出现，列表数据、DOM、本地状态、焦点、sticky 标题、字母索引和滚动位置全部不变；同样规则覆盖专辑、歌单、歌曲和详情页。浏览器与应用的 Back / Forward 行为一致，不归零、不二次滚动、不等待网络重建，也不存在共享外层滚动条。
 
@@ -630,5 +646,5 @@
 
 ### 9.5 当前结论（2026-08-01，用户验收纠正后）
 
-- R9–R12 的实现与此前自动验证已形成提交，但它们不构成对后续用户实测问题的豁免。当前明确重开三条：R14 处理曲目级“歌曲歌手”字段与真实多歌手保真；R15 将共享路由内容替换为按 History entry 保存完整页面实例的 KeepAlive 缓存；R13 处理推荐 / 歌曲标题字号及歌手介绍层级。下一轮依序执行 R14、R15、R13；不得因旧的 `Role` / `Contributor` 夹具、演示预览、R1 的 hash-map 滚动尝试、数据级缓存或历史提交而将对应问题标记为完成。
+- R9–R12 的实现与此前自动验证已形成提交，但它们不构成对后续用户实测问题的豁免。当前明确重开三条：R14 处理曲目级“歌曲歌手”字段与真实多歌手保真；R15 将共享路由内容迁移到 React Router，并以 History entry + KeepAlive 保存完整页面实例及其内部滚动 DOM；R13 处理推荐 / 歌曲标题字号及歌手介绍层级。下一轮依序执行 R14、R15、R13；不得因旧的 `Role` / `Contributor` 夹具、演示预览、R1 的 hash-map 滚动尝试、数据级缓存或历史提交而将对应问题标记为完成。
 - R14、R15 与 R13 均完成内部验证和唯一真实开发态验收后，才重新评估 R12 与 R1 的用户验收结论。L1 Plex Companion controller / receiver 与 L2 Emby / Jellyfin 实际接入继续延后，仍须单独立项、重新确认范围与验收，不能因现有品牌预设、adapter 边界、通知改造或这些 UI 收口而自动开始。
