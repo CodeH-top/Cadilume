@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTracksPage, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
+import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTracksPage, normalizePlexContributors, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -40,6 +40,48 @@ describe("music metadata helpers", () => {
   it("uses Plex parent hierarchy for labels", () => {
     expect(trackArtist(track)).toBe("Artist");
     expect(trackAlbum(track)).toBe("Album");
+  });
+});
+
+describe("PMS structured contributors", () => {
+  it("normalizes Role and Contributor data without splitting slash names or retaining invalid duplicates", () => {
+    const contributors = normalizePlexContributors({
+      Role: [
+        { tag: "Mira Lin", tagKey: "artist-2" },
+        { title: "AC/DC" },
+        { name: "Mira Lin", ratingKey: "artist-2" },
+        { tag: "  " },
+      ],
+      Contributor: [{ displayName: "Kobe Bryant" }],
+    });
+
+    expect(contributors).toEqual([
+      { name: "Mira Lin", ratingKey: "artist-2" },
+      { name: "AC/DC", ratingKey: undefined },
+      { name: "Kobe Bryant", ratingKey: undefined },
+    ]);
+  });
+
+  it("preserves normalized Role members when a PMS track page enters the shared data layer", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        totalSize: 1,
+        Metadata: [{
+          ratingKey: "track-structured",
+          key: "/library/metadata/track-structured",
+          type: "track",
+          title: "Collaboration",
+          Role: [{ tag: "Mira Lin", tagKey: "artist-2" }, { tag: "Guest Artist" }],
+        }],
+      },
+    });
+
+    const page = await getTracksPage("server-a", "15", 0, 50);
+
+    expect(page.items[0].contributors).toEqual([
+      { name: "Mira Lin", ratingKey: "artist-2" },
+      { name: "Guest Artist", ratingKey: undefined },
+    ]);
   });
 });
 

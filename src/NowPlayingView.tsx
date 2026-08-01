@@ -16,7 +16,7 @@ import {
 import { useEffect, useId, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { type LyricLine, type LyricsDocument } from "./lyrics";
 import { playbackControlLabel } from "./playerUi";
-import type { PlexMedia, ThemeMode } from "./types";
+import type { PlexContributor, PlexMedia, ThemeMode } from "./types";
 import { SharedVolumeControl } from "./VolumeControl";
 import "./NowPlayingView.css";
 
@@ -36,6 +36,7 @@ export interface NowPlayingTrack {
   album?: string;
   grandparentTitle?: string;
   parentTitle?: string;
+  contributors?: PlexContributor[];
   parentRatingKey?: string;
   grandparentRatingKey?: string;
   year?: number;
@@ -150,6 +151,10 @@ function clampUnit(value: number): number {
 }
 
 function trackArtist(track?: NowPlayingTrack): string {
+  const contributorNames = track?.contributors
+    ?.map((contributor) => contributor.name.trim())
+    .filter(Boolean);
+  if (contributorNames?.length) return contributorNames.join(" / ");
   return track?.artist || track?.grandparentTitle || track?.parentTitle || "未知歌手";
 }
 

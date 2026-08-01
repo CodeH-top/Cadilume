@@ -1599,7 +1599,7 @@ function ContentView(props: ContentViewProps) {
   if (props.detail) return <DetailView detail={props.detail} serverId={props.serverId} artists={props.artists} onBack={props.onBack} onPlay={props.onPlayDetail} onShuffle={props.onShuffleDetail} onOpen={props.onOpen} onOpenArtist={props.onOpenArtist} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "search") return <SearchResults hubs={props.hubs} query={props.searchText} artists={props.artists} onOpen={props.onOpen} onOpenArtist={props.onOpenArtist} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "tracks") return <PaginatedTracksView serverId={props.serverId} sectionKey={props.sectionKey} route={props.route} artists={props.artists} onRouteChange={props.onTracksRouteChange} onOpenArtist={props.onOpenArtist} onPlay={props.onPlayTrack} />;
-  if (props.view === "artists") return <CardCollection title="歌手" items={props.items} round indexed onOpen={props.onOpen} />;
+  if (props.view === "artists") return <CardCollection title="歌手" items={props.items} artistGrid indexed onOpen={props.onOpen} />;
   if (props.view === "albums") return <CardCollection title="专辑" items={props.items} indexed onOpen={props.onOpen} />;
   return (
     <RecommendationsView
@@ -1763,7 +1763,7 @@ function PlaylistDetailView({ playlist, tracks, artists, loading, error, onBack,
   );
 }
 
-function CardCollection({ title, items, round = false, compact = false, indexed = false, onOpen }: { title: string; items: PlexItem[]; round?: boolean; compact?: boolean; indexed?: boolean; onOpen: (item: PlexItem) => void }) {
+function CardCollection({ title, items, round = false, compact = false, artistGrid = false, indexed = false, onOpen }: { title: string; items: PlexItem[]; round?: boolean; compact?: boolean; artistGrid?: boolean; indexed?: boolean; onOpen: (item: PlexItem) => void }) {
   const collectionId = `alphabet-${items[0]?.type || title}`;
   const alphabetGroups = indexed ? groupPlexItemsByAlphabet(items) : [];
   const availableBuckets = new Set(alphabetGroups.map(({ bucket }) => bucket));
@@ -1787,7 +1787,7 @@ function CardCollection({ title, items, round = false, compact = false, indexed 
               {alphabetGroups.map(({ bucket, items: bucketItems }) => (
                 <section className="alphabet-group" id={bucketId(bucket)} key={bucket} aria-labelledby={`${bucketId(bucket)}-heading`}>
                   <h2 id={`${bucketId(bucket)}-heading`}>{bucket}</h2>
-                  <MediaCardGrid items={bucketItems} round={round} compact={compact} onOpen={onOpen} />
+                  {artistGrid ? <ArtistAvatarGrid items={bucketItems} onOpen={onOpen} /> : <MediaCardGrid items={bucketItems} round={round} compact={compact} onOpen={onOpen} />}
                 </section>
               ))}
             </div>
@@ -1805,9 +1805,23 @@ function CardCollection({ title, items, round = false, compact = false, indexed 
               ))}
             </nav>
           </div>
-        ) : <MediaCardGrid items={items} round={round} compact={compact} onOpen={onOpen} />
+        ) : artistGrid ? <ArtistAvatarGrid items={items} onOpen={onOpen} /> : <MediaCardGrid items={items} round={round} compact={compact} onOpen={onOpen} />
       ) : <EmptyState title={`没有${title}`} description="当前资料库没有返回可显示的内容。" />}
     </section>
+  );
+}
+
+function ArtistAvatarGrid({ items, onOpen }: { items: PlexItem[]; onOpen: (item: PlexItem) => void }) {
+  return (
+    <div className="artist-avatar-grid" data-testid="artist-avatar-grid">
+      {items.map((item) => (
+        <button className="artist-avatar-card" type="button" key={item.ratingKey} onClick={() => onOpen(item)}>
+          <Artwork item={item} className="round" size="large" />
+          <strong>{item.title}</strong>
+          <small>{item.summary || "歌手"}</small>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -2058,6 +2072,7 @@ function TrackSortHeader({ label, accessibleLabel = label, sortKey, sort, onSort
       aria-sort={activeDirection === "asc" ? "ascending" : activeDirection === "desc" ? "descending" : "none"}
       aria-label={`${accessibleLabel}，当前${currentLabel}排序；点击切换为${nextLabel}`}
       data-sort-state={activeDirection || "default"}
+      data-testid={`track-sort-${sortKey}`}
       onClick={() => onSort(nextState)}
     >
       <span>{label}</span><SortIcon size={13} strokeWidth={1.9} aria-hidden="true" />
@@ -2070,9 +2085,10 @@ function TrackArtistsCell({ track, artistLookup, onOpenArtist }: {
   artistLookup: ArtistLookup;
   onOpenArtist: (artist: PlexItem) => void;
 }) {
-  const segments = resolveTrackArtists(trackArtist(track), artistLookup);
+  const displayName = trackArtist(track);
+  const segments = resolveTrackArtists(track, artistLookup);
   return (
-    <span className="track-artists" role="cell" onClick={(event) => event.stopPropagation()}>
+    <span className="track-artists" role="cell" aria-label={`歌手：${displayName}`} title={displayName} data-testid={`track-artists-${track.ratingKey}`} onClick={(event) => event.stopPropagation()}>
       {segments.map((segment, index) => (
         <span className="track-artist-segment" key={`${segment.name}-${index}`}>
           {index > 0 && <span className="track-artist-separator" aria-hidden="true"> / </span>}
@@ -2092,7 +2108,7 @@ function TrackArtistsCell({ track, artistLookup, onOpenArtist }: {
               className="track-artist-unavailable"
               aria-disabled="true"
               aria-label={`${segment.name}，资料库中没有独立歌手`}
-              title="资料库中没有独立歌手"
+              title={`${segment.name}，资料库中没有独立歌手`}
             >{segment.name}</span>
           )}
         </span>

@@ -64,6 +64,13 @@ export interface PlexMedia {
   Part?: Array<{ key: string; duration?: number; size?: number }>;
 }
 
+/** A named performer returned by PMS' structured track contributor metadata. */
+export interface PlexContributor {
+  name: string;
+  /** A PMS artist rating key when the source made one available. */
+  ratingKey?: string;
+}
+
 export interface PlexItem {
   ratingKey: string;
   key: string;
@@ -80,6 +87,8 @@ export interface PlexItem {
   parentRatingKey?: string;
   grandparentTitle?: string;
   grandparentRatingKey?: string;
+  /** Structured performers take precedence over the legacy grandparent title. */
+  contributors?: PlexContributor[];
   duration?: number;
   year?: number;
   index?: number;
@@ -161,6 +170,10 @@ export interface NowPlaying {
 }
 
 export function trackArtist(track: PlexItem): string {
+  const contributorNames = track.contributors
+    ?.map((contributor) => contributor.name.trim())
+    .filter(Boolean);
+  if (contributorNames?.length) return contributorNames.join(" / ");
   return track.grandparentTitle || track.parentTitle || "未知歌手";
 }
 

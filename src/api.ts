@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { demoAlbums, demoArtists, demoBootstrap, demoPlaylistItems, demoPlaylists, demoRecommendationHubs, demoSections, demoServers, demoTracks } from "./demo";
 import { plexLibraryTrackSort, plexSingerTrackSort, sortTracks, type TrackSortState } from "./trackSort";
-import type { BootstrapResponse, BrandPreset, CacheStatus, LibrarySection, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
+import type { BootstrapResponse, BrandPreset, CacheStatus, LibrarySection, PlexContributor, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
 
 const artworkQueue: Array<() => void> = [];
 let activeArtworkRequests = 0;
@@ -33,7 +33,7 @@ const container = (value: unknown): Record<string, unknown> => {
 const metadata = (value: unknown): PlexItem[] => {
   const root = container(value);
   const items = root.Metadata ?? root.Directory ?? root.Track;
-  return Array.isArray(items) ? items as PlexItem[] : [];
+  return normalizePlexItems(items);
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -79,6 +79,54 @@ function normalizedBooleanFlag(value: unknown): boolean | undefined {
 
 function isCleanPlexIdentifier(value: string): boolean {
   return value.length > 0 && value.length <= 256 && /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+function contributorRecords(value: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) return value.filter(isRecord);
+  return isRecord(value) ? [value] : [];
+}
+
+function normalizedContributorString(value: unknown): string | undefined {
+  const normalized = optionalString(value)?.trim();
+  return normalized || undefined;
+}
+
+/**
+ * PMS can return performer metadata under Role or Contributor, with either
+ * `tag`, `title`, or `name` labels. Normalize it once at the API boundary so
+ * every Cadilume surface shares the same complete contributor sequence.
+ */
+export function normalizePlexContributors(value: Record<string, unknown>): PlexContributor[] | undefined {
+  const names = new Set<string>();
+  const ratingKeys = new Set<string>();
+  const contributors: PlexContributor[] = [];
+  const structuredSources = [value.Role, value.Contributor, value.contributors, value.roles, value.contributor];
+
+  for (const source of structuredSources) {
+    for (const candidate of contributorRecords(source)) {
+      const name = [candidate.tag, candidate.title, candidate.name, candidate.artist, candidate.displayName]
+        .map(normalizedContributorString)
+        .find((candidateName): candidateName is string => Boolean(candidateName));
+      if (!name) continue;
+      const ratingKey = [candidate.ratingKey, candidate.tagKey, candidate.id]
+        .map(normalizedContributorString)
+        .find((candidateKey): candidateKey is string => Boolean(candidateKey && isCleanPlexIdentifier(candidateKey)));
+      const normalizedName = name.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase();
+      if (names.has(normalizedName) || (ratingKey && ratingKeys.has(ratingKey))) continue;
+      names.add(normalizedName);
+      if (ratingKey) ratingKeys.add(ratingKey);
+      contributors.push({ name, ratingKey });
+    }
+  }
+  return contributors.length ? contributors : undefined;
+}
+
+function normalizePlexItems(value: unknown): PlexItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).map((item) => {
+    const contributors = normalizePlexContributors(item);
+    return contributors ? { ...item, contributors } as unknown as PlexItem : item as unknown as PlexItem;
+  });
 }
 
 function normalizePlaylist(value: Record<string, unknown>): PlexPlaylist | undefined {
@@ -197,14 +245,9 @@ export async function getSections(serverId: string): Promise<LibrarySection[]> {
 
 export async function getLibraryItems(serverId: string, sectionKey: string, type: 8 | 9 | 10): Promise<PlexItem[]> {
   if (!isDesktopRuntime()) {
-    if (type === 8) return demoArtists;
+    if (type === 8) return demoLibraryArtists();
     if (type === 9) return demoAlbums;
-    const previewMultiArtist = import.meta.env.DEV
-      && typeof window.location?.search === "string"
-      && new URLSearchParams(window.location.search).has("multi-artist-preview");
-    return previewMultiArtist
-      ? demoTracks.map((track, index) => index === 0 ? { ...track, grandparentTitle: `${demoArtists[0].title} / Kobe Bryant` } : track)
-      : demoTracks;
+    return demoLibraryTracks();
   }
   const pageSize = 500;
   const loadCompleteIndex = type === 8 || type === 9;
@@ -446,25 +489,59 @@ function demoArtistTracks(ratingKey: string): PlexItem[] {
 }
 
 function demoLibraryTracks(): PlexItem[] {
+  const previewParams = import.meta.env.DEV && typeof window.location?.search === "string"
+    ? new URLSearchParams(window.location.search)
+    : undefined;
   const previewCount = import.meta.env.DEV && typeof window.location?.search === "string"
-    ? Number.parseInt(new URLSearchParams(window.location.search).get("track-preview") || "", 10)
+    ? Number.parseInt(previewParams?.get("track-preview") || "", 10)
     : Number.NaN;
-  if (!Number.isFinite(previewCount) || previewCount <= demoTracks.length) return demoTracks;
+  const tracks = !Number.isFinite(previewCount) || previewCount <= demoTracks.length
+    ? demoTracks
+    : Array.from({ length: Math.min(2_000, previewCount) }, (_, index) => {
+      const template = demoTracks[index % demoTracks.length];
+      const cycle = Math.floor(index / demoTracks.length) + 1;
+      return {
+        ...template,
+        ratingKey: `${template.ratingKey}-library-${index}`,
+        key: `/library/metadata/${template.ratingKey}-library-${index}`,
+        title: `${template.title} ${cycle}`,
+        titleSort: `${template.title} ${String(cycle).padStart(4, "0")}`,
+        parentTitle: `${template.parentTitle} ${String(cycle).padStart(2, "0")}`,
+        parentTitleSort: `${template.parentTitle || "Album"} ${String(cycle).padStart(2, "0")}`,
+        index: index + 1,
+      };
+    });
+  if (!previewParams?.has("multi-artist-preview")) return tracks;
+  return tracks.map((track, index) => index === 0 ? {
+    ...track,
+    contributors: [
+      { name: demoArtists[0].title, ratingKey: demoArtists[0].ratingKey },
+      { name: "Kobe Bryant" },
+      { name: "AC/DC" },
+    ],
+  } : track);
+}
 
-  return Array.from({ length: Math.min(2_000, previewCount) }, (_, index) => {
-    const template = demoTracks[index % demoTracks.length];
-    const cycle = Math.floor(index / demoTracks.length) + 1;
-    return {
-      ...template,
-      ratingKey: `${template.ratingKey}-library-${index}`,
-      key: `/library/metadata/${template.ratingKey}-library-${index}`,
-      title: `${template.title} ${cycle}`,
-      titleSort: `${template.title} ${String(cycle).padStart(4, "0")}`,
-      parentTitle: `${template.parentTitle} ${String(cycle).padStart(2, "0")}`,
-      parentTitleSort: `${template.parentTitle || "Album"} ${String(cycle).padStart(2, "0")}`,
-      index: index + 1,
-    };
-  });
+function demoLibraryArtists(): PlexItem[] {
+  const previewCount = import.meta.env.DEV && typeof window.location?.search === "string"
+    ? Number.parseInt(new URLSearchParams(window.location.search).get("artist-preview") || "", 10)
+    : Number.NaN;
+  if (!Number.isFinite(previewCount) || previewCount <= demoArtists.length) return demoArtists;
+  const total = Math.min(260, previewCount);
+  return [
+    ...demoArtists,
+    ...Array.from({ length: total - demoArtists.length }, (_, index) => {
+      const template = demoArtists[index % demoArtists.length];
+      const ordinal = index + 1;
+      return {
+        ...template,
+        ratingKey: `artist-fixture-${ordinal}`,
+        key: `/library/metadata/artist-fixture-${ordinal}/children`,
+        title: `Aster Artist ${String(ordinal).padStart(2, "0")}`,
+        titleSort: `Aster Artist ${String(ordinal).padStart(3, "0")}`,
+      };
+    }),
+  ];
 }
 
 export async function getRecommendationHubs(serverId: string, sectionKey: string): Promise<PlexHub[]> {
@@ -481,7 +558,7 @@ export async function getRecommendationHubs(serverId: string, sectionKey: string
       context: optionalString(hub.context),
       more: optionalBooleanFlag(hub.more),
       promoted: optionalBooleanFlag(hub.promoted),
-      items: Array.isArray(rawItems) ? rawItems.filter(isRecord) as unknown as PlexItem[] : [],
+      items: normalizePlexItems(rawItems),
     };
   }).filter((hub) => hub.items.length > 0 && ["artist", "album", "track"].includes(hub.type));
 }
@@ -515,7 +592,7 @@ export async function searchLibrary(serverId: string, sectionKey: string, queryT
   return Promise.all(hubs.filter((hub) => ["artist", "album", "track"].includes(String(hub.type))).map(async (hub) => ({
     title: String(hub.title || "搜索结果"),
     type: String(hub.type || "mixed"),
-    items: Array.isArray(hub.Metadata) ? hub.Metadata as PlexItem[] : [],
+    items: normalizePlexItems(hub.Metadata),
   })));
 }
 
