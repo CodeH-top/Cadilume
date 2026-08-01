@@ -1,5 +1,14 @@
 # ERRORS
 
+## 2026-08-01 — 重启开发链时，钥匙串授权会在窗口创建前阻塞启动
+
+- `PlexState::load()` 在 Tauri `setup` 的主线程读取 Keychain；如果 macOS 为新的开发可执行文件弹出 `SecurityAgent` 的“允许 Cadilume 使用钥匙串机密信息”对话框，主窗口和菜单栏状态图标都会在授权前尚未创建。这不是无窗口后台行为，也不能把它判为启动失败。
+- 此时不得代填、绕过或点击“拒绝”以继续验收；应由用户在系统安全对话框中输入登录钥匙串密码并选择允许，再继续读取真实窗口的辅助功能树。持续保留一条已授权的开发链仍是避免重复触发该确认的最佳方式。
+
+## 2026-08-01 — 无截图验收时避免用内置浏览器 locator 点击
+
+- 本地内部浏览器的 Playwright locator 点击有时会由浏览器后端自动附带预览图，即使调用方没有请求截图。在用户要求不截图的 Cadilume 验收中，停止使用这类交互路径；改用只读 DOM / computed-style / 控制台检查，并把真实交互留给 macOS Accessibility 树。
+
 ## 2026-08-01 — 内部浏览器 CUA 对非原生焦点容器的 hover / Tab 验证不可靠
 
 - 在 Cadilume 的本地 fixture 中，内部浏览器可读取通知堆叠的 DOM、computed style、可访问性树和按钮点击结果，但其 `cua.move`、`dom_cua.click` 与全局 Tab 不总会向带 `tabIndex` 的非原生 `ul` 派发与真实浏览器一致的 hover / focus 行为。

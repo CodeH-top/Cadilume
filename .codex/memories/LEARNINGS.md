@@ -1,5 +1,10 @@
 # LEARNINGS
 
+## 2026-08-01 — 多歌手数据须贯穿持久化队列与开发夹具
+
+- 播放队列快照除了传统的曲目、专辑和主歌手字段，还必须以同样的路径净化规则保存结构化 `contributors`（姓名和可选 `ratingKey`）。否则重启后 `trackArtist()` 会退化为单一 `grandparentTitle`，破坏 R12 的完整多歌手显示与可点击成员边界。
+- 演示元数据的查找必须复用带 query fixture 的 `demoLibraryArtists()` / `demoLibraryTracks()`，而不是静态基础数组；否则密度或多歌手 fixture 可以在列表页显示，却不能进入详情或被元数据恢复路径解析。
+
 ## 2026-08-01 — 全局通知队列的 presence、暂停计时与可访问性堆叠
 
 - 通知不能再由一个可覆盖的字符串状态承载：每项需有稳定 ID、创建顺序、剩余时长及 `entering / visible / leaving` phase；自动关闭计时器和退出卸载计时器独立管理，暂停时按 deadline 计算剩余时长，恢复后只继续未耗尽部分。
