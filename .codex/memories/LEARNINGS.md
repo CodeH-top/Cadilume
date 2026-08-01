@@ -10,7 +10,7 @@
 - 用户实测纠正：即使 `Role` / `Contributor` 夹具、链接解析和恢复快照测试通过，真实多歌手曲目仍可能因未读取曲目自身的“歌曲歌手”字段而退化成单歌手。不要将这些局部回归当作真实 PMS 字段映射已闭环的证据。
 - 后续先用“曲目歌手与专辑歌手不同”的已授权只读 raw PMS 元数据建立字段契约；曲目级歌手必须优先、无损贯穿所有显示与持久化路径，专辑歌手不能覆盖它。`grandparentTitle` 等层级字段的实际语义须以该契约验证，不能按字段名或演示数据猜测。
 
-## [LRN-20260801-001] 嵌套滚动的 History Back 必须绑定历史条目
+## [LRN-20260801-001] History Back 需要完整路由页缓存，不能退化为滚动恢复
 
 **Logged**: 2026-08-01T15:57:40+08:00
 **Priority**: high
@@ -22,7 +22,7 @@
 - Source: user_feedback
 - Scope: project
 - Pattern-Key: cadilume.routing.history-scroll-cache
-- Recurrence-Count: 1
+- Recurrence-Count: 2
 - First-Seen: 2026-08-01
 - Last-Seen: 2026-08-01
 - Related Files: /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.css
@@ -30,15 +30,15 @@
 
 ### Summary
 
-按 route hash 保存嵌套滚动位置不等于 History Back 缓存；条目身份、内容缓存和无动画恢复必须一起闭环。
+按 route hash 保存嵌套滚动位置或缓存数据都不等于 History Back KeepAlive；每个 History entry 的完整页面实例、条目身份和无动画激活必须一起闭环。
 
 ### Details
 
-`routeContent` 在详情切换时会重挂，reactive route key 又可能让旧 DOM 的 scroll event 写入新路由；`scrollTo({ behavior: "auto" })` 在声明 `scroll-behavior: smooth` 的元素上还会产生可见动画。因此旧实现即使有 `Map<hash, scrollTop>`，仍可能先归零后再滑回。
+`routeContent` 在详情切换时会重挂，reactive route key 又可能让旧 DOM 的 scroll event 写入新路由；`scrollTo({ behavior: "auto" })` 在声明 `scroll-behavior: smooth` 的元素上还会产生可见动画。因此旧实现即使有 `Map<hash, scrollTop>`，仍可能先归零后再滑回。用户进一步确认目标是保留整个页面实例：数据、分页、筛选、标签、展开、焦点、sticky 与 DOM 生命周期都不能因为进入详情而丢失；React Router 的 `<Outlet>` 也只负责渲染出口，不会自动提供这层缓存。
 
 ### Suggested Action
 
-以 History entry id 持久化 scroll state，离开前同步快照并在缓存内容提交前直接、无动画恢复；滚动监听绑定 DOM 实例的固定 entry id，平滑滚动只用于用户主动锚点操作，并以 app Back / browser Back / Forward 的时序回归证明行为。
+以 History entry id 建立页面级 KeepAlive 缓存，离开前冻结活动页面、返回时重新激活同一 React/DOM 实例；History state 只保存可序列化身份和重启水合快照。页面各自拥有视口，滚动监听绑定 DOM 实例的固定 entry id，平滑滚动只用于用户主动锚点操作，并以 app Back / browser Back / Forward 的状态与时序回归证明行为。
 
 ## 2026-08-01 — 全局通知队列的 presence、暂停计时与可访问性堆叠
 

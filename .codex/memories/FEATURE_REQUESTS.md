@@ -79,7 +79,7 @@
 
 按 R14 先以曲目歌手与专辑歌手不同的真实只读 PMS 元数据定义字段契约，再将曲目级歌手无损贯穿归一、显示、队列、播放器、Media Session 与恢复快照；专辑歌手永不覆盖曲目歌手，链接解析只决定可点击性。
 
-## [FR-20260801-003] History Back 滚动连续性与路由缓存
+## [FR-20260801-003] History Back 连续性与路由页全量 KeepAlive 缓存
 
 **Logged**: 2026-08-01T15:57:40+08:00
 **Priority**: high
@@ -91,22 +91,22 @@
 - Source: user_feedback
 - Scope: project
 - Pattern-Key: cadilume.routing.history-scroll-cache
-- Recurrence-Count: 1
+- Recurrence-Count: 2
 - First-Seen: 2026-08-01
 - Last-Seen: 2026-08-01
 - Related Files: /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.css, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/libraryRoute.ts, /Users/hoganchou/Documents/Work/Project/AI/cadilume/docs/NEXT_DEVELOPMENT_PLAN_2026-07-29.md
 
 ### Requested Capability
 
-歌手列表滚动后进入歌手详情，再通过返回回到列表时，必须像正常 History Back 一样立即停在原位置，不能先归零或再滚动一次；路由切换需要真实缓存，而非只保存一个 hash 对应的滚动数字。
+每个已访问的 History 路由页必须作为完整页面实例缓存，而非只保存一个 hash 对应的滚动数字或列表数据。歌手列表滚动后进入歌手详情再返回时，原列表的 React/DOM 实例、数据、分页、筛选、标签、展开、焦点、sticky 状态和滚动位置都必须原样存在；同一要求覆盖专辑、歌单、歌曲和详情页。
 
 ### User Context
 
-用户观察到返回歌手列表时滚动条会再次移动，质疑当前是否实际完成“路由切换加缓存”。源码确认现有实现只以 route hash 保存 `scrollTop`，详情切换重挂 `.route-content`，恢复过程还受 CSS 平滑滚动影响，且没有该时序的测试。
+用户进一步明确，滚动问题只是页面被销毁 / 重建的表象：要求的是页面级“全部缓存”，不是页面级滚动缓存。源码确认现有实现只以 route hash 保存 `scrollTop`，详情切换会重挂共享 `.route-content`；即使增加数据缓存或换用 `<Outlet>`，也不能等同于保留页面实例。
 
 ### Suggested Implementation
 
-按 R15 以 History entry id + scroll state 管理每次导航，缓存列表数据与视图状态，进入 / 返回前同步保存，目标内容提交前无动画恢复；将平滑滚动仅限用户显式锚点操作，并覆盖应用 Back、浏览器 Back / Forward、缓存失效和真实 Tauri 验收。
+按 R15 建立以 History entry id 为键的页面级 RouteCache / KeepAlive host：活动页之外的页面保留完整 React 子树与 DOM，但从布局、交互和无障碍树移出；返回时重新激活同一实例。History state 只保存可序列化 entry 身份与重启水合快照；当前进程内不允许按 LRU、数据刷新或 source revision 悄悄销毁页面。页面各自拥有视口，平滑滚动只用于用户主动锚点操作，并覆盖应用 Back、浏览器 Back / Forward、显式刷新、上下文销毁和唯一 Tauri 开发态验收。
 
 ## 暗色开关可见性、主题封面稳定与页面标题统一（R9，R8 后、L1/L2 前）
 
