@@ -1,5 +1,10 @@
 # ERRORS
 
+## 2026-08-01 — 内部浏览器 CUA 对非原生焦点容器的 hover / Tab 验证不可靠
+
+- 在 Cadilume 的本地 fixture 中，内部浏览器可读取通知堆叠的 DOM、computed style、可访问性树和按钮点击结果，但其 `cua.move`、`dom_cua.click` 与全局 Tab 不总会向带 `tabIndex` 的非原生 `ul` 派发与真实浏览器一致的 hover / focus 行为。
+- 这不是产品交互失败的证据。后续遇到同类受控 UI 时，继续用内部浏览器验证可见 DOM / 样式 / 控制台，并以组件回归测试直接覆盖 `onPointerEnter`、`onPointerLeave`、`onFocusCapture` 与 `inert` / Tab 顺序；最终真实 WebView 统一验收仍按计划留给对应原生阶段，且不截图。
+
 ## 2026-07-31 — 内部浏览器本地 URL 曾阻断，现已恢复
 
 - 初始已有 Cadilume `http://[::1]:1420/#/settings` 标签被 Browser URL policy 拒绝；当时没有改用 raw CDP、其他浏览器或其他自动化表面绕过。

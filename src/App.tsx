@@ -115,6 +115,7 @@ import { useLyrics } from "./useLyrics";
 import { usePlexLogin } from "./usePlexLogin";
 import { BrandIcon } from "./BrandIcon";
 import { applyBrandPreset, BRAND_STORAGE_KEY, normalizeBrandPreset, persistBrandPreset, readInitialBrandPreset } from "./brand";
+import { GlobalNotificationQueue, useGlobalNotificationQueue } from "./NotificationQueue";
 import { applyThemeMode, readInitialThemeMode } from "./theme";
 
 type Icon = typeof Album;
@@ -215,7 +216,7 @@ function MainApplication({
   const requestedUiPreview = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("ui-preview")
     : null;
-  const uiPreview = requestedUiPreview === "login" || requestedUiPreview === "splash"
+  const uiPreview = requestedUiPreview === "login" || requestedUiPreview === "splash" || requestedUiPreview === "notifications"
     ? requestedUiPreview
     : null;
 
@@ -250,6 +251,7 @@ function MainApplication({
   if (uiPreview === "login") {
     return <AppFrame><LoginScreen clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>;
   }
+  if (uiPreview === "notifications") return <AppFrame><NotificationFixture /></AppFrame>;
   if (!session && !error) return <AppFrame><SplashScreen /></AppFrame>;
   if (!session || error) return <AppFrame><FatalError message={error || "无法启动 Cadilume"} retry={load} /></AppFrame>;
   if (!session.authenticated || !session.account) {
@@ -267,6 +269,64 @@ function AppFrame({ children, integrated = false }: { children: ReactNode; integ
       {!integrated && <AppTitlebar />}
       <div className="app-frame-content">{children}</div>
     </div>
+  );
+}
+
+const NOTIFICATION_FIXTURE_MESSAGES = [
+  "资料库同步完成。",
+  "已切换为琥珀金。",
+  "播放队列已更新。",
+  "封面缓存已在后台整理。",
+];
+
+function NotificationFixture() {
+  const queue = useGlobalNotificationQueue();
+  const previewParams = new URLSearchParams(window.location.search);
+  const holdTimers = previewParams.get("notification-hold") === "1";
+  const requestedTheme = previewParams.get("notification-theme");
+  const requestedBrand = previewParams.get("notification-brand");
+  const previewTheme = requestedTheme === "light" || requestedTheme === "dark" ? requestedTheme : undefined;
+  const previewBrand = requestedBrand === "amber" || requestedBrand === "verdant" || requestedBrand === "azure"
+    ? requestedBrand
+    : undefined;
+
+  useEffect(() => {
+    if (!previewTheme && !previewBrand) return;
+    const root = document.documentElement;
+    const previousTheme = root.getAttribute("data-theme");
+    const previousBrand = root.getAttribute("data-brand");
+    if (previewTheme) root.dataset.theme = previewTheme;
+    if (previewBrand) root.dataset.brand = previewBrand;
+    return () => {
+      if (previousTheme === null) root.removeAttribute("data-theme");
+      else root.setAttribute("data-theme", previousTheme);
+      if (previousBrand === null) root.removeAttribute("data-brand");
+      else root.setAttribute("data-brand", previousBrand);
+    };
+  }, [previewBrand, previewTheme]);
+
+  const setQueuePaused = useCallback((paused: boolean) => {
+    queue.setPaused(holdTimers || paused);
+  }, [holdTimers, queue.setPaused]);
+  const addMessages = (count: number) => {
+    for (const message of NOTIFICATION_FIXTURE_MESSAGES.slice(0, count)) queue.notify(message);
+  };
+
+  return (
+    <main className="notification-fixture" data-testid="notification-fixture" data-hold-timers={holdTimers || undefined}>
+      <div>
+        <p>开发验收</p>
+        <h1>通知队列</h1>
+      </div>
+      <div className="notification-fixture-actions">
+        <button type="button" data-testid="notification-fixture-add-one" onClick={() => addMessages(1)}>加入 1 条</button>
+        <button type="button" data-testid="notification-fixture-add-three" onClick={() => addMessages(3)}>加入 3 条</button>
+        <button type="button" data-testid="notification-fixture-add-four" onClick={() => addMessages(4)}>加入 4 条</button>
+        <button type="button" data-testid="notification-fixture-add-long" onClick={() => queue.notify("这是一条用于验证自动换行、堆叠高度、展开列表和关闭按钮可访问名称的较长通知文案。")}>加入长文案</button>
+        <button type="button" data-testid="notification-fixture-clear" onClick={queue.clear}>清空</button>
+      </div>
+      <GlobalNotificationQueue notices={queue.notices} onDismiss={queue.dismiss} onPauseChange={setQueuePaused} />
+    </main>
   );
 }
 
@@ -316,7 +376,12 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [searchHubs, setSearchHubs] = useState<PlexHub[]>([]);
   const [searchText, setSearchText] = useState(initialLibraryRoute.query || "");
   const [loading, setLoading] = useState(true);
-  const [notice, setNotice] = useState<string>();
+  const {
+    notices,
+    notify,
+    dismiss: dismissNotification,
+    setPaused: setNotificationsPaused,
+  } = useGlobalNotificationQueue();
   const [sidePanel, setSidePanel] = useState<"queue" | "lyrics" | "devices" | null>(null);
   const [nowPlayingOpen, setNowPlayingOpen] = useState(false);
   const [nowPlayingMode, setNowPlayingMode] = useState<NowPlayingMode>(readNowPlayingMode);
@@ -508,7 +573,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 
   const loadServers = useCallback(async (refreshDependents = true): Promise<PlexServer[] | undefined> => {
     setLoading(true);
-    setNotice(undefined);
     try {
       const result = await discoverServers();
       setServers(result);
@@ -519,16 +583,16 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         return result[0]?.id;
       });
       if (refreshDependents) setSourceRevision((revision) => revision + 1);
-      if (!result.length) setNotice("当前账号没有发现可访问的 Plex Media Server。请先让服务器所有者共享音乐库。" );
+      if (!result.length) notify("当前账号没有发现可访问的 Plex Media Server。请先让服务器所有者共享音乐库。" );
       return result;
     } catch (reason) {
       setConnectionAvailable(false);
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason));
       return undefined;
     } finally {
       setLoading(false);
     }
-  }, [preferredPlaybackServerId]);
+  }, [notify, preferredPlaybackServerId]);
 
   useEffect(() => { void loadServers(); }, [loadServers]);
 
@@ -542,16 +606,16 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         setConnectionAvailable(true);
         setSections(result);
         setSectionKey((current) => result.some((section) => section.key === current) ? current : result[0]?.key);
-        if (!result.length) setNotice("这台服务器没有向当前账号开放音乐资料库。" );
+        if (!result.length) notify("这台服务器没有向当前账号开放音乐资料库。" );
       })
       .catch((reason) => {
         if (cancelled) return;
         setConnectionAvailable(false);
-        setNotice(String(reason));
+        notify(String(reason));
       })
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
-  }, [serverId, sourceRevision]);
+  }, [notify, serverId, sourceRevision]);
 
   const loadPlaylistList = useCallback(async (announce = false) => {
     const requestId = ++playlistListRequestRef.current;
@@ -559,7 +623,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       setPlaylists([]);
       setPlaylistListError(undefined);
       setPlaylistListLoading(false);
-      if (announce) setNotice("请先在设置中选择音乐服务器。");
+      if (announce) notify("请先在设置中选择音乐服务器。");
       return;
     }
     setPlaylistListLoading(true);
@@ -568,19 +632,19 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       const result = await getPlaylists(serverId);
       if (playlistListRequestRef.current === requestId) {
         setPlaylists(result);
-        if (announce) setNotice(result.length ? `歌单已刷新，共 ${result.length} 个。` : "歌单已刷新，当前没有可显示的音乐歌单。");
+        if (announce) notify(result.length ? `歌单已刷新，共 ${result.length} 个。` : "歌单已刷新，当前没有可显示的音乐歌单。");
       }
     } catch (reason) {
       if (playlistListRequestRef.current === requestId) {
         const message = playlistReadErrorMessage(reason);
         setPlaylists([]);
         setPlaylistListError(message);
-        if (announce) setNotice(message);
+        if (announce) notify(message);
       }
     } finally {
       if (playlistListRequestRef.current === requestId) setPlaylistListLoading(false);
     }
-  }, [serverId]);
+  }, [notify, serverId]);
 
   useEffect(() => {
     playlistItemsRequestRef.current += 1;
@@ -634,7 +698,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     }
 
     setLoading(true);
-    setNotice(undefined);
     try {
       if (nextView === "home") {
         const [hubs, recentAlbums] = await Promise.all([
@@ -663,13 +726,13 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     } catch (reason) {
       if (viewRequestRef.current === requestId) {
         setConnectionAvailable(false);
-        setNotice(reason instanceof Error ? reason.message : String(reason));
+        notify(reason instanceof Error ? reason.message : String(reason));
         commit([], nextView === "home" ? [] : undefined, nextView === "search" ? [] : undefined);
       }
     } finally {
       if (viewRequestRef.current === requestId) setLoading(false);
     }
-  }, [detail, sectionKey, selectedPlaylist, serverId, view]);
+  }, [detail, notify, sectionKey, selectedPlaylist, serverId, view]);
 
   useEffect(() => {
     if (!sectionKey || loadedSectionRef.current === sectionKey) return;
@@ -785,7 +848,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       }
     } catch (reason) {
       setConnectionAvailable(false);
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setLoading(false);
       setPlaylistListLoading(false);
@@ -838,7 +901,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     setDetail(undefined);
     setRouteTransitioning(true);
     setLoading(true);
-    setNotice(undefined);
     try {
       const source = await getLibraryMetadata(serverId, detailRoute.ratingKey);
       if (source.type !== expectedType) throw new Error("该链接指向的媒体类型与目标页面不匹配。");
@@ -852,14 +914,14 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       const fallback: LibraryRoute = { view: parentView };
       window.history.replaceState(null, "", libraryRouteHash(fallback));
       setRoute(fallback);
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason));
     } finally {
       if (viewRequestRef.current === requestId) {
         setRouteTransitioning(false);
         setLoading(false);
       }
     }
-  }, [serverId]);
+  }, [notify, serverId]);
 
   const loadPlaylistRoute = useCallback(async (playlistId: string) => {
     if (!serverId) return;
@@ -875,7 +937,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     setPlaylistItemsLoading(true);
     setRouteTransitioning(true);
     setLoading(true);
-    setNotice(undefined);
     try {
       const catalog = await getPlaylists(serverId);
       const playlist = catalog.find((item) => item.ratingKey === playlistId);
@@ -895,7 +956,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       setSelectedPlaylist(undefined);
       setPlaylistItems([]);
       setPlaylistItemsError(undefined);
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason));
     } finally {
       if (playlistItemsRequestRef.current === requestId) {
         setRouteTransitioning(false);
@@ -903,7 +964,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         setPlaylistItemsLoading(false);
       }
     }
-  }, [serverId]);
+  }, [notify, serverId]);
 
   const openItem = useCallback((item: PlexItem) => {
     if (item.type === "track") {
@@ -957,7 +1018,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     try {
       await saveCloseBehavior(behavior);
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason));
     }
   };
 
@@ -967,10 +1028,10 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       setDeviceName(savedDeviceName);
       return savedDeviceName;
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : "无法保存 Cadilume 设备名称。");
+      notify(reason instanceof Error ? reason.message : "无法保存 Cadilume 设备名称。");
       throw reason;
     }
-  }, []);
+  }, [notify]);
 
   const changeQuality = (value: StreamQuality) => {
     setQuality(value);
@@ -988,11 +1049,11 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     try {
       setCacheStatus(await clearArtworkCache());
       artworkCache.clear();
-      setNotice("封面磁盘缓存已清理；当前页面已显示的封面会保留到下次加载。");
+      notify("封面磁盘缓存已清理；当前页面已显示的封面会保留到下次加载。");
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
       setCacheStatusError(message);
-      setNotice(message);
+      notify(message);
     } finally {
       setCacheBusy(false);
     }
@@ -1005,7 +1066,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       artworkCache.clear();
       window.location.reload();
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason));
     }
   };
 
@@ -1032,7 +1093,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 
   const playRecommendationItem = useCallback(async (item: PlexItem, context: PlexItem[]) => {
     if (!serverId) return;
-    setNotice(undefined);
     try {
       let tracks: PlexItem[];
       if (item.type === "track") {
@@ -1044,33 +1104,32 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       }
       const current = item.type === "track" ? item : tracks[0];
       if (!current || !tracks.length) {
-        setNotice(`“${item.title}”当前没有可播放的歌曲。`);
+        notify(`“${item.title}”当前没有可播放的歌曲。`);
         return;
       }
       player.playContext(current, tracks);
       player.setShuffle(false);
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason));
       throw reason;
     }
-  }, [player, serverId]);
+  }, [notify, player, serverId]);
 
   const playRecommendationPlaylist = useCallback(async (playlist: PlexPlaylist) => {
     if (!serverId) return;
-    setNotice(undefined);
     try {
       const tracks = (await getPlaylistItems(serverId, playlist.ratingKey)).filter((item) => item.type === "track");
       if (!tracks[0]) {
-        setNotice(`歌单“${playlist.title}”当前没有可播放的歌曲。`);
+        notify(`歌单“${playlist.title}”当前没有可播放的歌曲。`);
         return;
       }
       player.playContext(tracks[0], tracks);
       player.setShuffle(false);
     } catch (reason) {
-      setNotice(playlistReadErrorMessage(reason));
+      notify(playlistReadErrorMessage(reason));
       throw reason;
     }
-  }, [player, serverId]);
+  }, [notify, player, serverId]);
 
   const closeNowPlaying = useCallback(() => {
     setNowPlayingOpen(false);
@@ -1104,11 +1163,11 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     try {
       await onBrandPreset(preset, origin);
       const label = BRAND_PRESET_OPTIONS.find((option) => option.preset === preset)?.label || "所选配色";
-      setNotice(`已切换为${label}。`);
+      notify(`已切换为${label}。`);
     } catch {
-      setNotice("无法保存视觉风格，已保留当前配色。");
+      notify("无法保存视觉风格，已保留当前配色。");
     }
-  }, [brandPreset, onBrandPreset]);
+  }, [brandPreset, notify, onBrandPreset]);
 
   return (
     <ArtworkServerContext.Provider value={serverId}>
@@ -1157,7 +1216,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           onRetry={() => void loadPlaylistList(true)}
           onCreate={() => {
             if (!serverId) {
-              setNotice("请先在设置中选择音乐服务器。");
+              notify("请先在设置中选择音乐服务器。");
               return;
             }
             setSidePanel(null);
@@ -1345,7 +1404,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           onClose={() => setPlaylistTrack(undefined)}
           onAdded={(playlist) => {
             setPlaylistTrack(undefined);
-            setNotice(`已将《${playlistTrack.title}》添加到“${playlist.title}”。`);
+            notify(`已将《${playlistTrack.title}》添加到“${playlist.title}”。`);
           }}
         />
       )}
@@ -1357,10 +1416,10 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           onCreated={(playlist) => {
             setPlaylistCreationOpen(false);
             setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
-            setNotice(`已创建歌单“${playlist.title}”。`);
+            notify(`已创建歌单“${playlist.title}”。`);
             void loadPlaylistList();
           }}
-          onError={setNotice}
+          onError={notify}
         />
       )}
 
@@ -1403,7 +1462,11 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       />
 
       {sourcesSyncing && <SourceSyncOverlay />}
-      {!sourcesSyncing && notice && <GlobalToast message={notice} onClose={() => setNotice(undefined)} />}
+      <GlobalNotificationQueue
+        notices={notices}
+        onDismiss={dismissNotification}
+        onPauseChange={setNotificationsPaused}
+      />
     </div>
     </ArtworkServerContext.Provider>
   );
@@ -3204,16 +3267,6 @@ function SourceSyncOverlay() {
       </div>
     </div>
   );
-}
-
-function GlobalToast({ message, onClose }: { message: string; onClose: () => void }) {
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
-  useEffect(() => {
-    const timer = window.setTimeout(() => closeRef.current(), 4_200);
-    return () => window.clearTimeout(timer);
-  }, [message]);
-  return <div className="global-toast" role="status" aria-live="polite" aria-atomic="true"><span className="global-toast-mark" aria-hidden="true" /><span>{message}</span><IconButton label="关闭提示" onClick={onClose}><X size={16} /></IconButton></div>;
 }
 
 function PlaybackErrorAlert({ failure, trackTitle, onRetry, onOpenSettings, onClose }: {

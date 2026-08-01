@@ -21,12 +21,6 @@
 - Move queue authority, Range/cache, decoding, independent gain, gapless/prefetch and output device selection into Rust so Windows hidden-window playback does not depend on WebView timers.
 - Add macOS Now Playing/Remote Command Center and Windows SMTC with metadata, progress, Seek and artwork.
 
-## 全局通知队列与三层堆叠（R8，L1/L2 前）
-
-- 以现有右上角 `GlobalToast` 为基础改成独立通知队列：所有消息追加而非互相覆盖；活跃消息达到 3 条即折叠为最新前台卡片和两层背景预览，hover / focus 时展开全部活跃消息。
-- 需要为入场、重排、收起、手动关闭与自动关闭保留 presence 节点和 reduced-motion 降级；现有 4.2 秒自动关闭、单条关闭按钮、浅 / 深及三种 Cadilume 配色必须继续适用，阈值不用于丢弃消息。
-- 先完成受控浏览器 fixture 与针对性的队列 / 计时器测试，最后只保留一条真实 Tauri 开发态做同场景验证；不以截图代替验收。
-
 ## 暗色开关可见性、主题封面稳定与页面标题统一（R9，R8 后、L1/L2 前）
 
 - 修复暗色关闭态开关的轨道、边框和滑块对比，浅 / 深 × 琥珀金、雨林绿、澄海蓝均需清晰可辨；保留开关可访问性与交互状态，不以竖线或无意义小字补救。
@@ -61,4 +55,4 @@
 ## 2026-07-31 — 已完成归档与剩余平台功能
 
 - 跨设备播放历史已按用户决定从产品、UI、IPC、PMS 请求和持久化中移除；它既不是已完成能力，也不再作为待开发 Feature。两态主题、固定琥珀金 / 雨林绿 / 澄海蓝预设、纯唱片 Logo、macOS Dock 图标逻辑，以及 provider adapter 边界均已进入已完成计划记录。
-- 下一个实施项依序为 R8 全局通知队列与三层堆叠、R9 暗色可见性 / 主题封面稳定 / 页面标题统一、R10 展开播放器机械唱臂 / 统一浮层 / 音量收口、R11 原生状态图标与统一最小化、R12 资料库密度 / 时长列 / 多歌手保真；五项完成后才是必须单独立项的 Plex Companion controller / receiver（L1）和 Emby / Jellyfin 实际认证、浏览、播放与歌词接入（L2）。现有配色、Logo 或 adapter 接口均不代表这些服务已支持。
+- R8 全局通知队列与三层堆叠已完成；下一个实施项依序为 R9 暗色可见性 / 主题封面稳定 / 页面标题统一、R10 展开播放器机械唱臂 / 统一浮层 / 音量收口、R11 原生状态图标与统一最小化、R12 资料库密度 / 时长列 / 多歌手保真。四项完成后才是必须单独立项的 Plex Companion controller / receiver（L1）和 Emby / Jellyfin 实际认证、浏览、播放与歌词接入（L2）。现有配色、Logo 或 adapter 接口均不代表这些服务已支持。

@@ -1,5 +1,11 @@
 # LEARNINGS
 
+## 2026-08-01 — 全局通知队列的 presence、暂停计时与可访问性堆叠
+
+- 通知不能再由一个可覆盖的字符串状态承载：每项需有稳定 ID、创建顺序、剩余时长及 `entering / visible / leaving` phase；自动关闭计时器和退出卸载计时器独立管理，暂停时按 deadline 计算剩余时长，恢复后只继续未耗尽部分。
+- 3 条以上折叠时，隐藏的背景预览不能仅靠视觉遮挡：同时给其 `aria-hidden`、`inert` 和关闭按钮 `tabIndex=-1`，再让最前层的 `ul[tabIndex=0]` 成为键盘进入点；hover 或 focus 展开后再恢复全部卡片的可操作性。
+- reduced-motion 的 CSS 淡出时长必须与 JS 延迟卸载一致；通用的 `1ms` 动画覆盖会使退出节点看起来立即消失，通知层应单独保留无位移的短淡入淡出。
+
 ## 2026-07-31 — Tauri 开发态与已安装版会形成两个独立 Dock 进程
 
 - `/Applications/Cadilume.app` 与 `target/debug/Cadilume` 是两个不同的 macOS 应用进程；即使它们共享产品名或 Bundle ID，Dock 也会显示两个图标。Vite / `pnpm dev` 本身不会产生 Dock 图标。

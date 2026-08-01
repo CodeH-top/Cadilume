@@ -526,7 +526,7 @@
 
 > 2026-07-31 收口记录：`git diff --check`、`pnpm check`、`pnpm test`（19 文件 / 122 项）、`pnpm build`、`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo test --manifest-path src-tauri/Cargo.toml`（45 项）全部通过。使用全新临时 `CARGO_TARGET_DIR` 的 `pnpm tauri build --no-bundle` 通过，并在结束后精确删除临时目录；未构建 DMG、未 push。当前只保留一条 Tauri 开发态，未与已安装版同时运行。
 
-#### R8 — 全局通知队列与三层堆叠（P0，R7 后、L1/L2 前）
+#### R8 — 全局通知队列与三层堆叠（已完成）
 
 > 参考用户提供的 Ant Design Notification 堆叠交互与截图，只借鉴“多条通知的折叠 / 展开层级和动效”，不引入 Ant Design 组件、样式代码或资产。
 
@@ -538,6 +538,8 @@
 6. 先用内部浏览器的受控通知 fixture 覆盖 1、2、3、4+ 条入队、折叠、hover / focus 展开、单条关闭、自动关闭、退出后重排、连续快速入队、长文案、浅 / 深与三种配色、reduced-motion 及键盘访问；R8–R12 均完成后，再在唯一的真实 Cadilume Tauri 开发态统一验证同一组场景。不得通过截图替代 DOM / 可访问性 / 实际 WebView 验收，也不得启动第二条开发态。
 
 验收：多条通知不再相互覆盖；第三条到达后可见如参考图的三层堆叠，hover / focus 后完整纵向展开；每条关闭和自动消失都有连续过渡，剩余卡片不跳动；3 条阈值不会丢消息；页面、主题切换、路由和播放器均不因通知重排而产生闪屏、抖动或不可点击状态。
+
+> 2026-08-01 实施与验收记录：已以 `notifications.ts` + `useGlobalNotificationQueue()` 替换单一 `notice` 状态，消息拥有稳定 ID、创建顺序、剩余时长与 `entering / visible / leaving` presence；所有既有提示改走 `notify()`，路由和数据加载不再清空无关提示。通知组在 3 条时保留最新卡片与两层预览，背景卡片同时使用 `aria-hidden`、`inert` 和 `tabIndex=-1`，焦点可进入的列表负责展开全部消息。新增开发态 query fixture，内部浏览器以 `1280×820` 验证 1、4+ 条、三层预览、长文案、单条关闭、自动消失、浅 / 深 × 琥珀金 / 雨林绿 / 澄海蓝及 0 console error/warning；hover / focus 状态转换由组件回归测试与 DOM 语义共同覆盖。`prefers-reduced-motion` 使用无位移的 120ms 淡入淡出，并令退出 presence 时长一致。`pnpm check`、`pnpm test`（22 文件 / 129 项）、`pnpm build`、`cargo fmt --check`、`cargo test`（43 项）和全新临时 `CARGO_TARGET_DIR` 的 `pnpm tauri build --no-bundle` 均通过；未构建 DMG、未 push，临时 target 已删除。
 
 #### R9 — 暗色可见性、主题封面稳定与页面标题统一（P0，R8 后、L1/L2 前）
 
@@ -590,7 +592,7 @@
 - 在 R5 的 adapter 边界稳定、Plex 回归通过后，分别建立 Emby 与 Jellyfin 的授权、媒体库、播放、歌词与错误 adapter；按平台逐个上线，不同时接入。
 - 服务接入优先级与 L1 相同或更低；三种品牌色不构成任何兼容性承诺。
 
-### 9.5 当前结论（2026-07-31）
+### 9.5 当前结论（2026-08-01）
 
-- R0–R7 已完成、验证并记录；下一次依序执行 R8 全局通知队列与三层堆叠、R9 暗色可见性 / 主题封面稳定 / 页面标题统一、R10 展开播放器机械唱臂 / 统一浮层 / 音量收口、R11 原生状态图标与统一最小化、R12 资料库密度 / 时长列 / 多歌手保真，不得从历史 P 阶段或本节的旧步骤重新执行。
-- R8–R12 完成后才进入后期 Feature：L1 Plex Companion controller / receiver 与 L2 Emby / Jellyfin 实际接入。两者仍需要单独立项、重新确认范围与验收，不能因现有品牌预设、adapter 边界、通知改造或这些 UI 收口而自动开始。
+- R0–R8 已完成、验证并记录；下一次依序执行 R9 暗色可见性 / 主题封面稳定 / 页面标题统一、R10 展开播放器机械唱臂 / 统一浮层 / 音量收口、R11 原生状态图标与统一最小化、R12 资料库密度 / 时长列 / 多歌手保真，不得从历史 P 阶段或本节的旧步骤重新执行。
+- R9–R12 完成后才进入后期 Feature：L1 Plex Companion controller / receiver 与 L2 Emby / Jellyfin 实际接入。两者仍需要单独立项、重新确认范围与验收，不能因现有品牌预设、adapter 边界、通知改造或这些 UI 收口而自动开始。
