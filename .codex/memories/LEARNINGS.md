@@ -1,5 +1,11 @@
 # LEARNINGS
 
+## 2026-08-01 — keepalive-for-react 可作为 R15 缓存底座，但不是完整路由方案
+
+- `keepalive-for-react@5.0.11` 的 `KeepAlive` 会通过 Portal 保留 React 子树和 DOM，`activeCacheKey` 可使用 Cadilume 自己生成的 History entry id；设置 `max={Infinity}`、`maxAliveTime={0}` 可满足当前上下文不做 LRU/时间淘汰，登出或切换服务器/资料库时再用 `aliveRef.destroyAll()`。
+- 该库不负责 `pushState`/`popstate`、同 URL 不同 History entry、可序列化快照、每页滚动视口、焦点恢复或 `inert`/`aria-hidden`；这些必须由 Cadilume 的 HistoryEntryCache 适配层和 RoutePage 自己完成。仅包住现有共享 `ContentView` 不能满足 R15。
+- 当前锁定 React/ReactDOM 为 19.2.8，可评估 v5；采用前仍需移除开发态 `React.StrictMode`（上游明确警告）并做 React 19.2 + Tauri WebView 的 DOM 身份、Back/Forward、独立滚动和无障碍 POC。无需为此迁移 React Router。
+
 ## 2026-08-01 — 多歌手数据须贯穿持久化队列与开发夹具
 
 - 播放队列快照除了传统的曲目、专辑和主歌手字段，还必须以同样的路径净化规则保存结构化 `contributors`（姓名和可选 `ratingKey`）。否则重启后 `trackArtist()` 会退化为单一 `grandparentTitle`，破坏 R12 的完整多歌手显示与可点击成员边界。
