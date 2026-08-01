@@ -20,14 +20,13 @@ import {
   LoaderCircle,
   LogOut,
   Mic2,
-  Minimize2,
   Moon,
   Music2,
+  PanelTop,
   Pause,
   Palette,
   Play,
   Plus,
-  Power,
   Radio,
   RefreshCw,
   Repeat,
@@ -74,7 +73,7 @@ import {
   normalizeDeviceName,
   openWindowsAudioSettings,
   searchLibrary,
-  setCloseBehavior as saveCloseBehavior,
+  setStatusIconEnabled as saveStatusIconEnabled,
   setBrandPreset as saveBrandPreset,
   setDeviceName as saveDeviceName,
   showMainWindow,
@@ -94,7 +93,6 @@ import type {
   BootstrapResponse,
   BrandPreset,
   CacheStatus,
-  CloseBehavior,
   LibrarySection,
   LibraryView,
   PlexAccount,
@@ -394,7 +392,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [playlistItemsLoading, setPlaylistItemsLoading] = useState(false);
   const [playlistItemsError, setPlaylistItemsError] = useState<string>();
   const [detail, setDetail] = useState<{ source: PlexItem; children: PlexItem[] }>();
-  const [closeBehavior, setCloseBehavior] = useState<CloseBehavior>(initialSession.closeBehavior);
+  const [statusIconEnabled, setStatusIconEnabled] = useState(initialSession.statusIconEnabled);
+  const [statusIconSaving, setStatusIconSaving] = useState(false);
   const [deviceName, setDeviceName] = useState(initialSession.deviceName);
   const [quality, setQuality] = useState<StreamQuality>(() => readStoredQuality(initialPlaybackSession?.quality));
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>();
@@ -1011,12 +1010,18 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     navigateToSearch(query);
   }, [navigateToSearch, searchText, sectionKey, serverId]);
 
-  const changeCloseBehavior = async (behavior: CloseBehavior) => {
-    setCloseBehavior(behavior);
+  const changeStatusIconEnabled = async (enabled: boolean) => {
+    if (statusIconSaving) return;
+    const previous = statusIconEnabled;
+    setStatusIconEnabled(enabled);
+    setStatusIconSaving(true);
     try {
-      await saveCloseBehavior(behavior);
+      setStatusIconEnabled(await saveStatusIconEnabled(enabled));
     } catch (reason) {
+      setStatusIconEnabled(previous);
       notify(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setStatusIconSaving(false);
     }
   };
 
@@ -1280,7 +1285,9 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
               sections={sections}
               sectionKey={sectionKey}
               section={selectedSection}
-              closeBehavior={closeBehavior}
+              statusIconEnabled={statusIconEnabled}
+              statusIconPlatform={initialSession.statusIconPlatform}
+              statusIconSaving={statusIconSaving}
               brandPreset={brandPreset}
               deviceName={deviceName}
               quality={quality}
@@ -1300,7 +1307,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
               onPlayDetail={playDetail}
               onShuffleDetail={() => shuffleContext(detail?.children || [])}
               onPlayTrack={(track, context) => player.playContext(track, context)}
-              onCloseBehavior={changeCloseBehavior}
+              onStatusIconEnabled={changeStatusIconEnabled}
               onBrandPreset={changeBrandPreset}
               onEditDeviceName={() => setDeviceNameDialogOpen(true)}
               onQuality={changeQuality}
@@ -1482,7 +1489,9 @@ interface ContentViewProps {
   sections: LibrarySection[];
   sectionKey?: string;
   section?: LibrarySection;
-  closeBehavior: CloseBehavior;
+  statusIconEnabled: boolean;
+  statusIconPlatform?: BootstrapResponse["statusIconPlatform"];
+  statusIconSaving: boolean;
   brandPreset: BrandPreset;
   deviceName: string;
   quality: StreamQuality;
@@ -1502,7 +1511,7 @@ interface ContentViewProps {
   onPlayDetail: () => void;
   onShuffleDetail: () => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
-  onCloseBehavior: (value: CloseBehavior) => void;
+  onStatusIconEnabled: (enabled: boolean) => void;
   onBrandPreset: BrandPresetChange;
   onEditDeviceName: () => void;
   onQuality: (value: StreamQuality) => void;
@@ -2334,12 +2343,17 @@ function SettingsView(props: ContentViewProps) {
       <SettingsGroup icon={<Laptop size={18} />} title="设备">
         <DeviceNameSetting value={props.deviceName} onEdit={props.onEditDeviceName} />
       </SettingsGroup>
-      <SettingsGroup icon={<Minimize2 size={18} />} title="关闭主窗口时">
-        <div className="choice-grid choice-grid--compact" role="radiogroup" aria-label="关闭主窗口时">
-          <ChoiceCard radio active={props.closeBehavior === "tray"} title="最小化到托盘 / 菜单栏" icon={<Radio size={20} />} onClick={() => props.onCloseBehavior("tray")} />
-          <ChoiceCard radio active={props.closeBehavior === "quit"} title="退出程序" icon={<Power size={20} />} onClick={() => props.onCloseBehavior("quit")} />
-        </div>
-      </SettingsGroup>
+      {props.statusIconPlatform && (
+        <SettingsGroup icon={<PanelTop size={18} />} title="系统状态图标">
+          <div className="toggle-row">
+            <span><strong>{props.statusIconPlatform === "macos" ? "显示菜单栏图标" : "显示任务栏图标"}</strong></span>
+            <label className="toggle-switch" aria-label={props.statusIconPlatform === "macos" ? "显示菜单栏图标" : "显示任务栏图标"}>
+              <input type="checkbox" checked={props.statusIconEnabled} disabled={props.statusIconSaving} onChange={(event) => props.onStatusIconEnabled(event.target.checked)} />
+              <span className="toggle-control" aria-hidden="true" />
+            </label>
+          </div>
+        </SettingsGroup>
+      )}
       <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放">
         <div className="settings-stack">
           <div className="field-row"><span><strong>音频质量</strong><small>选择 PMS 返回原始流或兼容质量。</small></span><SettingsSelect label="音频质量" value={props.quality} placeholder="选择音频质量" disabled={false} options={[{ value: "auto", label: "自动（优先直放 / PMS 兼容转码）" }, { value: "original", label: "始终原始质量" }, { value: "320", label: "320 kbps" }, { value: "256", label: "256 kbps" }, { value: "192", label: "192 kbps" }]} onValueChange={(value) => props.onQuality(value as StreamQuality)} /></div>

@@ -45,7 +45,8 @@ const FALLBACK_DEVICE_NAME: &str = "Desktop";
 #[serde(rename_all = "camelCase")]
 struct PersistedConfig {
     client_identifier: String,
-    close_behavior: CloseBehavior,
+    #[serde(default = "default_status_icon_enabled")]
+    status_icon_enabled: bool,
     #[serde(default)]
     device_name: String,
     #[serde(default)]
@@ -56,25 +57,48 @@ impl Default for PersistedConfig {
     fn default() -> Self {
         Self {
             client_identifier: Uuid::new_v4().to_string(),
-            close_behavior: CloseBehavior::Tray,
+            status_icon_enabled: default_status_icon_enabled(),
             device_name: default_device_name(),
             brand_preset: BrandPreset::Amber,
         }
     }
 }
 
-fn strip_retired_config_values(value: &mut Value) -> bool {
-    value
-        .as_object_mut()
-        .map(|config| config.remove("syncRecentPlays").is_some())
-        .unwrap_or(false)
+const fn default_status_icon_enabled() -> bool {
+    true
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+fn strip_retired_config_values(value: &mut Value) -> bool {
+    let Some(config) = value.as_object_mut() else {
+        return false;
+    };
+    let removed_sync_recent_plays = config.remove("syncRecentPlays").is_some();
+    let removed_close_behavior = config.remove("closeBehavior").is_some();
+    removed_sync_recent_plays || removed_close_behavior
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum CloseBehavior {
-    Tray,
-    Quit,
+pub enum StatusIconPlatform {
+    #[cfg(target_os = "macos")]
+    Macos,
+    #[cfg(target_os = "windows")]
+    Windows,
+}
+
+pub(crate) const fn status_icon_platform() -> Option<StatusIconPlatform> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(StatusIconPlatform::Macos)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Some(StatusIconPlatform::Windows)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
 }
 
 /// Names used in Plex's device UI travel in request headers, so reject control
@@ -207,7 +231,7 @@ pub struct PlexState {
     cache_lock: RwLock<()>,
     config: Mutex<PersistedConfig>,
     client_identifier: String,
-    close_to_tray: AtomicBool,
+    status_icon_enabled: AtomicBool,
     token: RwLock<Option<String>>,
     servers: RwLock<HashMap<String, CachedServer>>,
 }
@@ -254,14 +278,14 @@ impl PlexState {
             cache_lock: RwLock::new(()),
             config: Mutex::new(config.clone()),
             client_identifier: config.client_identifier.clone(),
-            close_to_tray: AtomicBool::new(config.close_behavior == CloseBehavior::Tray),
+            status_icon_enabled: AtomicBool::new(config.status_icon_enabled),
             token: RwLock::new(token),
             servers: RwLock::new(HashMap::new()),
         })
     }
 
-    pub fn close_to_tray(&self) -> bool {
-        self.close_to_tray.load(Ordering::SeqCst)
+    pub fn status_icon_enabled(&self) -> bool {
+        self.status_icon_enabled.load(Ordering::SeqCst)
     }
 
     fn token(&self) -> Result<String> {
@@ -272,8 +296,8 @@ impl PlexState {
             .ok_or_else(|| anyhow!("尚未登录 Plex"))
     }
 
-    fn save_close_behavior(&self, behavior: CloseBehavior) -> Result<()> {
-        self.update_preferences(|config| config.close_behavior = behavior)
+    fn save_status_icon_enabled(&self, enabled: bool) -> Result<()> {
+        self.update_preferences(|config| config.status_icon_enabled = enabled)
     }
 
     fn save_brand_preset(&self, preset: BrandPreset) -> Result<()> {
@@ -295,10 +319,8 @@ impl PlexState {
             *config = previous;
             return Err(error);
         }
-        self.close_to_tray.store(
-            config.close_behavior == CloseBehavior::Tray,
-            Ordering::SeqCst,
-        );
+        self.status_icon_enabled
+            .store(config.status_icon_enabled, Ordering::SeqCst);
         Ok(())
     }
 
@@ -510,7 +532,9 @@ pub struct BootstrapResponse {
     client_identifier: String,
     authenticated: bool,
     account: Option<Account>,
-    close_behavior: CloseBehavior,
+    status_icon_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_icon_platform: Option<StatusIconPlatform>,
     device_name: String,
     brand_preset: BrandPreset,
 }
@@ -727,11 +751,8 @@ pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse,
         client_identifier: state.client_identifier.clone(),
         authenticated: token.is_some(),
         account,
-        close_behavior: if state.close_to_tray() {
-            CloseBehavior::Tray
-        } else {
-            CloseBehavior::Quit
-        },
+        status_icon_enabled: state.status_icon_enabled(),
+        status_icon_platform: status_icon_platform(),
         device_name: state.device_name(),
         brand_preset: state.brand_preset(),
     })
@@ -1282,11 +1303,26 @@ pub async fn scrobble(
 }
 
 #[tauri::command]
-pub fn set_close_behavior(
-    behavior: CloseBehavior,
+pub fn set_status_icon_enabled(
+    enabled: bool,
     state: State<'_, PlexState>,
-) -> Result<(), String> {
-    state.save_close_behavior(behavior).map_err(display_error)
+    app: AppHandle,
+) -> Result<bool, String> {
+    if status_icon_platform().is_none() {
+        return Err("当前平台不支持系统状态图标。".to_string());
+    }
+
+    let previous = state.status_icon_enabled();
+    if previous == enabled {
+        return Ok(enabled);
+    }
+
+    crate::window::set_status_icon_enabled(&app, enabled).map_err(display_error)?;
+    if let Err(error) = state.save_status_icon_enabled(enabled) {
+        let _ = crate::window::set_status_icon_enabled(&app, previous);
+        return Err(display_error(error));
+    }
+    Ok(enabled)
 }
 
 #[tauri::command]
@@ -2281,6 +2317,8 @@ mod tests {
         )
         .expect("old config should remain readable");
         assert!(strip_retired_config_values(&mut raw));
+        assert!(raw.get("closeBehavior").is_none());
+        assert!(raw.get("syncRecentPlays").is_none());
         let mut config: PersistedConfig =
             serde_json::from_value(raw).expect("retired preference should not block migration");
 
@@ -2288,10 +2326,11 @@ mod tests {
         assert!(!config.device_name.is_empty());
         assert!(normalize_device_name(&config.device_name).is_ok());
         assert_eq!(config.brand_preset, BrandPreset::Amber);
-        assert!(serde_json::to_value(config)
-            .expect("config should serialize")
-            .get("syncRecentPlays")
-            .is_none());
+        assert!(config.status_icon_enabled);
+        let serialized = serde_json::to_value(config).expect("config should serialize");
+        assert_eq!(serialized["statusIconEnabled"], true);
+        assert!(serialized.get("closeBehavior").is_none());
+        assert!(serialized.get("syncRecentPlays").is_none());
     }
 
     #[test]
@@ -2438,13 +2477,20 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_to_close_to_tray() {
-        assert_eq!(
-            PersistedConfig::default().close_behavior,
-            CloseBehavior::Tray
-        );
+    fn config_defaults_to_an_enabled_status_icon() {
+        assert!(PersistedConfig::default().status_icon_enabled);
         assert!(!PersistedConfig::default().device_name.is_empty());
         assert_eq!(PersistedConfig::default().brand_preset, BrandPreset::Amber);
+    }
+
+    #[test]
+    fn status_icon_platform_matches_the_compiled_native_target() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(status_icon_platform(), Some(StatusIconPlatform::Macos));
+        #[cfg(target_os = "windows")]
+        assert_eq!(status_icon_platform(), Some(StatusIconPlatform::Windows));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(status_icon_platform(), None);
     }
 
     #[test]

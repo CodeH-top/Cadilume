@@ -12,7 +12,7 @@ use tauri::{
 };
 use tokio::sync::oneshot;
 
-use crate::plex::{BrandPreset, PlexState};
+use crate::plex::{status_icon_platform, BrandPreset, PlexState};
 
 const TRAY_ID: &str = "cadilume-tray";
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -100,16 +100,17 @@ impl QuitCoordinator {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum MainCloseAction {
-    HideToTray,
-    ExitApplication,
+enum StatusIconAction {
+    Create,
+    Remove,
+    Noop,
 }
 
-fn main_close_action(close_to_tray: bool) -> MainCloseAction {
-    if close_to_tray {
-        MainCloseAction::HideToTray
-    } else {
-        MainCloseAction::ExitApplication
+fn status_icon_action(enabled: bool, icon_exists: bool) -> StatusIconAction {
+    match (enabled, icon_exists) {
+        (true, false) => StatusIconAction::Create,
+        (false, true) => StatusIconAction::Remove,
+        _ => StatusIconAction::Noop,
     }
 }
 
@@ -143,7 +144,7 @@ pub fn handle_run_event<R: Runtime>(app: &AppHandle<R>, event: tauri::RunEvent) 
     let _ = (app, event);
 }
 
-pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+fn build_status_icon<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
         .text("show", "显示 Cadilume")
         .text("play-pause", "播放 / 暂停")
@@ -178,6 +179,21 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+pub fn set_status_icon_enabled<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> tauri::Result<()> {
+    if status_icon_platform().is_none() {
+        return Ok(());
+    }
+
+    match status_icon_action(enabled, app.tray_by_id(TRAY_ID).is_some()) {
+        StatusIconAction::Create => build_status_icon(app),
+        StatusIconAction::Remove => {
+            drop(app.remove_tray_by_id(TRAY_ID));
+            Ok(())
+        }
+        StatusIconAction::Noop => Ok(()),
+    }
+}
+
 pub fn handle_window_event(window: &Window, event: &WindowEvent) {
     let WindowEvent::CloseRequested { api, .. } = event else {
         return;
@@ -187,16 +203,8 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
         return;
     }
 
-    let Some(state) = window.app_handle().try_state::<PlexState>() else {
-        return;
-    };
     api.prevent_close();
-    match main_close_action(state.close_to_tray()) {
-        MainCloseAction::HideToTray => {
-            let _ = window.hide();
-        }
-        MainCloseAction::ExitApplication => request_app_quit(window.app_handle()),
-    }
+    let _ = window.minimize();
 }
 
 pub(crate) fn reveal_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -246,7 +254,7 @@ fn request_app_quit<R: Runtime>(app: &AppHandle<R>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{main_close_action, MainCloseAction, QuitCoordinator};
+    use super::{status_icon_action, QuitCoordinator, StatusIconAction};
 
     #[cfg(target_os = "macos")]
     use super::{dock_icon_bytes, menu_bar_icon, should_reveal_main_window_on_reopen};
@@ -254,9 +262,11 @@ mod tests {
     use crate::plex::BrandPreset;
 
     #[test]
-    fn main_window_close_behavior_maps_to_an_explicit_process_action() {
-        assert_eq!(main_close_action(true), MainCloseAction::HideToTray);
-        assert_eq!(main_close_action(false), MainCloseAction::ExitApplication);
+    fn status_icon_changes_create_or_remove_only_when_its_native_state_differs() {
+        assert_eq!(status_icon_action(true, false), StatusIconAction::Create);
+        assert_eq!(status_icon_action(false, true), StatusIconAction::Remove);
+        assert_eq!(status_icon_action(true, true), StatusIconAction::Noop);
+        assert_eq!(status_icon_action(false, false), StatusIconAction::Noop);
     }
 
     #[test]

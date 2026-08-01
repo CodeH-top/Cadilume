@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTracksPage, pollPin, setBrandPreset, setDeviceName } from "./api";
+import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTracksPage, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -510,6 +510,16 @@ describe("Cadilume visual presets", () => {
     await expect(setBrandPreset("azure")).resolves.toBeUndefined();
 
     expect(invokeMock).toHaveBeenCalledWith("set_brand_preset", { preset: "azure" });
+  });
+});
+
+describe("Cadilume 系统状态图标", () => {
+  it("persists the native status icon preference through its dedicated command", async () => {
+    invokeMock.mockResolvedValueOnce(false);
+
+    await expect(setStatusIconEnabled(false)).resolves.toBe(false);
+
+    expect(invokeMock).toHaveBeenCalledWith("set_status_icon_enabled", { enabled: false });
   });
 });
 

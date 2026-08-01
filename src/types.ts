@@ -1,4 +1,4 @@
-export type CloseBehavior = "tray" | "quit";
+export type StatusIconPlatform = "macos" | "windows";
 export type LibraryView = "home" | "albums" | "artists" | "tracks" | "search" | "settings";
 export type StreamQuality = "auto" | "original" | "320" | "256" | "192";
 export type ThemeMode = "light" | "dark";
@@ -25,7 +25,8 @@ export interface BootstrapResponse {
   clientIdentifier: string;
   authenticated: boolean;
   account?: PlexAccount;
-  closeBehavior: CloseBehavior;
+  statusIconEnabled: boolean;
+  statusIconPlatform?: StatusIconPlatform;
   deviceName: string;
   brandPreset: BrandPreset;
 }

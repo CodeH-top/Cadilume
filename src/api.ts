@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { demoAlbums, demoArtists, demoBootstrap, demoPlaylistItems, demoPlaylists, demoRecommendationHubs, demoSections, demoServers, demoTracks } from "./demo";
 import { plexLibraryTrackSort, plexSingerTrackSort, sortTracks, type TrackSortState } from "./trackSort";
-import type { BootstrapResponse, BrandPreset, CacheStatus, CloseBehavior, LibrarySection, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
+import type { BootstrapResponse, BrandPreset, CacheStatus, LibrarySection, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
 
 const artworkQueue: Array<() => void> = [];
 let activeArtworkRequests = 0;
@@ -570,8 +570,9 @@ export async function clearArtworkCache(): Promise<CacheStatus> {
   return isDesktopRuntime() ? invoke("clear_cache") : { sizeBytes: 0, fileCount: 0 };
 }
 
-export async function setCloseBehavior(behavior: CloseBehavior): Promise<void> {
-  if (isDesktopRuntime()) await invoke("set_close_behavior", { behavior });
+export async function setStatusIconEnabled(enabled: boolean): Promise<boolean> {
+  if (!isDesktopRuntime()) return enabled;
+  return invoke("set_status_icon_enabled", { enabled });
 }
 
 export async function setDeviceName(deviceName: string): Promise<string> {

@@ -17,10 +17,12 @@ pub fn run() {
             let config_dir = app.path().app_config_dir()?;
             let cache_dir = app.path().app_cache_dir()?;
             fs::create_dir_all(&config_dir)?;
-            app.manage(PlexState::load(config_dir, cache_dir)?);
+            let plex_state = PlexState::load(config_dir, cache_dir)?;
+            let status_icon_enabled = plex_state.status_icon_enabled();
+            app.manage(plex_state);
             app.manage(StreamProxy::start(app.handle().clone())?);
             app.manage(window::QuitCoordinator::default());
-            window::build_tray(&app.handle())?;
+            window::set_status_icon_enabled(&app.handle(), status_icon_enabled)?;
             window::reveal_main_window(&app.handle())?;
             Ok(())
         })
@@ -42,7 +44,7 @@ pub fn run() {
             plex::clear_cache,
             plex::report_timeline,
             plex::scrobble,
-            plex::set_close_behavior,
+            plex::set_status_icon_enabled,
             plex::set_device_name,
             plex::set_brand_preset,
             window::show_main_window,
