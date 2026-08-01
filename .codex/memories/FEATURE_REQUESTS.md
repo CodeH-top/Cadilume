@@ -79,6 +79,35 @@
 
 按 R14 先以曲目歌手与专辑歌手不同的真实只读 PMS 元数据定义字段契约，再将曲目级歌手无损贯穿归一、显示、队列、播放器、Media Session 与恢复快照；专辑歌手永不覆盖曲目歌手，链接解析只决定可点击性。
 
+## [FR-20260801-003] History Back 滚动连续性与路由缓存
+
+**Logged**: 2026-08-01T15:57:40+08:00
+**Priority**: high
+**Status**: pending
+**Area**: frontend
+
+### Metadata
+
+- Source: user_feedback
+- Scope: project
+- Pattern-Key: cadilume.routing.history-scroll-cache
+- Recurrence-Count: 1
+- First-Seen: 2026-08-01
+- Last-Seen: 2026-08-01
+- Related Files: /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.css, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/libraryRoute.ts, /Users/hoganchou/Documents/Work/Project/AI/cadilume/docs/NEXT_DEVELOPMENT_PLAN_2026-07-29.md
+
+### Requested Capability
+
+歌手列表滚动后进入歌手详情，再通过返回回到列表时，必须像正常 History Back 一样立即停在原位置，不能先归零或再滚动一次；路由切换需要真实缓存，而非只保存一个 hash 对应的滚动数字。
+
+### User Context
+
+用户观察到返回歌手列表时滚动条会再次移动，质疑当前是否实际完成“路由切换加缓存”。源码确认现有实现只以 route hash 保存 `scrollTop`，详情切换重挂 `.route-content`，恢复过程还受 CSS 平滑滚动影响，且没有该时序的测试。
+
+### Suggested Implementation
+
+按 R15 以 History entry id + scroll state 管理每次导航，缓存列表数据与视图状态，进入 / 返回前同步保存，目标内容提交前无动画恢复；将平滑滚动仅限用户显式锚点操作，并覆盖应用 Back、浏览器 Back / Forward、缓存失效和真实 Tauri 验收。
+
 ## 暗色开关可见性、主题封面稳定与页面标题统一（R9，R8 后、L1/L2 前）
 
 - 修复暗色关闭态开关的轨道、边框和滑块对比，浅 / 深 × 琥珀金、雨林绿、澄海蓝均需清晰可辨；保留开关可访问性与交互状态，不以竖线或无意义小字补救。
@@ -113,4 +142,4 @@
 ## 2026-08-01 — 已完成归档、用户验收重开项与剩余平台功能
 
 - 跨设备播放历史已按用户决定从产品、UI、IPC、PMS 请求和持久化中移除；它既不是已完成能力，也不再作为待开发 Feature。两态主题、固定琥珀金 / 雨林绿 / 澄海蓝预设、纯唱片 Logo、macOS Dock 图标逻辑，以及 provider adapter 边界均已进入已完成计划记录。
-- R8–R12 已有工程实现和此前验证记录，但用户于 2026-08-01 实测重开了两项：推荐 / 歌曲标题字号与歌手介绍层级（R13），以及曲目级多歌手字段映射（R14）。尤其 R12 的多歌手不能因旧 `Role` / `Contributor` 夹具通过而标为完成；下一轮先执行 R14，再执行 R13，并在唯一真实开发态复验。之后才是必须单独立项的 Plex Companion controller / receiver（L1）和 Emby / Jellyfin 实际认证、浏览、播放与歌词接入（L2）。现有配色、Logo 或 adapter 接口均不代表这些服务已支持。
+- R8–R12 已有工程实现和此前验证记录，但用户于 2026-08-01 实测重开了三项：推荐 / 歌曲标题字号与歌手介绍层级（R13）、曲目级多歌手字段映射（R14），以及 History Back 的滚动连续性与路由缓存（R15）。尤其 R12 的多歌手不能因旧 `Role` / `Contributor` 夹具通过而标为完成，R1 的 hash-map 滚动尝试也不能视为路由缓存；下一轮依序执行 R14、R15、R13，并在唯一真实开发态复验。之后才是必须单独立项的 Plex Companion controller / receiver（L1）和 Emby / Jellyfin 实际认证、浏览、播放与歌词接入（L2）。现有配色、Logo 或 adapter 接口均不代表这些服务已支持。

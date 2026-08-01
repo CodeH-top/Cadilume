@@ -10,6 +10,36 @@
 - 用户实测纠正：即使 `Role` / `Contributor` 夹具、链接解析和恢复快照测试通过，真实多歌手曲目仍可能因未读取曲目自身的“歌曲歌手”字段而退化成单歌手。不要将这些局部回归当作真实 PMS 字段映射已闭环的证据。
 - 后续先用“曲目歌手与专辑歌手不同”的已授权只读 raw PMS 元数据建立字段契约；曲目级歌手必须优先、无损贯穿所有显示与持久化路径，专辑歌手不能覆盖它。`grandparentTitle` 等层级字段的实际语义须以该契约验证，不能按字段名或演示数据猜测。
 
+## [LRN-20260801-001] 嵌套滚动的 History Back 必须绑定历史条目
+
+**Logged**: 2026-08-01T15:57:40+08:00
+**Priority**: high
+**Status**: pending
+**Area**: frontend
+
+### Metadata
+
+- Source: user_feedback
+- Scope: project
+- Pattern-Key: cadilume.routing.history-scroll-cache
+- Recurrence-Count: 1
+- First-Seen: 2026-08-01
+- Last-Seen: 2026-08-01
+- Related Files: /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.css
+- See Also: FR-20260801-003
+
+### Summary
+
+按 route hash 保存嵌套滚动位置不等于 History Back 缓存；条目身份、内容缓存和无动画恢复必须一起闭环。
+
+### Details
+
+`routeContent` 在详情切换时会重挂，reactive route key 又可能让旧 DOM 的 scroll event 写入新路由；`scrollTo({ behavior: "auto" })` 在声明 `scroll-behavior: smooth` 的元素上还会产生可见动画。因此旧实现即使有 `Map<hash, scrollTop>`，仍可能先归零后再滑回。
+
+### Suggested Action
+
+以 History entry id 持久化 scroll state，离开前同步快照并在缓存内容提交前直接、无动画恢复；滚动监听绑定 DOM 实例的固定 entry id，平滑滚动只用于用户主动锚点操作，并以 app Back / browser Back / Forward 的时序回归证明行为。
+
 ## 2026-08-01 — 全局通知队列的 presence、暂停计时与可访问性堆叠
 
 - 通知不能再由一个可覆盖的字符串状态承载：每项需有稳定 ID、创建顺序、剩余时长及 `entering / visible / leaving` phase；自动关闭计时器和退出卸载计时器独立管理，暂停时按 deadline 计算剩余时长，恢复后只继续未耗尽部分。
