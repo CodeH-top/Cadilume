@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTracksPage, normalizePlexContributors, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
+import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -82,6 +82,21 @@ describe("PMS structured contributors", () => {
       { name: "Mira Lin", ratingKey: "artist-2" },
       { name: "Guest Artist", ratingKey: undefined },
     ]);
+  });
+
+  it("keeps multi-artist preview metadata intact when the demo track is resolved again", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: { search: "?multi-artist-preview=1" } },
+    });
+
+    await expect(getTrackMetadata("demo-server", "track-0")).resolves.toMatchObject({
+      contributors: [
+        { name: "The Paper Moons", ratingKey: "artist-0" },
+        { name: "Kobe Bryant" },
+        { name: "AC/DC" },
+      ],
+    });
   });
 });
 
@@ -230,6 +245,22 @@ describe("Plex library sorting", () => {
       query: {},
     });
     await expect(getLibraryMetadata("server-a", "../unsafe")).rejects.toThrow("无效的 Plex 媒体标识");
+  });
+
+  it("keeps generated artist-density fixtures navigable in the browser demo", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: { search: "?artist-preview=36" } },
+    });
+
+    const artists = await getLibraryItems("demo-server", "1", 8);
+    const fixture = artists.find((item) => item.ratingKey === "artist-fixture-1");
+
+    expect(fixture).toMatchObject({ title: "Aster Artist 01" });
+    await expect(getLibraryMetadata("demo-server", "artist-fixture-1")).resolves.toMatchObject({
+      ratingKey: "artist-fixture-1",
+      title: "Aster Artist 01",
+    });
   });
 
   it("rejects an unsafe artist identifier before requesting PMS", async () => {

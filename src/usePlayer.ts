@@ -2,7 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { acknowledgeQuit, isDesktopRuntime } from "./api";
 import { plexMusicGateway } from "./musicGateway";
-import { trackAlbum, trackArtist, type PlexItem, type StreamQuality } from "./types";
+import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
 
 export type RepeatMode = "off" | "all" | "one";
 
@@ -31,6 +31,7 @@ export interface PersistedPlaybackTrack {
   parentRatingKey?: string;
   grandparentTitle?: string;
   grandparentRatingKey?: string;
+  contributors?: PlexContributor[];
   duration?: number;
   year?: number;
   index?: number;
@@ -69,6 +70,16 @@ function safePersistedPath(value: unknown): string | undefined {
   return value;
 }
 
+function compactPersistedContributors(value: readonly PlexContributor[] | undefined): PlexContributor[] | undefined {
+  const contributors = value?.flatMap((contributor) => {
+    const name = typeof contributor?.name === "string" ? contributor.name.trim() : "";
+    if (!name || name.length > 2_048) return [];
+    const ratingKey = safePersistedPath(contributor.ratingKey);
+    return [{ name, ...(ratingKey ? { ratingKey } : {}) }];
+  });
+  return contributors?.length ? contributors : undefined;
+}
+
 function compactPersistedTrack(item: PlexItem): PersistedPlaybackTrack | null {
   if (!item || item.type !== "track") return null;
   const ratingKey = safePersistedPath(item.ratingKey);
@@ -91,6 +102,8 @@ function compactPersistedTrack(item: PlexItem): PersistedPlaybackTrack | null {
   copyString("grandparentRatingKey");
   copyString("thumb");
   copyString("art");
+  const contributors = compactPersistedContributors(item.contributors);
+  if (contributors) compact.contributors = contributors;
 
   for (const name of ["duration", "year", "index", "parentIndex"] as const) {
     const value = item[name];
@@ -122,6 +135,7 @@ function restorePersistedTrack(value: unknown): PersistedPlaybackTrack | null {
     parentRatingKey: value.parentRatingKey,
     grandparentTitle: value.grandparentTitle,
     grandparentRatingKey: value.grandparentRatingKey,
+    contributors: value.contributors,
     duration: value.duration,
     year: value.year,
     index: value.index,

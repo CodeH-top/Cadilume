@@ -161,6 +161,30 @@ describe("persisted playback session", () => {
     expect(session?.queue[1].title).toBe("Track 1 (second occurrence)");
   });
 
+  it("preserves structured contributor order while restoring a compact queue", () => {
+    const collaborativeTrack: PlexItem = {
+      ...track(1),
+      contributors: [
+        { name: "Mira Lin", ratingKey: "artist-2" },
+        { name: "Kobe Bryant" },
+        { name: "AC/DC" },
+      ],
+    };
+    const session = createPersistedPlaybackSession({
+      serverId: "server-a",
+      quality: "auto",
+      queue: [collaborativeTrack],
+      currentIndex: 0,
+      progress: 0,
+      shuffle: false,
+      repeat: "off",
+      updatedAt: 1_000,
+    });
+
+    expect(session?.queue[0].contributors).toEqual(collaborativeTrack.contributors);
+    expect(parsePersistedPlaybackSession(JSON.stringify(session), 1_000)?.queue[0].contributors).toEqual(collaborativeTrack.contributors);
+  });
+
   it("rejects tampered, stale, mismatched, and invalid-index records", () => {
     const now = 10_000_000;
     const valid = createPersistedPlaybackSession({

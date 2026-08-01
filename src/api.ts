@@ -323,7 +323,7 @@ export async function getLibraryMetadata(serverId: string, ratingKey: string): P
     throw new Error("无效的 Plex 媒体标识");
   }
   if (!isDesktopRuntime()) {
-    const item = [...demoArtists, ...demoAlbums, ...demoLibraryTracks()].find((candidate) => candidate.ratingKey === ratingKey);
+    const item = [...demoLibraryArtists(), ...demoAlbums, ...demoLibraryTracks()].find((candidate) => candidate.ratingKey === ratingKey);
     if (!item) throw new Error("演示资料库中找不到该项目");
     return item;
   }
@@ -568,7 +568,7 @@ export async function getTrackMetadata(serverId: string, ratingKey: string): Pro
     throw new Error("无效的 Plex 歌曲标识");
   }
   if (!isDesktopRuntime()) {
-    const track = demoTracks.find((item) => item.ratingKey === ratingKey);
+    const track = demoLibraryTracks().find((item) => item.ratingKey === ratingKey);
     if (!track) throw new Error("演示资料库中找不到这首歌曲");
     return track;
   }
