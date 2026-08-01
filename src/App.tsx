@@ -1649,7 +1649,7 @@ function RecommendationsView({
   };
   return (
     <section className="recommendations-page">
-      <div className="page-heading"><h1>推荐</h1></div>
+      <div className="page-heading sticky-page-heading"><h1>推荐</h1></div>
       {!recentPlaylists.length && !orderedHubs.length ? (
         <EmptyState title="还没有推荐内容" description="开始播放音乐后，这里会显示最近播放和服务器推荐。" icon={<Music2 size={28} />} />
       ) : (
@@ -2271,7 +2271,7 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
   if (error) return <EmptyState title="无法读取歌曲" description={error} icon={<TriangleAlert size={28} />} />;
   return (
     <section className="track-section has-accent-heading paginated-track-section" aria-busy={loading || undefined}>
-      <div className="page-heading"><div><h1>歌曲</h1><p>{totalSize ? `共 ${totalSize} 首歌曲` : loading ? "正在读取歌曲…" : "当前资料库没有歌曲"}</p></div>{selectedRatingKeys.size > 0 && <span className="track-selection-summary">已选择 {selectedRatingKeys.size} 首</span>}</div>
+      <div className="page-heading sticky-page-heading"><div><h1>歌曲</h1><p>{totalSize ? `共 ${totalSize} 首歌曲` : loading ? "正在读取歌曲…" : "当前资料库没有歌曲"}</p></div>{selectedRatingKeys.size > 0 && <span className="track-selection-summary">已选择 {selectedRatingKeys.size} 首</span>}</div>
       {loading && !tracks.length ? <LoadingState /> : tracks.length ? (
         <>
           <TrackTableGrid label="歌曲" tracks={tracks} artists={artists} totalSize={totalSize} sort={sort} onSort={updateSort} onOpenArtist={onOpenArtist} onPlay={onPlay} startIndex={start} selection={{ selectedRatingKeys, onToggleTrack: toggleTrack, onTogglePage: togglePage }} />
@@ -2321,7 +2321,7 @@ function SettingsView(props: ContentViewProps) {
   const cacheDescription = props.cacheStatus ? `${props.cacheStatus.fileCount} 个缓存文件` : undefined;
   return (
     <div className="settings-page">
-      <div className="page-heading"><h1>设置</h1></div>
+      <div className="page-heading sticky-page-heading"><h1>设置</h1></div>
       <SettingsGroup icon={<Palette size={18} />} title="视觉风格">
         <div className="field-row">
           <span><strong>配色</strong><small>仅更改配色，不连接服务。</small></span>
@@ -3420,6 +3420,38 @@ function applyAppearance({ theme, brand }: AppearanceState) {
   applyBrandPreset(brand);
 }
 
+function preserveSnapshotScrollAndMediaGeometry(appRoot: HTMLElement, snapshot: HTMLElement) {
+  const sourceElements = [appRoot, ...Array.from(appRoot.querySelectorAll<HTMLElement>("*"))];
+  const snapshotElements = [snapshot, ...Array.from(snapshot.querySelectorAll<HTMLElement>("*"))];
+  const count = Math.min(sourceElements.length, snapshotElements.length);
+
+  for (let index = 0; index < count; index += 1) {
+    const source = sourceElements[index];
+    const copy = snapshotElements[index];
+    if (source.scrollTop || source.scrollLeft) {
+      copy.scrollTop = source.scrollTop;
+      copy.scrollLeft = source.scrollLeft;
+    }
+
+    if (!source.matches("img, video, .artwork, .avatar")) continue;
+    const bounds = source.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) continue;
+    const style = window.getComputedStyle(source);
+    copy.style.width = `${bounds.width}px`;
+    copy.style.height = `${bounds.height}px`;
+    copy.style.minWidth = `${bounds.width}px`;
+    copy.style.minHeight = `${bounds.height}px`;
+    copy.style.maxWidth = `${bounds.width}px`;
+    copy.style.maxHeight = `${bounds.height}px`;
+    copy.style.objectFit = style.objectFit;
+    copy.style.objectPosition = style.objectPosition;
+    copy.style.filter = style.filter;
+    copy.style.transform = style.transform;
+    copy.style.transition = "none";
+    copy.style.animation = "none";
+  }
+}
+
 function createAppearanceSnapshot(appearance: AppearanceState) {
   const appRoot = document.getElementById("root");
   if (!appRoot) return;
@@ -3438,6 +3470,7 @@ function createAppearanceSnapshot(appearance: AppearanceState) {
   for (const variable of APPEARANCE_SNAPSHOT_VARIABLES) {
     snapshot.style.setProperty(variable, rootStyle.getPropertyValue(variable));
   }
+  preserveSnapshotScrollAndMediaGeometry(appRoot, snapshot);
   snapshot.querySelectorAll("audio, video").forEach((media) => media.remove());
   snapshot.querySelectorAll(".route-content.is-route-entering").forEach((content) => content.classList.remove("is-route-entering"));
   snapshot.querySelectorAll<HTMLElement>(".now-playing-view:not([data-theme])").forEach((view) => {
