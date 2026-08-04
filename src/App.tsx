@@ -81,6 +81,7 @@ import {
   showMainWindow,
 } from "./api";
 import "./App.css";
+import { ARTIST_BIOGRAPHY_COLLAPSE_LINES, normalizeArtistBiography, previewArtistBiography, shouldCollapseArtistBiography } from "./artistBiography";
 import { appendUniqueArtistTracks } from "./artistTracks";
 import { selectRandomContextPlayback } from "./contextPlayback";
 import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
@@ -260,6 +261,10 @@ function detailTypeForItem(item: PlexItem): LibraryDetailType | undefined {
   if (item.type === "artist") return "artist";
   if (item.type === "album") return "album";
   return undefined;
+}
+
+function LibraryPageTitle({ children }: { children: ReactNode }) {
+  return <h1 className="library-page-title">{children}</h1>;
 }
 
 function App() {
@@ -1812,7 +1817,7 @@ function RecommendationsView({
   };
   return (
     <section className="recommendations-page">
-      <div className="page-heading sticky-page-heading"><h1>推荐</h1></div>
+      <div className="page-heading sticky-page-heading"><LibraryPageTitle>推荐</LibraryPageTitle></div>
       {!recentPlaylists.length && !orderedHubs.length ? (
         <EmptyState title="还没有推荐内容" description="开始播放音乐后，这里会显示最近播放和服务器推荐。" icon={<Music2 size={28} />} />
       ) : (
@@ -1939,7 +1944,7 @@ function CardCollection({ title, items, round = false, compact = false, artistGr
 
   return (
     <section className={`collection-section ${indexed ? "indexed-collection-section" : ""}`}>
-      <div className="section-heading"><h1>{title}</h1></div>
+      <div className="section-heading"><LibraryPageTitle>{title}</LibraryPageTitle></div>
       {items.length ? (
         indexed ? (
           <div className="indexed-collection-layout">
@@ -1978,7 +1983,6 @@ function ArtistAvatarGrid({ items, onOpen }: { items: PlexItem[]; onOpen: (item:
         <button className="artist-avatar-card" type="button" key={item.ratingKey} onClick={() => onOpen(item)}>
           <Artwork item={item} className="round" size="large" />
           <strong>{item.title}</strong>
-          <small>{item.summary || "歌手"}</small>
         </button>
       ))}
     </div>
@@ -2041,6 +2045,52 @@ function DetailView({ detail, serverId, artists, onBack, onPlay, onShuffle, onOp
 
 type ArtistDetailTab = "albums" | "tracks";
 
+function ArtistBiography({ summary, id }: { summary?: string; id: string }) {
+  const biography = normalizeArtistBiography(summary);
+  const contentRef = useRef<HTMLParagraphElement>(null);
+  const [collapsible, setCollapsible] = useState(() => shouldCollapseArtistBiography(biography));
+  const [expanded, setExpanded] = useState(false);
+  const headingId = `${id}-heading`;
+  const contentId = `${id}-content`;
+
+  useLayoutEffect(() => {
+    setExpanded(false);
+    const content = contentRef.current;
+    if (!biography || !content) {
+      setCollapsible(false);
+      return;
+    }
+
+    const measure = () => {
+      const lineHeight = Number.parseFloat(window.getComputedStyle(content).lineHeight);
+      const collapsedHeight = lineHeight * ARTIST_BIOGRAPHY_COLLAPSE_LINES;
+      setCollapsible(Number.isFinite(collapsedHeight) && content.scrollHeight > collapsedHeight + 1);
+    };
+
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [biography]);
+
+  return (
+    <aside className={`artist-biography ${biography ? "" : "is-empty"}`.trim()} aria-labelledby={headingId}>
+      <h2 id={headingId}>个人资料</h2>
+      {biography ? (
+        <>
+          <p ref={contentRef} id={contentId} className={collapsible && !expanded ? "is-collapsed" : undefined} style={{ "--artist-biography-line-limit": ARTIST_BIOGRAPHY_COLLAPSE_LINES } as CSSProperties}>{biography}</p>
+          {collapsible && <button className="artist-biography-toggle" type="button" aria-expanded={expanded} aria-controls={contentId} onClick={() => setExpanded((value) => !value)}>{expanded ? "收起" : "展开全部"}</button>}
+        </>
+      ) : <p>暂无可用简介。</p>}
+    </aside>
+  );
+}
+
 function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArtist, onPlayTrack }: {
   detail: { source: PlexItem; children: PlexItem[] };
   serverId?: string;
@@ -2066,6 +2116,10 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
   const totalSizeRef = useRef<number | undefined>(undefined);
   const tabIdBase = `artist-${detail.source.ratingKey.replace(/[^A-Za-z0-9_-]/g, "-")}`;
   const hasMoreTracks = totalSize === undefined || tracks.length < totalSize;
+  const biographyPreview = import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get("artist-bio-preview")
+    : null;
+  const artistBiography = previewArtistBiography(detail.source.summary, biographyPreview);
 
   const loadNextTrackPage = useCallback(async () => {
     if (!serverId || loadingRef.current) return;
@@ -2144,10 +2198,13 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
   return (
     <section className="detail-page artist-detail-page">
       <button className="back-button artist-back-button" type="button" onClick={onBack}><ArrowLeft size={18} strokeWidth={2} />返回歌手列表</button>
-      <header className="detail-hero artist-detail-hero">
-        <Artwork item={detail.source} size="hero" className="round" />
-        <div><h1>{detail.source.title}</h1><p>歌手</p></div>
-      </header>
+      <div className="artist-detail-overview">
+        <header className="detail-hero artist-detail-hero">
+          <Artwork item={detail.source} size="hero" className="round" />
+          <div><h1>{detail.source.title}</h1><p>歌手</p></div>
+        </header>
+        <ArtistBiography id={`${tabIdBase}-biography`} summary={artistBiography} />
+      </div>
       <div className="artist-detail-tabs" role="tablist" aria-label={`${detail.source.title}内容`}>
         <button
           ref={albumsTabRef}
@@ -2450,7 +2507,7 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
   if (error) return <EmptyState title="无法读取歌曲" description={error} icon={<TriangleAlert size={28} />} />;
   return (
     <section className="track-section has-accent-heading paginated-track-section" aria-busy={loading || undefined}>
-      <div className="page-heading sticky-page-heading"><div><h1>歌曲</h1><p>{totalSize ? `共 ${totalSize} 首歌曲` : loading ? "正在读取歌曲…" : "当前资料库没有歌曲"}</p></div>{selectedRatingKeys.size > 0 && <span className="track-selection-summary">已选择 {selectedRatingKeys.size} 首</span>}</div>
+      <div className="page-heading sticky-page-heading"><div><LibraryPageTitle>歌曲</LibraryPageTitle><p>{totalSize ? `共 ${totalSize} 首歌曲` : loading ? "正在读取歌曲…" : "当前资料库没有歌曲"}</p></div>{selectedRatingKeys.size > 0 && <span className="track-selection-summary">已选择 {selectedRatingKeys.size} 首</span>}</div>
       {loading && !tracks.length ? <LoadingState /> : tracks.length ? (
         <>
           <TrackTableGrid label="歌曲" tracks={tracks} artists={artists} totalSize={totalSize} sort={sort} onSort={updateSort} onOpenArtist={onOpenArtist} onPlay={onPlay} startIndex={start} selection={{ selectedRatingKeys, onToggleTrack: toggleTrack, onTogglePage: togglePage }} />

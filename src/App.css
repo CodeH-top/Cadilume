@@ -298,6 +298,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .detail-hero + .track-section { margin-top: 20px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .section-heading h1 { font-size: 20px; }
+.page-heading .library-page-title, .section-heading .library-page-title { margin: 0; font-family: inherit; font-size: 20px; font-weight: 700; line-height: 1.12; letter-spacing: -0.035em; }
 .indexed-collection-section > .section-heading { position: sticky; z-index: 6; top: -24px; min-height: 66px; align-items: flex-end; margin: -24px -28px 12px; border-bottom: 0; padding: 24px 28px 16px; background: color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter: saturate(150%) blur(16px); -webkit-backdrop-filter: saturate(150%) blur(16px); }
 .indexed-collection-section > .section-heading::after { content: ""; position: absolute; right: calc(28px + 24px + 14px); bottom: 0; left: 28px; height: 1px; background: var(--border-strong); }
 .indexed-collection-section > .section-heading h1 { color: var(--accent); }
@@ -317,15 +318,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .media-card small { width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 12px; transition: color 170ms ease; }
 .media-card:hover strong, .media-card:focus-visible strong { color: var(--accent); }
 .media-card:hover small, .media-card:focus-visible small { color: var(--muted-strong); }
-.artist-avatar-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(102px, 1fr)); gap: 18px 12px; }
-.artist-avatar-card { min-width: 0; display: grid; justify-items: center; gap: 4px; border: 0; padding: 0; background: transparent; color: inherit; text-align: center; }
+.artist-avatar-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(102px, 1fr)); gap: 16px 12px; }
+.artist-avatar-card { min-width: 0; display: grid; justify-items: center; gap: 6px; border: 0; padding: 0; background: transparent; color: inherit; text-align: center; }
 .artist-avatar-card .artwork-large { width: min(100%, 112px); margin-bottom: 1px; border-radius: 50%; }
-.artist-avatar-card strong, .artist-avatar-card small { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.artist-avatar-card strong { color: var(--text); font-size: 13px; transition: color 170ms ease; }
-.artist-avatar-card small { color: var(--muted); font-size: 11px; transition: color 170ms ease; }
+.artist-avatar-card strong { width: 100%; overflow: hidden; color: var(--text); font-size: 13px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; transition: color 170ms ease; }
 .artist-avatar-card:hover .artwork-large, .artist-avatar-card:focus-visible .artwork-large { border-color: color-mix(in srgb, var(--accent) 52%, var(--border-strong)); box-shadow: var(--media-shadow-hover); transform: translateY(-1px) scale(1.01); }
 .artist-avatar-card:hover strong, .artist-avatar-card:focus-visible strong { color: var(--accent); }
-.artist-avatar-card:hover small, .artist-avatar-card:focus-visible small { color: var(--muted-strong); }
 .recommendation-sections { display: grid; gap: 32px; }
 .recommendation-section { min-width: 0; }
 .recommendation-section .section-heading { margin-bottom: 14px; }
@@ -375,6 +373,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .artist-detail-hero .artwork-hero { width: 144px; height: 144px; box-shadow: 0 0 0 0.5px var(--border-strong), 0 10px 26px rgba(0, 0, 0, 0.22), 0 22px 44px rgba(0, 0, 0, 0.1); }
 .artist-detail-hero > div { padding-bottom: 0; }
 .artist-detail-hero h1 { font-size: clamp(25px, 2.4vw, 34px); }
+.artist-detail-overview { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(288px, 0.72fr); align-items: stretch; gap: 28px; }
+.artist-biography { min-width: 0; min-height: 144px; display: grid; align-content: start; gap: 9px; border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; background: color-mix(in srgb, var(--panel) 92%, var(--surface-deep)); box-shadow: inset 0 1px color-mix(in srgb, var(--border) 58%, transparent); }
+.artist-biography h2 { margin: 0; color: var(--muted); font-size: 12px; font-weight: 750; letter-spacing: 0.08em; line-height: 1.25; text-transform: uppercase; }
+.artist-biography p { margin: 0; color: var(--muted-strong); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-line; }
+.artist-biography p.is-collapsed { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: var(--artist-biography-line-limit); }
+.artist-biography.is-empty p { color: var(--muted); }
+.artist-biography-toggle { width: fit-content; min-height: 28px; border: 0; border-radius: 6px; padding: 3px 7px; background: transparent; color: var(--accent); font-size: 12px; font-weight: 700; line-height: 1.2; transition: color 150ms ease, background 150ms ease; }
+.artist-biography-toggle:hover { background: var(--accent-soft); color: var(--text); }
 .artist-detail-tabs { width: fit-content; display: inline-grid; grid-template-columns: repeat(2, minmax(82px, 1fr)); gap: 3px; margin: 22px 0 18px; border: 1px solid var(--border); border-radius: 9px; padding: 3px; background: var(--surface-deep); box-shadow: inset 0 1px rgba(255, 255, 255, 0.025); }
 .artist-detail-tabs button { min-width: 82px; height: 32px; border: 0; border-radius: 6px; padding: 0 14px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 650; transition: color 150ms ease, background 150ms ease, box-shadow 150ms ease; }
 .artist-detail-tabs button:hover { color: var(--text); background: var(--hover-fill); }
@@ -803,6 +809,7 @@ button.device-option:hover { border-color: var(--border-strong); background: var
   .lyrics-panel { width: min(720px, calc(100% - 32px)); }
 }
 @media (max-width: 980px) {
+  .artist-detail-overview { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .track-row { grid-template-columns: 30px 40px minmax(180px, 1.1fr) minmax(120px, 0.8fr) var(--track-duration-column); }
   .track-row > :nth-child(5) { display: none; }
   .track-table.has-selection .track-row { grid-template-columns: 24px 30px 40px minmax(180px, 1.1fr) minmax(120px, 0.8fr) var(--track-duration-column); }
