@@ -242,15 +242,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .icon-button.active:hover:not(:disabled) { color: var(--accent); background: var(--panel-hover); }
 .icon-button:disabled { cursor: not-allowed; opacity: 0.38; }
 .content { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
-.route-content { position: relative; min-width: 0; min-height: 100%; height: 100%; overflow-x: hidden; overflow-y: auto; box-sizing: border-box; padding: 24px 28px 40px; scroll-behavior: smooth; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted-faint) 58%, transparent) transparent; }
-.route-content::-webkit-scrollbar { width: 8px; }
-.route-content::-webkit-scrollbar-track { background: transparent; }
-.route-content::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 99px; background-clip: padding-box; background-color: color-mix(in srgb, var(--muted-faint) 58%, transparent); }
-.route-content:hover::-webkit-scrollbar-thumb, .route-content:focus-within::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--muted) 72%, transparent); }
-.route-content.is-route-entering { animation: route-content-reveal 230ms cubic-bezier(0.2, 0.72, 0.24, 1); }
-.route-content.is-route-entering::before { position: absolute; z-index: 7; top: 0; left: 28px; width: min(240px, 38%); height: 2px; border-radius: 99px; content: ""; pointer-events: none; background: linear-gradient(90deg, transparent, var(--accent), transparent); box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 54%, transparent); animation: route-content-signal 260ms cubic-bezier(0.2, 0.72, 0.24, 1); }
-.content.is-route-pending .route-content { pointer-events: none; }
-.content.is-route-pending::before { content: ""; position: absolute; z-index: 4; top: 0; left: 28px; display: block; width: 28%; height: 2px; border-radius: 99px; background: linear-gradient(90deg, transparent, var(--accent), transparent); animation: route-progress 900ms ease-in-out infinite; pointer-events: none; }
+.keep-alive-render { position: relative; min-width: 0; min-height: 0; height: 100%; overflow: hidden; }
+.route-cache-host { min-width: 0; min-height: 0; height: 100%; }
+.cadilume-route-cache { position: absolute; inset: 0; min-width: 0; min-height: 0; height: 100%; overflow: hidden; }
+.cadilume-route-cache.active { z-index: 1; }
+.cadilume-route-cache.inactive { z-index: 0; display: none; }
+.route-page-scroll { position: relative; min-width: 0; min-height: 100%; height: 100%; overflow-x: hidden; overflow-y: auto; box-sizing: border-box; padding: 24px 28px 40px; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted-faint) 58%, transparent) transparent; }
+.route-page-scroll::-webkit-scrollbar { width: 8px; }
+.route-page-scroll::-webkit-scrollbar-track { background: transparent; }
+.route-page-scroll::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 99px; background-clip: padding-box; background-color: color-mix(in srgb, var(--muted-faint) 58%, transparent); }
+.route-page-scroll:hover::-webkit-scrollbar-thumb, .route-page-scroll:focus-within::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--muted) 72%, transparent); }
 .source-sync-overlay { position: fixed; z-index: var(--z-source-sync); inset: 0; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, var(--bg) 68%, transparent); backdrop-filter: saturate(125%) blur(6px); -webkit-backdrop-filter: saturate(125%) blur(6px); animation: source-sync-overlay-in 160ms ease-out; }
 .source-sync-overlay-panel { min-width: 238px; min-height: 54px; display: flex; align-items: center; justify-content: center; gap: 10px; border: 1px solid var(--border-strong); border-radius: 12px; padding: 12px 18px; background: var(--panel); color: var(--text); box-shadow: 0 18px 54px rgba(0, 0, 0, 0.28); font-size: 13px; font-weight: 650; }
 .source-sync-overlay-panel svg { flex: 0 0 auto; color: var(--accent); }
@@ -783,8 +784,6 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 @keyframes global-notification-fade-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes source-sync-overlay-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes select-in { from { opacity: 0; transform: translateY(-4px) scale(0.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
-@keyframes route-content-reveal { from { opacity: 0; clip-path: inset(0 0 0 24px); transform: translateX(14px); } 62% { opacity: 1; } to { opacity: 1; clip-path: inset(0); transform: translateX(0); } }
-@keyframes route-content-signal { from { opacity: 0; transform: translateX(-110%); } 28% { opacity: 1; } to { opacity: 0; transform: translateX(390%); } }
 @keyframes route-progress { 0%, 100% { opacity: 0.35; transform: translateX(0); } 50% { opacity: 1; transform: translateX(250%); } }
 @keyframes queue-panel-in { from { opacity: 0; transform: translateX(30px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes queue-panel-out { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(30px); } }
@@ -799,7 +798,7 @@ button.device-option:hover { border-color: var(--border-strong); background: var
   .player-bar { grid-template-columns: minmax(180px, 0.85fr) minmax(340px, 1.4fr) minmax(250px, 0.85fr); gap: 12px; padding-inline: 12px; }
   .player-extras { gap: 4px; }
   .player-extras > .icon-button { width: 28px; height: 28px; }
-  .route-content { padding-inline: 25px; }
+  .route-page-scroll { padding-inline: 25px; }
   .queue-panel { width: min(350px, calc(100vw - 32px)); }
   .lyrics-panel { width: min(720px, calc(100% - 32px)); }
 }
@@ -817,7 +816,7 @@ button.device-option:hover { border-color: var(--border-strong); background: var
   .playback-spinner { animation: none !important; }
   .media-card strong, .media-card small, .artwork-large { transition: none; }
   .media-card:hover .artwork-large, .media-card:focus-visible .artwork-large { transform: none; }
-  .route-content, .content.is-route-pending::before, .recommendation-play-indicator, .queue-panel, .lyrics-panel { animation: none; transition: none; }
+  .route-page-scroll, .recommendation-play-indicator, .queue-panel, .lyrics-panel { animation: none; transition: none; }
   .lyric-line, .lyric-line span { transition: none; }
   .lyric-line.is-active { transform: none; }
   .global-notification-item { transition: opacity 120ms ease !important; }

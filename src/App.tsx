@@ -47,6 +47,8 @@ import {
   X,
 } from "lucide-react";
 import * as Select from "@radix-ui/react-select";
+import { KeepAlive, type KeepAliveRef, useKeepAliveContext, useKeepAliveRef } from "keepalive-for-react";
+import { createHashRouter, Navigate, RouterProvider, useLocation, useNavigate, useOutlet } from "react-router-dom";
 import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import { flushSync } from "react-dom";
 import {
@@ -83,6 +85,7 @@ import { appendUniqueArtistTracks } from "./artistTracks";
 import { selectRandomContextPlayback } from "./contextPlayback";
 import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
 import { libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryRoute, type LibraryDetailType, type LibraryRoute } from "./libraryRoute";
+import { createCadilumeEntryState, historyEntryCacheKey, routeEntryId, routeParentEntryId } from "./routeEntry";
 import { hasDisplayableLyrics } from "./lyrics";
 import { getPlexLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
 import { playbackControlLabel, rangeFillPercent } from "./playerUi";
@@ -130,6 +133,8 @@ const BRAND_PRESET_OPTIONS: ReadonlyArray<{ preset: BrandPreset; label: string }
 ];
 
 const ArtworkServerContext = createContext<string | undefined>(undefined);
+const MusicShellContext = createContext<MusicShellRuntime | undefined>(undefined);
+const RouteEntryContext = createContext<RoutePageProps | undefined>(undefined);
 const artworkCache = new Map<string, Promise<string>>();
 const NOW_PLAYING_MODE_STORAGE_KEY = "cadilume-now-playing-mode";
 const PLAYBACK_SETTINGS_ID = "playback-settings";
@@ -143,6 +148,77 @@ type ThemeTransitionOrigin = { x: number; y: number };
 type ThemeModeChange = (mode: ThemeMode, origin?: ThemeTransitionOrigin) => void;
 type BrandPresetChange = (preset: BrandPreset, origin?: ThemeTransitionOrigin) => Promise<void>;
 type AppearanceState = { theme: ThemeMode; brand: BrandPreset };
+
+type MusicPlayer = ReturnType<typeof usePlayer>;
+
+interface MusicShellRuntime {
+  initialSession: BootstrapResponse;
+  account: PlexAccount;
+  themeMode: ThemeMode;
+  resolvedTheme: ResolvedTheme;
+  brandPreset: BrandPreset;
+  onThemeMode: ThemeModeChange;
+  onBrandPreset: BrandPresetChange;
+  searchText: string;
+  setSearchText: (value: string) => void;
+  servers: PlexServer[];
+  serverId?: string;
+  selectedServer?: PlexServer;
+  sections: LibrarySection[];
+  sectionKey?: string;
+  selectedSection?: LibrarySection;
+  libraryArtists: PlexItem[];
+  connectionAvailable: boolean;
+  expandedPlayerOpen: boolean;
+  playlists: PlexPlaylist[];
+  playlistListLoading: boolean;
+  playlistListError?: string;
+  loadPlaylistList: (announce?: boolean) => Promise<void>;
+  sourceRevision: number;
+  routeAliveRef: RefObject<KeepAliveRef | null>;
+  statusIconEnabled: boolean;
+  statusIconPlatform?: BootstrapResponse["statusIconPlatform"];
+  statusIconSaving: boolean;
+  deviceName: string;
+  quality: StreamQuality;
+  prebufferNext: boolean;
+  cacheStatus?: CacheStatus;
+  cacheStatusError?: string;
+  cacheBusy: boolean;
+  sourcesSyncing: boolean;
+  playbackSettingsRequest: number;
+  player: MusicPlayer;
+  notify: (message: string) => void;
+  playRecommendationItem: (item: PlexItem, context: PlexItem[]) => Promise<void>;
+  playRecommendationPlaylist: (playlist: PlexPlaylist) => Promise<void>;
+  changeStatusIconEnabled: (enabled: boolean) => Promise<void>;
+  changeBrandPreset: BrandPresetChange;
+  changeDeviceName: (nextDeviceName: string) => Promise<string>;
+  changeQuality: (value: StreamQuality) => void;
+  setServerId: (value: string) => void;
+  setSectionKey: (value: string) => void;
+  setPrebufferNext: (value: boolean) => void;
+  clearCache: () => Promise<void>;
+  syncSources: () => Promise<void>;
+  signOut: () => Promise<void>;
+  refreshCacheStatus: () => Promise<void>;
+  openDeviceNameDialog: () => void;
+  openPlaylistCreation: () => void;
+  setSidePanel: (value: "queue" | "lyrics" | "devices" | null) => void;
+  setPlaylistTrack: (track: PlexItem | undefined) => void;
+  setNowPlayingOpen: (open: boolean) => void;
+  setPlaybackSettingsRequest: React.Dispatch<React.SetStateAction<number>>;
+}
+
+function useMusicShellRuntime(): MusicShellRuntime {
+  const runtime = useContext(MusicShellContext);
+  if (!runtime) throw new Error("Cadilume 路由必须位于 MusicShellContext 内。");
+  return runtime;
+}
+
+function routePath(route: LibraryRoute): string {
+  return libraryRouteHash(route).replace(/^#/, "") || "/home";
+}
 
 function usePanelPresence(visible: boolean) {
   const [mounted, setMounted] = useState(visible);
@@ -356,22 +432,13 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 }) {
   const account = initialSession.account as PlexAccount;
   const [initialPlaybackSession] = useState(() => readPersistedPlaybackSession());
-  const [initialLibraryRoute] = useState(() => parseLibraryRoute(window.location.hash));
-  const [route, setRoute] = useState<LibraryRoute>(initialLibraryRoute);
   const [servers, setServers] = useState<PlexServer[]>([]);
   const [serverId, setServerId] = useState<string>();
   const [sections, setSections] = useState<LibrarySection[]>([]);
   const [sectionKey, setSectionKey] = useState<string>();
-  const [routeView, setRouteView] = useState<LibraryView>(initialLibraryRoute.view);
-  const [view, setView] = useState<LibraryView>(initialLibraryRoute.view);
-  const [routeTransitioning, setRouteTransitioning] = useState(false);
-  const [contentRevision, setContentRevision] = useState(0);
-  const [items, setItems] = useState<PlexItem[]>([]);
   const [libraryArtists, setLibraryArtists] = useState<PlexItem[]>([]);
-  const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
-  const [searchHubs, setSearchHubs] = useState<PlexHub[]>([]);
-  const [searchText, setSearchText] = useState(initialLibraryRoute.query || "");
-  const [loading, setLoading] = useState(true);
+  const [searchText, setSearchText] = useState("");
+  const [, setLoading] = useState(true);
   const {
     notices,
     notify,
@@ -387,11 +454,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [playlists, setPlaylists] = useState<PlexPlaylist[]>([]);
   const [playlistListLoading, setPlaylistListLoading] = useState(false);
   const [playlistListError, setPlaylistListError] = useState<string>();
-  const [selectedPlaylist, setSelectedPlaylist] = useState<PlexPlaylist>();
-  const [playlistItems, setPlaylistItems] = useState<PlexItem[]>([]);
-  const [playlistItemsLoading, setPlaylistItemsLoading] = useState(false);
-  const [playlistItemsError, setPlaylistItemsError] = useState<string>();
-  const [detail, setDetail] = useState<{ source: PlexItem; children: PlexItem[] }>();
   const [statusIconEnabled, setStatusIconEnabled] = useState(initialSession.statusIconEnabled);
   const [statusIconSaving, setStatusIconSaving] = useState(false);
   const [deviceName, setDeviceName] = useState(initialSession.deviceName);
@@ -400,19 +462,17 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [cacheStatusError, setCacheStatusError] = useState<string>();
   const [cacheBusy, setCacheBusy] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
+  const routeAliveRef = useKeepAliveRef();
+  const [routeCacheEpoch, setRouteCacheEpoch] = useState(0);
   const [sourcesSyncing, setSourcesSyncing] = useState(false);
   const [connectionAvailable, setConnectionAvailable] = useState(false);
   const [playbackSettingsRequest, setPlaybackSettingsRequest] = useState(0);
   const [playbackFailurePreview, setPlaybackFailurePreview] = useState<PlaybackFailure>();
-  const routeContentRef = useRef<HTMLDivElement>(null);
-  const routeScrollPositionsRef = useRef(new Map<string, number>());
   const nowPlayingTriggerRef = useRef<HTMLButtonElement>(null);
-  const loadedSectionRef = useRef<string | undefined>(undefined);
   const playlistListRequestRef = useRef(0);
-  const playlistItemsRequestRef = useRef(0);
-  const viewRequestRef = useRef(0);
   const artistDirectoryRequestRef = useRef(0);
   const cacheStatusRequestRef = useRef(0);
+  const previousRouteCacheContextRef = useRef<{ serverId: string; sectionKey: string } | undefined>(undefined);
   const preferredPlaybackServerId = initialPlaybackSession?.serverId;
   const player = usePlayer(serverId, quality);
   const outputDevices = useOutputDevices(player.setOutputSinkId);
@@ -470,17 +530,24 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     && new URLSearchParams(window.location.search).has("playback-error-preview");
   const previewPlaybackLoading = import.meta.env.DEV
     && new URLSearchParams(window.location.search).has("playback-loading-preview");
-  const requestedConnectionPreview = import.meta.env.DEV
-    ? new URLSearchParams(window.location.search).get("connection-preview")
-    : null;
-  const connectionPreview = ["local", "remote", "relay", "disconnected"].includes(requestedConnectionPreview || "")
-    ? requestedConnectionPreview as ConnectionKind
-    : undefined;
   const playbackLoading = player.loading || previewPlaybackLoading;
   const activePlaybackFailure = player.playbackFailure ?? playbackFailurePreview;
 
   const selectedServer = servers.find((server) => server.id === serverId);
   const selectedSection = sections.find((section) => section.key === sectionKey);
+
+  useLayoutEffect(() => {
+    const nextContext = serverId && sectionKey ? { serverId, sectionKey } : undefined;
+    const previousContext = previousRouteCacheContextRef.current;
+    const contextChanged = previousContext
+      && (!nextContext || previousContext.serverId !== nextContext.serverId || previousContext.sectionKey !== nextContext.sectionKey);
+
+    if (contextChanged) {
+      void routeAliveRef.current?.destroyAll();
+      setRouteCacheEpoch((epoch) => epoch + 1);
+    }
+    previousRouteCacheContextRef.current = nextContext;
+  }, [routeAliveRef, sectionKey, serverId]);
 
   useEffect(() => {
     const requestId = ++artistDirectoryRequestRef.current;
@@ -499,15 +566,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       if (artistDirectoryRequestRef.current === requestId) artistDirectoryRequestRef.current += 1;
     };
   }, [sectionKey, serverId, sourceRevision]);
-  const routeKey = libraryRouteHash(route);
-
-  useLayoutEffect(() => {
-    const element = routeContentRef.current;
-    if (!element) return;
-    const restoreTop = routeScrollPositionsRef.current.get(routeKey) ?? 0;
-    const frame = window.requestAnimationFrame(() => element.scrollTo({ top: restoreTop, behavior: "auto" }));
-    return () => window.cancelAnimationFrame(frame);
-  }, [contentRevision, routeKey]);
 
   useEffect(() => {
     if (!previewPlaybackFailure || !player.current) {
@@ -536,16 +594,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [queuePanelOpen]);
-
-  useEffect(() => {
-    if (view !== "settings" || playbackSettingsRequest === 0) return;
-    const frame = window.requestAnimationFrame(() => {
-      const section = document.getElementById(PLAYBACK_SETTINGS_ID);
-      section?.scrollIntoView({ block: "start", behavior: "smooth" });
-      section?.querySelector<HTMLSelectElement>("select")?.focus({ preventScroll: true });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [playbackSettingsRequest, view]);
 
   useEffect(() => {
     if (player.current) return;
@@ -644,146 +692,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   }, [notify, serverId]);
 
   useEffect(() => {
-    playlistItemsRequestRef.current += 1;
-    setSelectedPlaylist(undefined);
-    setPlaylistItems([]);
-    setPlaylistItemsError(undefined);
-    setPlaylistItemsLoading(false);
     void loadPlaylistList();
   }, [loadPlaylistList, sourceRevision]);
-
-  const loadView = useCallback(async (nextView: LibraryView, requestedSearchQuery?: string) => {
-    const shouldPlayRouteEntrance = nextView !== view || Boolean(detail || selectedPlaylist);
-    const requestId = ++viewRequestRef.current;
-    playlistItemsRequestRef.current += 1;
-    setRouteView(nextView);
-    setRouteTransitioning(true);
-
-    const commit = (nextItems?: PlexItem[], nextHomeHubs?: PlexHub[], nextSearchHubs?: PlexHub[]) => {
-      if (viewRequestRef.current !== requestId) return;
-      setSelectedPlaylist(undefined);
-      setPlaylistItems([]);
-      setPlaylistItemsError(undefined);
-      setPlaylistItemsLoading(false);
-      setDetail(undefined);
-      if (nextItems) setItems(nextItems);
-      if (nextHomeHubs) setHomeHubs(nextHomeHubs);
-      if (nextSearchHubs) setSearchHubs(nextSearchHubs);
-      setView(nextView);
-      if (shouldPlayRouteEntrance) setContentRevision((revision) => revision + 1);
-      setRouteTransitioning(false);
-    };
-
-    if (nextView === "settings") {
-      setSidePanel(null);
-      setLoading(false);
-      commit();
-      return;
-    }
-
-    const searchQuery = requestedSearchQuery?.trim() || "";
-    if (nextView === "search" && !searchQuery) {
-      setLoading(false);
-      commit(undefined, undefined, []);
-      return;
-    }
-
-    if (!serverId || !sectionKey) {
-      setLoading(false);
-      commit([], nextView === "home" ? [] : undefined, nextView === "search" ? [] : undefined);
-      return;
-    }
-
-    setLoading(true);
-    try {
-      if (nextView === "home") {
-        const [hubs, recentAlbums] = await Promise.all([
-          getRecommendationHubs(serverId, sectionKey),
-          getRecentAlbums(serverId, sectionKey),
-        ]);
-        const completeHubs = hubs.some(isRecentlyAddedHub) || !recentAlbums.length
-          ? hubs
-          : [...hubs, {
-            title: "最近加入的音乐",
-            type: "album",
-            identifier: "cadilume.recentlyadded",
-            items: recentAlbums,
-          }];
-        commit(recentAlbums, homeRecommendationHubs(completeHubs));
-      }
-      if (nextView === "albums") commit(await getLibraryItems(serverId, sectionKey, 9));
-      if (nextView === "artists") {
-        const artists = await getLibraryItems(serverId, sectionKey, 8);
-        if (viewRequestRef.current === requestId) setLibraryArtists(artists);
-        commit(artists);
-      }
-      if (nextView === "tracks") commit([]);
-      if (nextView === "search") commit(undefined, undefined, await searchLibrary(serverId, sectionKey, searchQuery));
-      if (viewRequestRef.current === requestId) setConnectionAvailable(true);
-    } catch (reason) {
-      if (viewRequestRef.current === requestId) {
-        setConnectionAvailable(false);
-        notify(reason instanceof Error ? reason.message : String(reason));
-        commit([], nextView === "home" ? [] : undefined, nextView === "search" ? [] : undefined);
-      }
-    } finally {
-      if (viewRequestRef.current === requestId) setLoading(false);
-    }
-  }, [detail, notify, sectionKey, selectedPlaylist, serverId, view]);
-
-  useEffect(() => {
-    if (!sectionKey || loadedSectionRef.current === sectionKey) return;
-    loadedSectionRef.current = sectionKey;
-    const route = parseLibraryRoute(window.location.hash);
-    setRoute(route);
-    if (route.query) setSearchText(route.query);
-    if (!route.detail) void loadView(route.view, route.query);
-  }, [loadView, sectionKey]);
-
-  const isRouteActivationRedundant = useCallback((nextView: LibraryView, nextHash: string) => {
-    if (window.location.hash !== nextHash || routeView !== nextView) return false;
-    return routeTransitioning || (view === nextView && !selectedPlaylist && !detail);
-  }, [detail, routeTransitioning, routeView, selectedPlaylist, view]);
-
-  const navigateToView = useCallback((nextView: LibraryView) => {
-    const nextRoute: LibraryRoute = { view: nextView };
-    const nextHash = libraryRouteHash(nextRoute);
-    if (isRouteActivationRedundant(nextView, nextHash)) return;
-    if (window.location.hash !== nextHash) window.history.pushState(null, "", nextHash);
-    setRoute(nextRoute);
-    void loadView(nextView);
-  }, [isRouteActivationRedundant, loadView]);
-
-  const navigateToSearch = useCallback((query: string) => {
-    const normalizedQuery = query.trim();
-    const nextRoute: LibraryRoute = { view: "search", query: normalizedQuery || undefined };
-    const nextHash = libraryRouteHash(nextRoute);
-    if (isRouteActivationRedundant("search", nextHash)) return;
-    if (window.location.hash !== nextHash) window.history.pushState(null, "", nextHash);
-    setRoute(nextRoute);
-    void loadView("search", normalizedQuery);
-  }, [isRouteActivationRedundant, loadView]);
-
-  const navigateToTracks = useCallback((nextRoute: LibraryRoute) => {
-    const nextHash = libraryRouteHash(nextRoute);
-    if (window.location.hash === nextHash) return;
-    window.history.pushState(null, "", nextHash);
-    setRoute(nextRoute);
-  }, []);
-
-  useEffect(() => {
-    const initialRoute = parseLibraryRoute(window.location.hash);
-    const normalizedHash = libraryRouteHash(initialRoute);
-    if (window.location.hash !== normalizedHash) window.history.replaceState(null, "", normalizedHash);
-    const restoreRoute = () => {
-      const route = parseLibraryRoute(window.location.hash);
-      setRoute(route);
-      if (route.view === "search") setSearchText(route.query || "");
-      if (!route.detail) void loadView(route.view, route.query);
-    };
-    window.addEventListener("popstate", restoreRoute);
-    return () => window.removeEventListener("popstate", restoreRoute);
-  }, [loadView]);
 
   const syncSources = async () => {
     setSourcesSyncing(true);
@@ -808,9 +718,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       const refreshedArtists = refreshedSection
         ? await getLibraryItems(refreshedServer.id, refreshedSection.key, 8).catch(() => [])
         : [];
-      const refreshedSelection = selectedPlaylist
-        ? refreshedPlaylists.find((playlist) => playlist.ratingKey === selectedPlaylist.ratingKey)
-        : undefined;
 
       setConnectionAvailable(true);
       setServers(refreshedServers);
@@ -820,36 +727,13 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       setPlaylists(refreshedPlaylists);
       artistDirectoryRequestRef.current += 1;
       setLibraryArtists(refreshedArtists);
-
-      if (refreshedSelection) {
-        const requestId = ++playlistItemsRequestRef.current;
-        setPlaylistItemsLoading(true);
-        setPlaylistItemsError(undefined);
-        const refreshedItems = await getPlaylistItems(refreshedServer.id, refreshedSelection.ratingKey);
-        if (playlistItemsRequestRef.current === requestId) {
-          setSelectedPlaylist(refreshedSelection);
-          setPlaylistItems(refreshedItems);
-          setPlaylistItemsLoading(false);
-        }
-      } else if (selectedPlaylist) {
-        playlistItemsRequestRef.current += 1;
-        setSelectedPlaylist(undefined);
-        setPlaylistItems([]);
-        setPlaylistItemsError(undefined);
-        setPlaylistItemsLoading(false);
-      }
-
-      if (refreshedServer.id === serverId && refreshedSection?.key === sectionKey && !refreshedSelection) {
-        const route = parseLibraryRoute(window.location.hash);
-        if (!route.detail) await loadView(route.view, route.query);
-      }
+      setSourceRevision((revision) => revision + 1);
     } catch (reason) {
       setConnectionAvailable(false);
       notify(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setLoading(false);
       setPlaylistListLoading(false);
-      setPlaylistItemsLoading(false);
       const remaining = SOURCE_SYNC_OVERLAY_MINIMUM_MS - (performance.now() - startedAt);
       if (remaining > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, remaining));
       setSourcesSyncing(false);
@@ -868,147 +752,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       setCacheStatusError(reason instanceof Error ? reason.message : String(reason));
     }
   }, []);
-
-  useEffect(() => {
-    if (view === "settings") void refreshCacheStatus();
-  }, [refreshCacheStatus, view]);
-
-  const navigateToDetail = useCallback((type: LibraryDetailType, ratingKey: string) => {
-    const nextRoute = libraryDetailRoute(type, ratingKey);
-    const nextHash = libraryRouteHash(nextRoute);
-    if (window.location.hash === nextHash) return;
-    window.history.pushState({ cadilumeDetailReturnHash: libraryRouteHash(route) }, "", nextHash);
-    setRoute(nextRoute);
-  }, [route]);
-
-  const loadMediaDetailRoute = useCallback(async (detailRoute: NonNullable<LibraryRoute["detail"]>) => {
-    if (!serverId) return;
-    const requestId = ++viewRequestRef.current;
-    const expectedType = detailRoute.type;
-    const parentView: LibraryView = expectedType === "artist" ? "artists" : "albums";
-    playlistItemsRequestRef.current += 1;
-    setSelectedPlaylist(undefined);
-    setPlaylistItems([]);
-    setPlaylistItemsError(undefined);
-    setPlaylistItemsLoading(false);
-    setSidePanel(null);
-    setPlaylistTrack(undefined);
-    setRouteView(parentView);
-    setView(parentView);
-    setDetail(undefined);
-    setRouteTransitioning(true);
-    setLoading(true);
-    try {
-      const source = await getLibraryMetadata(serverId, detailRoute.ratingKey);
-      if (source.type !== expectedType) throw new Error("该链接指向的媒体类型与目标页面不匹配。");
-      const children = await getChildren(serverId, detailRoute.ratingKey);
-      if (viewRequestRef.current !== requestId) return;
-      setDetail({ source, children });
-      setConnectionAvailable(true);
-      setContentRevision((revision) => revision + 1);
-    } catch (reason) {
-      if (viewRequestRef.current !== requestId) return;
-      const fallback: LibraryRoute = { view: parentView };
-      window.history.replaceState(null, "", libraryRouteHash(fallback));
-      setRoute(fallback);
-      notify(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      if (viewRequestRef.current === requestId) {
-        setRouteTransitioning(false);
-        setLoading(false);
-      }
-    }
-  }, [notify, serverId]);
-
-  const loadPlaylistRoute = useCallback(async (playlistId: string) => {
-    if (!serverId) return;
-    const requestId = ++playlistItemsRequestRef.current;
-    viewRequestRef.current += 1;
-    setRouteView("home");
-    setView("home");
-    setDetail(undefined);
-    setSidePanel(null);
-    setPlaylistTrack(undefined);
-    setPlaylistItems([]);
-    setPlaylistItemsError(undefined);
-    setPlaylistItemsLoading(true);
-    setRouteTransitioning(true);
-    setLoading(true);
-    try {
-      const catalog = await getPlaylists(serverId);
-      const playlist = catalog.find((item) => item.ratingKey === playlistId);
-      if (!playlist) throw new Error("这个歌单已不存在或当前账号没有访问权限。");
-      const tracks = await getPlaylistItems(serverId, playlist.ratingKey);
-      if (playlistItemsRequestRef.current !== requestId) return;
-      setPlaylists(catalog);
-      setSelectedPlaylist(playlist);
-      setPlaylistItems(tracks);
-      setConnectionAvailable(true);
-      setContentRevision((revision) => revision + 1);
-    } catch (reason) {
-      if (playlistItemsRequestRef.current !== requestId) return;
-      const fallback: LibraryRoute = { view: "home" };
-      window.history.replaceState(null, "", libraryRouteHash(fallback));
-      setRoute(fallback);
-      setSelectedPlaylist(undefined);
-      setPlaylistItems([]);
-      setPlaylistItemsError(undefined);
-      notify(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      if (playlistItemsRequestRef.current === requestId) {
-        setRouteTransitioning(false);
-        setLoading(false);
-        setPlaylistItemsLoading(false);
-      }
-    }
-  }, [notify, serverId]);
-
-  const openItem = useCallback((item: PlexItem) => {
-    if (item.type === "track") {
-      player.playContext(item, items);
-      return;
-    }
-    const detailType = detailTypeForItem(item);
-    if (detailType) navigateToDetail(detailType, item.ratingKey);
-  }, [items, navigateToDetail, player]);
-
-  const openTrackArtist = useCallback((artist: PlexItem) => {
-    if (artist.type === "artist") navigateToDetail("artist", artist.ratingKey);
-  }, [navigateToDetail]);
-
-  const openPlaylist = useCallback((playlist: PlexPlaylist) => {
-    navigateToDetail("playlist", playlist.ratingKey);
-  }, [navigateToDetail]);
-
-  const closeDetail = useCallback(() => {
-    const state = window.history.state;
-    const returnHash = state && typeof state === "object"
-      ? (state as { cadilumeDetailReturnHash?: unknown }).cadilumeDetailReturnHash
-      : undefined;
-    if (typeof returnHash === "string" && returnHash.startsWith("#/")) {
-      window.history.back();
-      return;
-    }
-    const fallback: LibraryRoute = { view: route.detail?.type === "playlist" ? "home" : route.view };
-    const nextHash = libraryRouteHash(fallback);
-    window.history.replaceState(null, "", nextHash);
-    setRoute(fallback);
-    void loadView(fallback.view, fallback.query);
-  }, [loadView, route.detail?.type, route.view]);
-
-  useEffect(() => {
-    const detailRoute = route.detail;
-    if (!detailRoute || !serverId) return;
-    if (detailRoute.type === "playlist") void loadPlaylistRoute(detailRoute.ratingKey);
-    else void loadMediaDetailRoute(detailRoute);
-  }, [loadMediaDetailRoute, loadPlaylistRoute, route.detail, serverId]);
-
-  const submitSearch = useCallback(async (event?: FormEvent) => {
-    event?.preventDefault();
-    const query = searchText.trim();
-    if (!serverId || !sectionKey || !query) return;
-    navigateToSearch(query);
-  }, [navigateToSearch, searchText, sectionKey, serverId]);
 
   const changeStatusIconEnabled = async (enabled: boolean) => {
     if (statusIconSaving) return;
@@ -1065,6 +808,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const signOut = async () => {
     try {
       await logout();
+      await routeAliveRef.current?.destroyAll();
       player.discardPlaybackSession();
       artworkCache.clear();
       window.location.reload();
@@ -1072,27 +816,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       notify(reason instanceof Error ? reason.message : String(reason));
     }
   };
-
-  const playDetail = () => {
-    const tracks = detail?.children.filter((item) => item.type === "track") || [];
-    if (!tracks[0]) return;
-    player.playContext(tracks[0], tracks);
-    player.setShuffle(false);
-  };
-
-  const shuffleContext = useCallback((context: readonly PlexItem[]) => {
-    const selection = selectRandomContextPlayback(context);
-    if (!selection) return;
-    player.playContext(selection.current, selection.queue);
-    player.setShuffle(true);
-  }, [player]);
-
-  const playPlaylist = useCallback(() => {
-    const tracks = playlistItems.filter((item) => item.type === "track");
-    if (!tracks[0]) return;
-    player.playContext(tracks[0], tracks);
-    player.setShuffle(false);
-  }, [player, playlistItems]);
 
   const playRecommendationItem = useCallback(async (item: PlexItem, context: PlexItem[]) => {
     if (!serverId) return;
@@ -1164,14 +887,22 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     player.retryCurrent();
   }, [player.retryCurrent]);
 
+  const router = useMemo(() => createCadilumeRouter(), []);
+
   const openPlaybackSettings = useCallback(() => {
     dismissPlaybackFailure();
     setNowPlayingOpen(false);
     setPlaylistTrack(undefined);
     setSidePanel(null);
     setPlaybackSettingsRequest((request) => request + 1);
-    navigateToView("settings");
-  }, [dismissPlaybackFailure, navigateToView]);
+    const location = router.state.location;
+    router.navigate("/settings", {
+      state: createCadilumeEntryState(location.state, {
+        parentEntryId: routeEntryId(location),
+        route: { view: "settings" },
+      }),
+    });
+  }, [dismissPlaybackFailure, router]);
 
   const changeBrandPreset = useCallback<BrandPresetChange>(async (preset, origin) => {
     if (preset === brandPreset) return;
@@ -1184,144 +915,78 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     }
   }, [brandPreset, notify, onBrandPreset]);
 
+  const runtime: MusicShellRuntime = {
+    initialSession,
+    account,
+    themeMode,
+    resolvedTheme,
+    brandPreset,
+    onThemeMode,
+    onBrandPreset,
+    searchText,
+    setSearchText,
+    servers,
+    serverId,
+    selectedServer,
+    sections,
+    sectionKey,
+    selectedSection,
+    libraryArtists,
+    connectionAvailable,
+    expandedPlayerOpen,
+    playlists,
+    playlistListLoading,
+    playlistListError,
+    loadPlaylistList,
+    sourceRevision,
+    routeAliveRef,
+    statusIconEnabled,
+    statusIconPlatform: initialSession.statusIconPlatform,
+    statusIconSaving,
+    deviceName,
+    quality,
+    prebufferNext: player.prebufferNext,
+    cacheStatus,
+    cacheStatusError,
+    cacheBusy,
+    sourcesSyncing,
+    playbackSettingsRequest,
+    player,
+    notify,
+    playRecommendationItem,
+    playRecommendationPlaylist,
+    changeStatusIconEnabled,
+    changeBrandPreset,
+    changeDeviceName,
+    changeQuality,
+    setServerId,
+    setSectionKey,
+    setPrebufferNext: player.setPrebufferNext,
+    clearCache,
+    syncSources,
+    signOut,
+    refreshCacheStatus,
+    openDeviceNameDialog: () => setDeviceNameDialogOpen(true),
+    openPlaylistCreation: () => {
+      if (!serverId) {
+        notify("请先在设置中选择音乐服务器。");
+        return;
+      }
+      setSidePanel(null);
+      setPlaylistTrack(undefined);
+      setPlaylistCreationOpen(true);
+    },
+    setSidePanel,
+    setPlaylistTrack,
+    setNowPlayingOpen,
+    setPlaybackSettingsRequest,
+  };
+
   return (
     <ArtworkServerContext.Provider value={serverId}>
+    <MusicShellContext.Provider value={runtime}>
     <div className="app-shell">
-      <AppTitlebar inactive={expandedPlayerOpen}>
-        <form className="searchbox" onSubmit={submitSearch} role="search">
-          <Search size={17} />
-          <input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索歌曲、专辑或歌手" aria-label="搜索资料库" />
-        </form>
-        <div className="topbar-actions">
-          <button className="topbar-account" type="button" aria-label={`打开 ${account.title || account.username} 的 Plex 账号设置`} onClick={() => navigateToView("settings")}>
-            <Avatar account={account} />
-            <span><strong>{account.title || account.username}</strong></span>
-          </button>
-          <ThemeCycleButton mode={themeMode} resolvedTheme={resolvedTheme} onChange={onThemeMode} />
-          <IconButton label="设置" active={!selectedPlaylist && routeView === "settings"} onClick={() => navigateToView("settings")}><Settings size={18} /></IconButton>
-          <IconButton label={sourcesSyncing ? "正在同步资料" : "刷新资料"} disabled={sourcesSyncing} onClick={() => void syncSources()}><RefreshCw className={sourcesSyncing ? "spin" : ""} size={17} /></IconButton>
-          <ConnectionIndicator server={selectedServer} connected={connectionAvailable} kindOverride={connectionPreview} />
-        </div>
-      </AppTitlebar>
-      <a className="skip-link" href="#main-content" aria-hidden={expandedPlayerOpen || undefined} tabIndex={expandedPlayerOpen ? -1 : undefined}>跳到主要内容</a>
-      <aside className="sidebar" aria-label="主导航" aria-hidden={expandedPlayerOpen || undefined} inert={expandedPlayerOpen || undefined}>
-        <nav>
-          <p className="nav-label">资料库</p>
-          {navigation.map(({ id, label, icon: NavIcon }) => (
-            <a
-              className={`nav-item ${!selectedPlaylist && routeView === id ? "active" : ""}`}
-              href={libraryRouteHash(id)}
-              key={id}
-              aria-current={!selectedPlaylist && routeView === id ? "page" : undefined}
-              onClick={(event) => {
-                event.preventDefault();
-                navigateToView(id);
-              }}
-            >
-              <NavIcon size={18} strokeWidth={1.8} /><span>{label}</span>
-            </a>
-          ))}
-        </nav>
-        <PlaylistSidebar
-          playlists={playlists}
-          selectedId={selectedPlaylist?.ratingKey}
-          loading={playlistListLoading}
-          error={playlistListError}
-          onOpen={(playlist) => void openPlaylist(playlist)}
-          onRetry={() => void loadPlaylistList(true)}
-          onCreate={() => {
-            if (!serverId) {
-              notify("请先在设置中选择音乐服务器。");
-              return;
-            }
-            setSidePanel(null);
-            setPlaylistTrack(undefined);
-            setPlaylistCreationOpen(true);
-          }}
-        />
-      </aside>
-
-      <section className="workspace" aria-hidden={expandedPlayerOpen || undefined} inert={expandedPlayerOpen || undefined}>
-        <main
-          id="main-content"
-          className={`content ${routeTransitioning ? "is-route-pending" : ""}`}
-          tabIndex={-1}
-          aria-busy={routeTransitioning || undefined}
-        >
-          <div
-            ref={routeContentRef}
-            className={`route-content${contentRevision > 0 ? " is-route-entering" : ""}`}
-            key={`${selectedPlaylist ? `playlist-${selectedPlaylist.ratingKey}` : detail ? `detail-${detail.source.ratingKey}` : view}-${contentRevision}`}
-            onScroll={(event) => routeScrollPositionsRef.current.set(routeKey, event.currentTarget.scrollTop)}
-          >
-          {selectedPlaylist ? (
-            <PlaylistDetailView
-              playlist={selectedPlaylist}
-              tracks={playlistItems}
-              artists={libraryArtists}
-              loading={playlistItemsLoading}
-              error={playlistItemsError}
-              onBack={closeDetail}
-              onRetry={() => void loadPlaylistRoute(selectedPlaylist.ratingKey)}
-              onPlay={playPlaylist}
-              onShuffle={() => shuffleContext(playlistItems)}
-              onPlayTrack={(track, context) => player.playContext(track, context)}
-              onOpenArtist={(artist) => void openTrackArtist(artist)}
-            />
-          ) : loading && view !== "settings" && view !== "search" && !items.length && !homeHubs.length ? <LoadingState /> : (
-            <ContentView
-              view={view}
-              route={route}
-              items={items}
-              artists={libraryArtists}
-              homeHubs={homeHubs}
-              hubs={searchHubs}
-              searchText={searchText}
-              detail={detail}
-              account={account}
-              servers={servers}
-              serverId={serverId}
-              server={selectedServer}
-              sections={sections}
-              sectionKey={sectionKey}
-              section={selectedSection}
-              statusIconEnabled={statusIconEnabled}
-              statusIconPlatform={initialSession.statusIconPlatform}
-              statusIconSaving={statusIconSaving}
-              brandPreset={brandPreset}
-              deviceName={deviceName}
-              quality={quality}
-              prebufferNext={player.prebufferNext}
-              cacheStatus={cacheStatus}
-              cacheStatusError={cacheStatusError}
-              cacheBusy={cacheBusy}
-              sourcesSyncing={sourcesSyncing}
-              playlists={playlists}
-              onOpen={openItem}
-              onTracksRouteChange={navigateToTracks}
-              onOpenArtist={(artist) => void openTrackArtist(artist)}
-              onOpenPlaylist={(playlist) => void openPlaylist(playlist)}
-              onPlayRecommendationItem={playRecommendationItem}
-              onPlayRecommendationPlaylist={playRecommendationPlaylist}
-              onBack={closeDetail}
-              onPlayDetail={playDetail}
-              onShuffleDetail={() => shuffleContext(detail?.children || [])}
-              onPlayTrack={(track, context) => player.playContext(track, context)}
-              onStatusIconEnabled={changeStatusIconEnabled}
-              onBrandPreset={changeBrandPreset}
-              onEditDeviceName={() => setDeviceNameDialogOpen(true)}
-              onQuality={changeQuality}
-              onServerChange={setServerId}
-              onSectionChange={setSectionKey}
-              onPrebufferNext={player.setPrebufferNext}
-              onClearCache={() => void clearCache()}
-              onSyncSources={() => void syncSources()}
-              onLogout={signOut}
-            />
-          )}
-          </div>
-        </main>
-      </section>
+      <RouterProvider key={`route-cache-${routeCacheEpoch}`} router={router} />
 
       {queuePanelMounted && (
         <div className={`queue-panel-layer ${queuePanelOpen ? "is-open" : "is-closing"}`} aria-hidden={!queuePanelOpen || undefined}>
@@ -1469,8 +1134,503 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         onPauseChange={setNotificationsPaused}
       />
     </div>
+    </MusicShellContext.Provider>
     </ArtworkServerContext.Provider>
   );
+}
+
+function createCadilumeRouter() {
+  return createHashRouter([
+    {
+      path: "/",
+      element: <MusicRouterLayout />,
+      children: [
+        { index: true, element: <RoutePage /> },
+        { path: "home", element: <RoutePage /> },
+        { path: "albums", element: <RoutePage /> },
+        { path: "albums/:ratingKey", element: <RoutePage /> },
+        { path: "artists", element: <RoutePage /> },
+        { path: "artists/:ratingKey", element: <RoutePage /> },
+        { path: "tracks", element: <RoutePage /> },
+        { path: "playlists/:ratingKey", element: <RoutePage /> },
+        { path: "search", element: <RoutePage /> },
+        { path: "settings", element: <RoutePage /> },
+        { path: "*", element: <Navigate to="/home" replace /> },
+      ],
+    },
+  ]);
+}
+
+function useRouterRoute(): LibraryRoute {
+  const location = useLocation();
+  return useMemo(() => parseLibraryRoute(`${location.pathname}${location.search}`), [location.pathname, location.search]);
+}
+
+function useCadilumeNavigate() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  return useCallback((route: LibraryRoute, options: { replace?: boolean } = {}) => {
+    navigate(routePath(route), {
+      replace: options.replace,
+      state: createCadilumeEntryState(location.state, {
+        parentEntryId: options.replace ? routeParentEntryId(location.state) : routeEntryId(location),
+        route,
+      }),
+    });
+  }, [location.key, location.state, navigate]);
+}
+
+function MusicRouterLayout() {
+  const runtime = useMusicShellRuntime();
+  const route = useRouterRoute();
+  const navigateRoute = useCadilumeNavigate();
+  const location = useLocation();
+  const connectionPreviewParam = import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get("connection-preview")
+    : null;
+  const connectionPreview = ["local", "remote", "relay", "disconnected"].includes(connectionPreviewParam || "")
+    ? connectionPreviewParam as ConnectionKind
+    : undefined;
+
+  const submitSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const query = runtime.searchText.trim();
+    if (!query) {
+      navigateRoute({ view: "search" });
+      return;
+    }
+    navigateRoute({ view: "search", query });
+  };
+
+  const openPlaylist = (playlist: PlexPlaylist) => {
+    navigateRoute(libraryDetailRoute("playlist", playlist.ratingKey));
+  };
+
+  const selectedPlaylistId = route.detail?.type === "playlist" ? route.detail.ratingKey : undefined;
+  const activeView = selectedPlaylistId ? undefined : route.view;
+
+  return (
+    <>
+      <AppTitlebar inactive={runtime.expandedPlayerOpen}>
+        <form className="searchbox" onSubmit={submitSearch} role="search">
+          <Search size={17} />
+          <input value={runtime.searchText} onChange={(event) => runtime.setSearchText(event.target.value)} placeholder="搜索歌曲、专辑或歌手" aria-label="搜索资料库" />
+        </form>
+        <div className="topbar-actions">
+          <button className="topbar-account" type="button" aria-label={`打开 ${runtime.account.title || runtime.account.username} 的 Plex 账号设置`} onClick={() => navigateRoute({ view: "settings" })}>
+            <Avatar account={runtime.account} />
+            <span><strong>{runtime.account.title || runtime.account.username}</strong></span>
+          </button>
+          <ThemeCycleButton mode={runtime.themeMode} resolvedTheme={runtime.resolvedTheme} onChange={runtime.onThemeMode} />
+          <IconButton label="设置" active={activeView === "settings"} onClick={() => navigateRoute({ view: "settings" })}><Settings size={18} /></IconButton>
+          <IconButton label={runtime.sourcesSyncing ? "正在同步资料" : "刷新资料"} disabled={runtime.sourcesSyncing} onClick={() => void runtime.syncSources()}><RefreshCw className={runtime.sourcesSyncing ? "spin" : ""} size={17} /></IconButton>
+          <ConnectionIndicator server={runtime.selectedServer} connected={runtime.connectionAvailable} kindOverride={connectionPreview} />
+        </div>
+      </AppTitlebar>
+      <a className="skip-link" href="#main-content" aria-hidden={runtime.expandedPlayerOpen || undefined} tabIndex={runtime.expandedPlayerOpen ? -1 : undefined}>跳到主要内容</a>
+      <aside className="sidebar" aria-label="主导航" aria-hidden={runtime.expandedPlayerOpen || undefined} inert={runtime.expandedPlayerOpen || undefined}>
+        <nav>
+          <p className="nav-label">资料库</p>
+          {navigation.map(({ id, label, icon: NavIcon }) => (
+            <a
+              className={`nav-item ${activeView === id ? "active" : ""}`}
+              href={libraryRouteHash(id)}
+              key={id}
+              aria-current={activeView === id ? "page" : undefined}
+              onClick={(event) => {
+                event.preventDefault();
+                navigateRoute({ view: id });
+              }}
+            >
+              <NavIcon size={18} strokeWidth={1.8} /><span>{label}</span>
+            </a>
+          ))}
+        </nav>
+        <PlaylistSidebar
+          playlists={runtime.playlists}
+          selectedId={selectedPlaylistId}
+          loading={runtime.playlistListLoading}
+          error={runtime.playlistListError}
+          onOpen={openPlaylist}
+          onRetry={() => void runtime.loadPlaylistList(true)}
+          onCreate={runtime.openPlaylistCreation}
+        />
+      </aside>
+      <section className="workspace" aria-hidden={runtime.expandedPlayerOpen || undefined} inert={runtime.expandedPlayerOpen || undefined}>
+        <main id="main-content" className="content" tabIndex={-1}>
+          <RouteKeepAliveHost location={location} aliveRef={runtime.routeAliveRef} />
+        </main>
+      </section>
+    </>
+  );
+}
+
+type RouteLocationSnapshot = Pick<ReturnType<typeof useLocation>, "key" | "pathname" | "search" | "state">;
+type RouteNavigate = (route: LibraryRoute, options?: { replace?: boolean }) => void;
+
+interface RoutePageProps {
+  route: LibraryRoute;
+  entryLocation: RouteLocationSnapshot;
+  onNavigate: RouteNavigate;
+  onBack: () => void;
+}
+
+function useRouteEntry(): RoutePageProps {
+  const entry = useContext(RouteEntryContext);
+  if (!entry) throw new Error("Cadilume 路由页缺少 History entry 上下文。");
+  return entry;
+}
+
+function RouteKeepAliveHost({ location, aliveRef }: { location: ReturnType<typeof useLocation>; aliveRef: RefObject<KeepAliveRef | null> }) {
+  const activeCacheKey = historyEntryCacheKey(location.key);
+  const navigate = useNavigate();
+  const outlet = useOutlet();
+  const route = useMemo(() => parseLibraryRoute(`${location.pathname}${location.search}`), [location.pathname, location.search]);
+  const entryLocation = useMemo<RouteLocationSnapshot>(() => ({
+    key: location.key,
+    pathname: location.pathname,
+    search: location.search,
+    state: location.state,
+  }), [location.key, location.pathname, location.search, location.state]);
+  const navigateFromEntry = useCallback<RouteNavigate>((nextRoute, options = {}) => {
+    navigate(routePath(nextRoute), {
+      replace: options.replace,
+      state: createCadilumeEntryState(location.state, {
+        parentEntryId: options.replace ? routeParentEntryId(location.state) : routeEntryId(location),
+        route: nextRoute,
+      }),
+    });
+  }, [location.key, location.state, navigate]);
+  const backFromEntry = useCallback(() => navigate(-1), [navigate]);
+  const entry = useMemo<RoutePageProps>(() => ({
+    route,
+    entryLocation,
+    onNavigate: navigateFromEntry,
+    onBack: backFromEntry,
+  }), [backFromEntry, entryLocation, navigateFromEntry, route]);
+  return (
+    <div className="route-cache-host">
+    <KeepAlive
+      activeCacheKey={activeCacheKey}
+      max={Infinity}
+      maxAliveTime={0}
+      transition={false}
+      enableActivity={false}
+      aliveRef={aliveRef}
+      containerClassName="keep-alive-render"
+      cacheNodeClassName="cadilume-route-cache"
+    >
+      <RouteEntryContext.Provider value={entry}>
+        <KeepAliveRoutePage cacheKey={activeCacheKey}>{outlet}</KeepAliveRoutePage>
+      </RouteEntryContext.Provider>
+    </KeepAlive>
+    </div>
+  );
+}
+
+function KeepAliveRoutePage({ cacheKey, children }: { cacheKey: string; children: ReactNode }) {
+  const { active } = useKeepAliveContext();
+  const pageRef = useRef<HTMLDivElement>(null);
+  const scrollPositionsRef = useRef<Array<{ target: HTMLElement; top: number; left: number }>>([]);
+  const restoreFocusTargetRef = useRef<HTMLElement | null>(null);
+  const restoreFocusFrameRef = useRef<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    const page = pageRef.current;
+    const cacheNode = page?.closest<HTMLElement>(".keepalive-cache-div");
+    if (!page || !cacheNode) return;
+    const focused = !active && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+
+    const restoreScrollPositions = () => {
+      scrollPositionsRef.current.forEach(({ target, top, left }) => {
+        if (!target.isConnected) return;
+        target.scrollTop = Math.min(Math.max(0, top), Math.max(0, target.scrollHeight - target.clientHeight));
+        target.scrollLeft = Math.min(Math.max(0, left), Math.max(0, target.scrollWidth - target.clientWidth));
+      });
+    };
+
+    if (!active) {
+      const scrollTargets = [page, ...Array.from(page.querySelectorAll<HTMLElement>("[data-route-scroll-container]"))];
+      scrollPositionsRef.current = scrollTargets.map((target) => ({
+        target,
+        top: target.scrollTop,
+        left: target.scrollLeft,
+      }));
+    }
+
+    cacheNode.hidden = !active;
+    cacheNode.toggleAttribute("inert", !active);
+    if (active) cacheNode.removeAttribute("aria-hidden");
+    else cacheNode.setAttribute("aria-hidden", "true");
+
+    if (!active) {
+      if (focused && pageRef.current?.contains(focused)) restoreFocusTargetRef.current = focused;
+      return;
+    }
+
+    const restoreTarget = restoreFocusTargetRef.current;
+    restoreScrollPositions();
+    restoreFocusFrameRef.current = window.requestAnimationFrame(() => {
+      restoreScrollPositions();
+      if (restoreTarget
+        && restoreTarget.isConnected
+        && pageRef.current?.contains(restoreTarget)
+        && !restoreTarget.closest("[inert]")
+        && !restoreTarget.matches(":disabled")) restoreTarget.focus({ preventScroll: true });
+      restoreFocusFrameRef.current = undefined;
+    });
+    return () => {
+      if (restoreFocusFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(restoreFocusFrameRef.current);
+        restoreFocusFrameRef.current = undefined;
+      }
+    };
+  }, [active]);
+  return <div ref={pageRef} className="route-page-scroll" data-route-entry={cacheKey}>{children}</div>;
+}
+
+function RoutePage() {
+  const entryRef = useRef(useRouteEntry());
+  const { route, entryLocation, onNavigate, onBack } = entryRef.current;
+  const runtime = useMusicShellRuntime();
+  const [items, setItems] = useState<PlexItem[]>([]);
+  const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
+  const [searchHubs, setSearchHubs] = useState<PlexHub[]>([]);
+  const [detail, setDetail] = useState<{ source: PlexItem; children: PlexItem[] }>();
+  const [playlist, setPlaylist] = useState<PlexPlaylist>();
+  const [playlistItems, setPlaylistItems] = useState<PlexItem[]>([]);
+  const [playlistLoading, setPlaylistLoading] = useState(false);
+  const [playlistError, setPlaylistError] = useState<string>();
+  const [playlistRetryRequest, setPlaylistRetryRequest] = useState(0);
+  const [loading, setLoading] = useState(route.view !== "settings" && route.view !== "tracks");
+  const requestRef = useRef(0);
+  const query = route.query || "";
+  const view = route.view;
+
+  const closeDetail = useCallback(() => {
+    const state = entryLocation.state && typeof entryLocation.state === "object" ? entryLocation.state as Record<string, unknown> : undefined;
+    if (state?.cadilumeParentEntryId) {
+      onBack();
+      return;
+    }
+    onNavigate({ view: route.detail?.type === "playlist" ? "home" : route.view }, { replace: true });
+  }, [entryLocation.state, onBack, onNavigate, route.detail?.type, route.view]);
+
+  const navigateToDetail = useCallback((type: LibraryDetailType, ratingKey: string) => {
+    onNavigate(libraryDetailRoute(type, ratingKey));
+  }, [onNavigate]);
+
+  const openItem = useCallback((item: PlexItem) => {
+    if (item.type === "track") {
+      runtime.player.playContext(item, items);
+      return;
+    }
+    const detailType = detailTypeForItem(item);
+    if (detailType) navigateToDetail(detailType, item.ratingKey);
+  }, [items, navigateToDetail, runtime.player]);
+
+  const openTrackArtist = useCallback((artist: PlexItem) => {
+    if (artist.type === "artist") navigateToDetail("artist", artist.ratingKey);
+  }, [navigateToDetail]);
+
+  const openPlaylist = useCallback((nextPlaylist: PlexPlaylist) => {
+    navigateToDetail("playlist", nextPlaylist.ratingKey);
+  }, [navigateToDetail]);
+
+  const shuffleContext = useCallback((context: readonly PlexItem[]) => {
+    const selection = selectRandomContextPlayback(context);
+    if (!selection) return;
+    runtime.player.playContext(selection.current, selection.queue);
+    runtime.player.setShuffle(true);
+  }, [runtime.player]);
+
+  const playDetail = useCallback(() => {
+    const tracks = detail?.children.filter((item) => item.type === "track") || [];
+    if (!tracks[0]) return;
+    runtime.player.playContext(tracks[0], tracks);
+    runtime.player.setShuffle(false);
+  }, [detail?.children, runtime.player]);
+
+  const playPlaylist = useCallback(() => {
+    const tracks = playlistItems.filter((item) => item.type === "track");
+    if (!tracks[0]) return;
+    runtime.player.playContext(tracks[0], tracks);
+    runtime.player.setShuffle(false);
+  }, [playlistItems, runtime.player]);
+
+  const handleRouteChange = useCallback((nextRoute: LibraryRoute) => {
+    onNavigate(nextRoute);
+  }, [onNavigate]);
+
+  useEffect(() => {
+    if (view === "search") runtime.setSearchText(query);
+  }, [query, runtime.setSearchText, view]);
+
+  useEffect(() => {
+    const requestId = ++requestRef.current;
+    setLoading(view !== "settings" && view !== "tracks");
+    setPlaylist(undefined);
+    setPlaylistItems([]);
+    setPlaylistError(undefined);
+    setDetail(undefined);
+    if (view === "settings") {
+      void runtime.refreshCacheStatus();
+      setLoading(false);
+      return;
+    }
+    if (view === "tracks") {
+      setLoading(false);
+      return;
+    }
+    if (!runtime.serverId || !runtime.sectionKey) {
+      setItems([]);
+      setHomeHubs([]);
+      setSearchHubs([]);
+      setLoading(false);
+      return;
+    }
+    const load = async () => {
+      let playlistCandidate: PlexPlaylist | undefined;
+      try {
+        if (route.detail?.type === "playlist") {
+          setPlaylistLoading(true);
+          const catalog = await getPlaylists(runtime.serverId as string);
+          const found = catalog.find((candidate) => candidate.ratingKey === route.detail?.ratingKey);
+          if (!found) throw new Error("这个歌单已不存在或当前账号没有访问权限。");
+          playlistCandidate = found;
+          if (requestRef.current !== requestId) return;
+          setPlaylist(found);
+          const tracks = await getPlaylistItems(runtime.serverId as string, found.ratingKey);
+          if (requestRef.current !== requestId) return;
+          setPlaylist(found);
+          setPlaylistItems(tracks);
+          setPlaylistLoading(false);
+          setLoading(false);
+          return;
+        }
+        if (route.detail) {
+          const source = await getLibraryMetadata(runtime.serverId as string, route.detail.ratingKey);
+          if (source.type !== route.detail.type) throw new Error("该链接指向的媒体类型与目标页面不匹配。");
+          const children = await getChildren(runtime.serverId as string, route.detail.ratingKey);
+          if (requestRef.current !== requestId) return;
+          setDetail({ source, children });
+          setLoading(false);
+          return;
+        }
+        if (view === "home") {
+          const [hubs, recentAlbums] = await Promise.all([
+            getRecommendationHubs(runtime.serverId as string, runtime.sectionKey as string),
+            getRecentAlbums(runtime.serverId as string, runtime.sectionKey as string),
+          ]);
+          const completeHubs = hubs.some(isRecentlyAddedHub) || !recentAlbums.length
+            ? hubs
+            : [...hubs, { title: "最近加入的音乐", type: "album", identifier: "cadilume.recentlyadded", items: recentAlbums }];
+          if (requestRef.current !== requestId) return;
+          setItems(recentAlbums);
+          setHomeHubs(homeRecommendationHubs(completeHubs));
+        } else if (view === "albums" || view === "artists") {
+          const result = await getLibraryItems(runtime.serverId as string, runtime.sectionKey as string, view === "artists" ? 8 : 9);
+          if (requestRef.current !== requestId) return;
+          setItems(result);
+        } else if (view === "search") {
+          if (!query) setSearchHubs([]);
+          else setSearchHubs(await searchLibrary(runtime.serverId as string, runtime.sectionKey as string, query));
+        }
+      } catch (reason) {
+        if (requestRef.current !== requestId) return;
+        const message = reason instanceof Error ? reason.message : String(reason);
+        if (route.detail?.type === "playlist" && playlistCandidate) {
+          setPlaylist(playlistCandidate);
+          setPlaylistItems([]);
+          setPlaylistError(message);
+          return;
+        }
+        runtime.notify(message);
+        if (route.detail) {
+          onNavigate({ view: route.detail.type === "playlist" ? "home" : route.detail.type === "artist" ? "artists" : "albums" }, { replace: true });
+        }
+        setItems([]);
+        setHomeHubs([]);
+        setSearchHubs([]);
+      } finally {
+        if (requestRef.current === requestId) {
+          setPlaylistLoading(false);
+          setLoading(false);
+        }
+      }
+    };
+    void load();
+    return () => { requestRef.current += 1; };
+  }, [onNavigate, playlistRetryRequest, query, route.detail, runtime.notify, runtime.refreshCacheStatus, runtime.sectionKey, runtime.serverId, runtime.sourceRevision, view]);
+
+  const content = playlist ? (
+    <PlaylistDetailView
+      playlist={playlist}
+      tracks={playlistItems}
+      artists={runtime.libraryArtists}
+      loading={playlistLoading}
+      error={playlistError}
+      onBack={closeDetail}
+      onRetry={() => setPlaylistRetryRequest((request) => request + 1)}
+      onPlay={playPlaylist}
+      onShuffle={() => shuffleContext(playlistItems)}
+      onPlayTrack={(track, context) => runtime.player.playContext(track, context)}
+      onOpenArtist={openTrackArtist}
+    />
+  ) : loading && view !== "search" ? <LoadingState /> : (
+    <ContentView
+      view={view}
+      route={route}
+      items={items}
+      artists={runtime.libraryArtists}
+      homeHubs={homeHubs}
+      hubs={searchHubs}
+      searchText={query}
+      detail={detail}
+      account={runtime.account}
+      servers={runtime.servers}
+      serverId={runtime.serverId}
+      server={runtime.selectedServer}
+      sections={runtime.sections}
+      sectionKey={runtime.sectionKey}
+      section={runtime.selectedSection}
+      statusIconEnabled={runtime.statusIconEnabled}
+      statusIconPlatform={runtime.statusIconPlatform}
+      statusIconSaving={runtime.statusIconSaving}
+      brandPreset={runtime.brandPreset}
+      deviceName={runtime.deviceName}
+      quality={runtime.quality}
+      prebufferNext={runtime.prebufferNext}
+      cacheStatus={runtime.cacheStatus}
+      cacheStatusError={runtime.cacheStatusError}
+      cacheBusy={runtime.cacheBusy}
+      sourcesSyncing={runtime.sourcesSyncing}
+      playlists={runtime.playlists}
+      onOpen={openItem}
+      onTracksRouteChange={handleRouteChange}
+      onOpenArtist={openTrackArtist}
+      onOpenPlaylist={openPlaylist}
+      onPlayRecommendationItem={runtime.playRecommendationItem}
+      onPlayRecommendationPlaylist={runtime.playRecommendationPlaylist}
+      onBack={closeDetail}
+      onPlayDetail={playDetail}
+      onShuffleDetail={() => shuffleContext(detail?.children || [])}
+      onPlayTrack={(track, context) => runtime.player.playContext(track, context)}
+      onStatusIconEnabled={runtime.changeStatusIconEnabled}
+      onBrandPreset={runtime.changeBrandPreset}
+      onEditDeviceName={runtime.openDeviceNameDialog}
+      onQuality={runtime.changeQuality}
+      onServerChange={runtime.setServerId}
+      onSectionChange={runtime.setSectionKey}
+      onPrebufferNext={runtime.setPrebufferNext}
+      onClearCache={() => void runtime.clearCache()}
+      onSyncSources={() => void runtime.syncSources()}
+      onLogout={runtime.signOut}
+    />
+  );
+
+  return <>{content}</>;
 }
 
 interface ContentViewProps {
@@ -1791,7 +1951,7 @@ function CardCollection({ title, items, round = false, compact = false, artistGr
                 </section>
               ))}
             </div>
-            <nav className="alphabet-index" aria-label={`${title}首字母索引`}>
+            <nav className="alphabet-index" data-route-scroll-container aria-label={`${title}首字母索引`}>
               {PLEX_ALPHABET_INDEX.map((bucket) => (
                 <button
                   type="button"
@@ -1965,7 +2125,7 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) void loadNextTrackPage();
     }, {
-      root: sentinel.closest(".content"),
+      root: sentinel.closest(".route-page-scroll"),
       rootMargin: "0px 0px 280px",
       threshold: 0.01,
     });
@@ -3488,7 +3648,7 @@ function createAppearanceSnapshot(appearance: AppearanceState) {
   }
   preserveSnapshotScrollAndMediaGeometry(appRoot, snapshot);
   snapshot.querySelectorAll("audio, video").forEach((media) => media.remove());
-  snapshot.querySelectorAll(".route-content.is-route-entering").forEach((content) => content.classList.remove("is-route-entering"));
+  snapshot.querySelectorAll(".route-page-scroll").forEach((content) => content.classList.remove("is-route-entering"));
   snapshot.querySelectorAll<HTMLElement>(".now-playing-view:not([data-theme])").forEach((view) => {
     view.dataset.theme = appearance.theme;
   });
