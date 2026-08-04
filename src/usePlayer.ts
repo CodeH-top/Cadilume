@@ -29,8 +29,11 @@ export interface PersistedPlaybackTrack {
   title: string;
   parentTitle?: string;
   parentRatingKey?: string;
+  originalTitle?: string;
   grandparentTitle?: string;
   grandparentRatingKey?: string;
+  trackArtists?: PlexContributor[];
+  /** Legacy snapshots used this name before R14 separated track credits. */
   contributors?: PlexContributor[];
   duration?: number;
   year?: number;
@@ -92,18 +95,21 @@ function compactPersistedTrack(item: PlexItem): PersistedPlaybackTrack | null {
     type: "track",
     title: item.title,
   };
-  const copyString = (name: "parentTitle" | "parentRatingKey" | "grandparentTitle" | "grandparentRatingKey" | "thumb" | "art") => {
+  const copyString = (name: "parentTitle" | "parentRatingKey" | "originalTitle" | "grandparentTitle" | "grandparentRatingKey" | "thumb" | "art") => {
     const value = safePersistedPath(item[name]);
     if (value) compact[name] = value;
   };
   copyString("parentTitle");
   copyString("parentRatingKey");
+  copyString("originalTitle");
   copyString("grandparentTitle");
   copyString("grandparentRatingKey");
   copyString("thumb");
   copyString("art");
-  const contributors = compactPersistedContributors(item.contributors);
-  if (contributors) compact.contributors = contributors;
+  const trackArtists = compactPersistedContributors(
+    item.trackArtists || item.contributors || (item.originalTitle ? [{ name: item.originalTitle }] : undefined),
+  );
+  if (trackArtists) compact.trackArtists = trackArtists;
 
   for (const name of ["duration", "year", "index", "parentIndex"] as const) {
     const value = item[name];
@@ -133,9 +139,12 @@ function restorePersistedTrack(value: unknown): PersistedPlaybackTrack | null {
     title: value.title,
     parentTitle: value.parentTitle,
     parentRatingKey: value.parentRatingKey,
+    originalTitle: value.originalTitle,
     grandparentTitle: value.grandparentTitle,
     grandparentRatingKey: value.grandparentRatingKey,
-    contributors: value.contributors,
+    trackArtists: Array.isArray(value.trackArtists)
+      ? value.trackArtists
+      : Array.isArray(value.contributors) ? value.contributors : undefined,
     duration: value.duration,
     year: value.year,
     index: value.index,
@@ -145,6 +154,16 @@ function restorePersistedTrack(value: unknown): PersistedPlaybackTrack | null {
     Media: value.Media,
   } as PlexItem;
   return compactPersistedTrack(item);
+}
+
+/** Fresh PMS metadata wins over a restored snapshot without losing safe queue fields. */
+export function mergeFreshTrackMetadata(restored: PlexItem, fresh: PlexItem): PlexItem {
+  if (restored.ratingKey !== fresh.ratingKey || fresh.type !== "track") return restored;
+  return {
+    ...restored,
+    ...fresh,
+    trackArtists: fresh.trackArtists?.length ? fresh.trackArtists : restored.trackArtists,
+  };
 }
 
 /** Build a sanitized, versioned session object without touching browser storage. */
@@ -1301,6 +1320,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [resetShuffleState, schedulePersistedSession]);
 
   useEffect(() => {
+    let disposed = false;
     const previousQueueServerId = queueServerIdRef.current;
     if (previousQueueServerId && previousQueueServerId !== serverId) {
       // Persist with the queue's owner before `serverIdRef`/UI context can make
@@ -1332,14 +1352,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
     if (!serverId) {
       restoredServerRef.current = undefined;
-      return;
+      return () => { disposed = true; };
     }
-    if (restoredServerRef.current === serverId) return;
+    if (restoredServerRef.current === serverId) return () => { disposed = true; };
     restoredServerRef.current = serverId;
     const persisted = readPersistedPlaybackSession();
 
     if (!persisted || persisted.serverId !== serverId) {
-      return;
+      return () => { disposed = true; };
     }
 
     const restoredQueue = persisted.queue.map((item) => ({ ...item })) as PlexItem[];
@@ -1369,6 +1389,24 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     setRepeatState(persisted.repeat);
     setError(undefined);
     setPlaybackFailure(undefined);
+
+    // A persisted queue can predate the track-level artist contract. Refresh
+    // the current item once so album-artist fallback data cannot survive a
+    // restart as the authoritative display value.
+    if (restoredTrack) {
+      void plexMusicGateway.library.getTrack(serverId, restoredTrack.ratingKey)
+        .then((freshTrack) => {
+          if (disposed) return;
+          const refreshedTrack = mergeFreshTrackMetadata(restoredTrack, freshTrack);
+          const nextQueue = queueRef.current.map((item, itemIndex) => itemIndex === restoredIndex ? refreshedTrack : item);
+          queueRef.current = nextQueue;
+          setQueue(nextQueue);
+          schedulePersistedSession(true);
+        })
+        .catch(() => undefined);
+    }
+
+    return () => { disposed = true; };
   }, [flushPlaybackSession, serverId, setPlaybackLoading]);
 
   useEffect(() => {

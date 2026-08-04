@@ -56,6 +56,39 @@ describe("resolveTrackArtists", () => {
     expect(trackArtist(track)).toBe("周杰伦 / Kobe Bryant / Mira Lin");
   });
 
+  it("优先使用曲目级歌手而不是专辑歌手字段", () => {
+    const track: PlexItem = {
+      ratingKey: "track-distinct-artists",
+      key: "/library/metadata/track-distinct-artists",
+      type: "track",
+      title: "Collaboration",
+      grandparentTitle: "Album Artist",
+      grandparentRatingKey: "album-artist",
+      originalTitle: "Track Artist",
+      trackArtists: [{ name: "Mira Lin", ratingKey: "artist-2" }, { name: "Guest Artist" }],
+    };
+
+    expect(resolveTrackArtists(track, artistLookup)).toEqual([
+      { name: "Mira Lin", artist: artists[1] },
+      { name: "Guest Artist", artist: undefined },
+    ]);
+    expect(trackArtist(track)).toBe("Mira Lin / Guest Artist");
+  });
+
+  it("keeps a raw originalTitle credit intact when PMS has no structured members", () => {
+    const track: PlexItem = {
+      ratingKey: "track-original-title",
+      key: "/library/metadata/track-original-title",
+      type: "track",
+      title: "Slash Name",
+      grandparentTitle: "Album Artist",
+      originalTitle: "AC/DC",
+    };
+
+    expect(resolveTrackArtists(track, artistLookup)).toEqual([{ name: "AC/DC", artist: undefined }]);
+    expect(trackArtist(track)).toBe("AC/DC");
+  });
+
   it("结构化成员即使全都不能匹配资料库也不会被过滤", () => {
     const track: PlexItem = {
       ratingKey: "track-2",

@@ -92,15 +92,16 @@ function normalizedContributorString(value: unknown): string | undefined {
 }
 
 /**
- * PMS can return performer metadata under Role or Contributor, with either
- * `tag`, `title`, or `name` labels. Normalize it once at the API boundary so
- * every Cadilume surface shares the same complete contributor sequence.
+ * PMS can return structured performer metadata under Role or Contributor, with
+ * either `tag`, `title`, or `name` labels. This helper only normalizes the
+ * structured portion; track-level precedence is applied by
+ * `normalizePlexTrackArtists` below.
  */
 export function normalizePlexContributors(value: Record<string, unknown>): PlexContributor[] | undefined {
   const names = new Set<string>();
   const ratingKeys = new Set<string>();
   const contributors: PlexContributor[] = [];
-  const structuredSources = [value.Role, value.Contributor, value.contributors, value.roles, value.contributor];
+  const structuredSources = [value.trackArtists, value.Role, value.Contributor, value.contributors, value.roles, value.contributor];
 
   for (const source of structuredSources) {
     for (const candidate of contributorRecords(source)) {
@@ -121,11 +122,24 @@ export function normalizePlexContributors(value: Record<string, unknown>): PlexC
   return contributors.length ? contributors : undefined;
 }
 
+/**
+ * Normalize the artist credit of one music track. `grandparentTitle` is the
+ * album artist in PMS' music model; `originalTitle` is the track artist. Keep
+ * the latter as one text contributor when PMS has no structured member list so
+ * names such as `AC/DC` are never guessed apart by the client.
+ */
+export function normalizePlexTrackArtists(value: Record<string, unknown>): PlexContributor[] | undefined {
+  const structured = normalizePlexContributors(value);
+  if (structured?.length) return structured;
+  const originalTitle = normalizedContributorString(value.originalTitle);
+  return originalTitle ? [{ name: originalTitle }] : undefined;
+}
+
 function normalizePlexItems(value: unknown): PlexItem[] {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((item) => {
-    const contributors = normalizePlexContributors(item);
-    return contributors ? { ...item, contributors } as unknown as PlexItem : item as unknown as PlexItem;
+    const trackArtists = item.type === "track" ? normalizePlexTrackArtists(item) : undefined;
+    return trackArtists ? { ...item, trackArtists } as unknown as PlexItem : item as unknown as PlexItem;
   });
 }
 
@@ -514,7 +528,7 @@ function demoLibraryTracks(): PlexItem[] {
   if (!previewParams?.has("multi-artist-preview")) return tracks;
   return tracks.map((track, index) => index === 0 ? {
     ...track,
-    contributors: [
+    trackArtists: [
       { name: demoArtists[0].title, ratingKey: demoArtists[0].ratingKey },
       { name: "Kobe Bryant" },
       { name: "AC/DC" },

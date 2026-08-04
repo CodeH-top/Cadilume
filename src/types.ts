@@ -85,9 +85,13 @@ export interface PlexItem {
   /** PMS' album collation value used when an artist's tracks are sorted by album. */
   parentTitleSort?: string;
   parentRatingKey?: string;
+  /** PMS music-track artist text (`originalTitle`), distinct from the album artist. */
+  originalTitle?: string;
   grandparentTitle?: string;
   grandparentRatingKey?: string;
-  /** Structured performers take precedence over the legacy grandparent title. */
+  /** Normalized performers credited on this track, in PMS order. */
+  trackArtists?: PlexContributor[];
+  /** Legacy alias retained only for old demo data and persisted sessions. */
   contributors?: PlexContributor[];
   duration?: number;
   year?: number;
@@ -169,10 +173,20 @@ export interface NowPlaying {
   index: number;
 }
 
+export function trackArtistContributors(track: Pick<PlexItem, "trackArtists" | "contributors" | "originalTitle">): PlexContributor[] | undefined {
+  const contributors = track.trackArtists?.length ? track.trackArtists : track.contributors;
+  const normalizedContributors = contributors
+    ?.flatMap((contributor) => {
+      const name = contributor.name.trim();
+      return name ? [{ name, ...(contributor.ratingKey ? { ratingKey: contributor.ratingKey } : {}) }] : [];
+    });
+  if (normalizedContributors?.length) return normalizedContributors;
+  const originalTitle = track.originalTitle?.trim();
+  return originalTitle ? [{ name: originalTitle }] : undefined;
+}
+
 export function trackArtist(track: PlexItem): string {
-  const contributorNames = track.contributors
-    ?.map((contributor) => contributor.name.trim())
-    .filter(Boolean);
+  const contributorNames = trackArtistContributors(track)?.map((contributor) => contributor.name);
   if (contributorNames?.length) return contributorNames.join(" / ");
   return track.grandparentTitle || track.parentTitle || "未知歌手";
 }

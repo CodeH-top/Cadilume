@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
+import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -62,6 +62,14 @@ describe("PMS structured contributors", () => {
     ]);
   });
 
+  it("uses PMS originalTitle as one exact track-level credit when no structured list exists", () => {
+    expect(normalizePlexTrackArtists({
+      type: "track",
+      grandparentTitle: "Album Artist",
+      originalTitle: "AC/DC",
+    })).toEqual([{ name: "AC/DC" }]);
+  });
+
   it("preserves normalized Role members when a PMS track page enters the shared data layer", async () => {
     invokeMock.mockResolvedValueOnce({
       MediaContainer: {
@@ -78,10 +86,36 @@ describe("PMS structured contributors", () => {
 
     const page = await getTracksPage("server-a", "15", 0, 50);
 
-    expect(page.items[0].contributors).toEqual([
+    expect(page.items[0].trackArtists).toEqual([
       { name: "Mira Lin", ratingKey: "artist-2" },
       { name: "Guest Artist", ratingKey: undefined },
     ]);
+  });
+
+  it("keeps the track artist separate from the album artist in normalized PMS metadata", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        totalSize: 1,
+        Metadata: [{
+          ratingKey: "track-distinct-artists",
+          key: "/library/metadata/track-distinct-artists",
+          type: "track",
+          title: "Collaboration",
+          grandparentTitle: "Album Artist",
+          grandparentRatingKey: "album-artist",
+          originalTitle: "Track Artist",
+        }],
+      },
+    });
+
+    const page = await getTracksPage("server-a", "15", 0, 50);
+
+    expect(page.items[0]).toMatchObject({
+      grandparentTitle: "Album Artist",
+      originalTitle: "Track Artist",
+      trackArtists: [{ name: "Track Artist" }],
+    });
+    expect(trackArtist(page.items[0])).toBe("Track Artist");
   });
 
   it("keeps multi-artist preview metadata intact when the demo track is resolved again", async () => {
@@ -91,7 +125,7 @@ describe("PMS structured contributors", () => {
     });
 
     await expect(getTrackMetadata("demo-server", "track-0")).resolves.toMatchObject({
-      contributors: [
+      trackArtists: [
         { name: "The Paper Moons", ratingKey: "artist-0" },
         { name: "Kobe Bryant" },
         { name: "AC/DC" },

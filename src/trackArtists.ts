@@ -69,8 +69,12 @@ function resolveLegacyDisplayName(displayName: string, artistLookup: ArtistLooku
 
 export function resolveTrackArtists(track: PlexItem | string, artistLookup: ArtistLookup): ResolvedTrackArtist[] {
   if (typeof track === "string") return resolveLegacyDisplayName(track, artistLookup);
-  const contributors = uniqueContributors(track.contributors || []);
+  const contributors = uniqueContributors(track.trackArtists || track.contributors || []);
   if (contributors.length) return contributors.map((contributor) => resolveContributor(contributor, artistLookup));
+  // `originalTitle` is PMS' track-artist field. Keep it as one exact credit;
+  // splitting slash-delimited text here would reintroduce the AC/DC bug.
+  const trackArtistTitle = track.originalTitle?.trim();
+  if (trackArtistTitle) return [resolveContributor({ name: trackArtistTitle }, artistLookup)];
   return resolveLegacyDisplayName(
     track.grandparentTitle || track.parentTitle || "未知歌手",
     artistLookup,

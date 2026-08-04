@@ -17,6 +17,7 @@ import {
   getManualNextIndex,
   getPrebufferTargetIndex,
   getSequentialNextIndex,
+  mergeFreshTrackMetadata,
   moveShufflePrevious,
   normalizeRestoredProgress,
   parsePersistedPlaybackSession,
@@ -114,6 +115,22 @@ const track = (index: number): PlexItem => ({
 });
 
 describe("persisted playback session", () => {
+  it("lets fresh track metadata replace a stale album-artist-only snapshot", () => {
+    const restored = track(1);
+    const fresh: PlexItem = {
+      ...restored,
+      originalTitle: "Track Artist",
+      trackArtists: [{ name: "Track Artist" }],
+      grandparentTitle: "Album Artist",
+    };
+
+    expect(mergeFreshTrackMetadata(restored, fresh)).toMatchObject({
+      grandparentTitle: "Album Artist",
+      originalTitle: "Track Artist",
+      trackArtists: [{ name: "Track Artist" }],
+    });
+  });
+
   it("stores only a compact queue and keeps the current item when trimming to 500", () => {
     const queue = Array.from({ length: PLAYBACK_SESSION_MAX_QUEUE + 8 }, (_, index) => ({
       ...track(index),
@@ -161,10 +178,11 @@ describe("persisted playback session", () => {
     expect(session?.queue[1].title).toBe("Track 1 (second occurrence)");
   });
 
-  it("preserves structured contributor order while restoring a compact queue", () => {
+  it("preserves track-level artist order while restoring a compact queue", () => {
     const collaborativeTrack: PlexItem = {
       ...track(1),
-      contributors: [
+      originalTitle: "Mira Lin / Kobe Bryant / AC/DC",
+      trackArtists: [
         { name: "Mira Lin", ratingKey: "artist-2" },
         { name: "Kobe Bryant" },
         { name: "AC/DC" },
@@ -181,8 +199,32 @@ describe("persisted playback session", () => {
       updatedAt: 1_000,
     });
 
-    expect(session?.queue[0].contributors).toEqual(collaborativeTrack.contributors);
-    expect(parsePersistedPlaybackSession(JSON.stringify(session), 1_000)?.queue[0].contributors).toEqual(collaborativeTrack.contributors);
+    expect(session?.queue[0].trackArtists).toEqual(collaborativeTrack.trackArtists);
+    expect(parsePersistedPlaybackSession(JSON.stringify(session), 1_000)?.queue[0].trackArtists).toEqual(collaborativeTrack.trackArtists);
+    expect(JSON.stringify(session)).toContain("Mira Lin / Kobe Bryant / AC/DC");
+  });
+
+  it("migrates legacy contributor snapshots into trackArtists without losing order", () => {
+    const legacy = {
+      version: 1,
+      serverId: "server-a",
+      quality: "auto",
+      queue: [{
+        ...track(1),
+        contributors: [{ name: "Mira Lin", ratingKey: "artist-2" }, { name: "Guest Artist" }],
+      }],
+      currentIndex: 0,
+      ratingKey: "track-1",
+      progress: 0,
+      shuffle: false,
+      repeat: "off",
+      updatedAt: 1_000,
+    };
+
+    expect(parsePersistedPlaybackSession(JSON.stringify(legacy), 1_000)?.queue[0].trackArtists).toEqual([
+      { name: "Mira Lin", ratingKey: "artist-2" },
+      { name: "Guest Artist" },
+    ]);
   });
 
   it("rejects tampered, stale, mismatched, and invalid-index records", () => {
