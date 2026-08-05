@@ -1,4 +1,5 @@
 import {
+  Captions,
   ChevronDown,
   Disc3,
   ListMusic,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { type LyricLine, type LyricsDocument } from "./lyrics";
+import { getLyricsActionPresentation } from "./playerActions";
 import { playbackControlLabel } from "./playerUi";
 import { trackArtistContributors, type PlexContributor, type PlexMedia, type ThemeMode } from "./types";
 import { SharedVolumeControl } from "./VolumeControl";
@@ -88,6 +90,8 @@ export interface NowPlayingViewProps {
   durationSeconds?: number;
   queueOpen?: boolean;
   queueAvailable?: boolean;
+  lyricsOpen?: boolean;
+  canToggleLyrics?: boolean;
   theme?: NowPlayingTheme;
   onSeek: (seconds: number) => void;
   onShuffleChange?: (enabled: boolean) => void;
@@ -98,6 +102,7 @@ export interface NowPlayingViewProps {
   onMutedChange?: (muted: boolean) => void;
   onVolumeChange?: (volume: number) => void;
   onToggleQueue?: () => void;
+  onToggleLyrics?: () => void;
   onClose: () => void;
   /** Disable this dialog's keyboard/focus handling while a nested dialog is open. */
   escapeEnabled?: boolean;
@@ -181,6 +186,8 @@ export function NowPlayingView({
   durationSeconds,
   queueOpen = false,
   queueAvailable = false,
+  lyricsOpen = false,
+  canToggleLyrics = false,
   theme,
   onSeek,
   onShuffleChange,
@@ -191,6 +198,7 @@ export function NowPlayingView({
   onMutedChange,
   onVolumeChange,
   onToggleQueue,
+  onToggleLyrics,
   onClose,
   escapeEnabled = true,
   onAddToPlaylist,
@@ -342,22 +350,11 @@ export function NowPlayingView({
                 <span>封面</span>
               </button>
             </div>
-            <button
-              ref={addToPlaylistButtonRef}
-              className="now-playing-action-button"
-              type="button"
-              disabled={!track || !onAddToPlaylist}
-              aria-label="添加到歌单"
-              onClick={() => track && onAddToPlaylist?.(track)}
-            >
-              <ListPlus size={17} strokeWidth={1.8} aria-hidden="true" />
-              <span>添加到歌单</span>
-            </button>
           </div>
         </header>
 
         <div className="now-playing-content">
-          <section className="now-playing-art-column" aria-label="播放视觉与曲目信息">
+          <section className="now-playing-art-column" aria-label="播放视觉">
             {displayMode === "vinyl" ? (
               <div className={`now-playing-record-stage ${activelyPlaying ? "is-playing" : "is-paused"}`}>
                 <div className="now-playing-tonearm" aria-hidden="true">
@@ -378,12 +375,6 @@ export function NowPlayingView({
                 <div className="now-playing-cover-artwork">{artwork || <Music2 size={64} strokeWidth={1.2} aria-hidden="true" />}</div>
               </div>
             )}
-              <div className="now-playing-track-meta">
-                <div className="now-playing-track-heading">
-                  <h1 id={titleId}>{track?.title || "尚未播放"}</h1>
-                </div>
-                <p>{artist}</p>
-              </div>
           </section>
         </div>
 
@@ -405,18 +396,19 @@ export function NowPlayingView({
           </div>
 
           <div className="now-playing-control-row">
-            <div className="now-playing-panel-actions" role="group" aria-label="播放队列">
-              <button
-                className={`now-playing-control-button ${queueOpen ? "is-active" : ""}`}
-                type="button"
-                disabled={!queueAvailable}
-                aria-label={queueOpen ? "隐藏播放队列" : "显示播放队列"}
-                aria-pressed={queueOpen}
-                title={queueOpen ? "隐藏播放队列" : "显示播放队列"}
-                onClick={onToggleQueue}
-              >
-                <ListMusic size={19} strokeWidth={1.8} aria-hidden="true" />
-              </button>
+            <div className="now-playing-controller-track">
+              <div className="now-playing-track-meta">
+                <div className="now-playing-track-heading">
+                  <h1 id={titleId}>{track?.title || "尚未播放"}</h1>
+                </div>
+                <p>{artist}</p>
+              </div>
+              <NowPlayingLyricsAction
+                hasTrack={Boolean(track)}
+                canToggleLyrics={canToggleLyrics}
+                lyricsOpen={lyricsOpen}
+                onToggle={onToggleLyrics}
+              />
             </div>
 
             <div className="now-playing-transport" role="group" aria-label="播放控制">
@@ -482,11 +474,66 @@ export function NowPlayingView({
               </button>
             </div>
 
-            <SharedVolumeControl variant="expanded" volume={volume} muted={muted} disabled={!track} onMutedChange={onMutedChange} onVolumeChange={onVolumeChange} />
+            <div className="now-playing-panel-actions" role="group" aria-label="播放器附加操作">
+              <button
+                ref={addToPlaylistButtonRef}
+                className="now-playing-control-button"
+                type="button"
+                disabled={!track || !onAddToPlaylist}
+                aria-label="添加到歌单"
+                title="添加到歌单"
+                onClick={() => track && onAddToPlaylist?.(track)}
+              >
+                <ListPlus size={19} strokeWidth={1.8} aria-hidden="true" />
+              </button>
+              <button
+                className={`now-playing-control-button ${queueOpen ? "is-active" : ""}`}
+                type="button"
+                disabled={!queueAvailable}
+                aria-label={queueOpen ? "隐藏播放队列" : "显示播放队列"}
+                aria-pressed={queueOpen}
+                title={queueOpen ? "隐藏播放队列" : "显示播放队列"}
+                onClick={onToggleQueue}
+              >
+                <ListMusic size={19} strokeWidth={1.8} aria-hidden="true" />
+              </button>
+              <SharedVolumeControl variant="expanded" volume={volume} muted={muted} disabled={!track} onMutedChange={onMutedChange} onVolumeChange={onVolumeChange} />
+            </div>
           </div>
         </footer>
       </div>
     </section>
+  );
+}
+
+function NowPlayingLyricsAction({ hasTrack, canToggleLyrics, lyricsOpen, onToggle }: {
+  hasTrack: boolean;
+  canToggleLyrics: boolean;
+  lyricsOpen: boolean;
+  onToggle?: () => void;
+}) {
+  const presentation = getLyricsActionPresentation({ hasTrack, canToggleLyrics, lyricsOpen });
+  const action = (
+    <button
+      className={`now-playing-control-button ${lyricsOpen ? "is-active" : ""}`}
+      type="button"
+      disabled={presentation.disabled}
+      aria-label={presentation.ariaLabel}
+      aria-pressed={lyricsOpen}
+      title={presentation.showsDisabledTooltip ? undefined : presentation.tooltip}
+      onClick={onToggle}
+    >
+      <Captions size={19} strokeWidth={1.8} aria-hidden="true" />
+    </button>
+  );
+
+  if (!presentation.showsDisabledTooltip) return action;
+
+  return (
+    <span className="now-playing-action-tooltip-anchor is-disabled">
+      {action}
+      <span className="now-playing-action-tooltip" role="tooltip">{presentation.tooltip}</span>
+    </span>
   );
 }
 

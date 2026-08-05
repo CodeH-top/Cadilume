@@ -15,6 +15,7 @@ import {
   Headphones,
   History,
   Laptop,
+  ListPlus,
   ListMusic,
   LockKeyhole,
   LoaderCircle,
@@ -883,6 +884,12 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     setSidePanel((value) => value === "lyrics" ? null : "lyrics");
   }, [canToggleLyrics]);
 
+  const openCurrentTrackPlaylistPicker = useCallback(() => {
+    if (!player.current) return;
+    setSidePanel(null);
+    setPlaylistTrack(player.current);
+  }, [player.current]);
+
   const dismissPlaybackFailure = useCallback(() => {
     setPlaybackFailurePreview(undefined);
     player.dismissPlaybackFailure();
@@ -1042,6 +1049,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         volume={player.volume}
         queueOpen={queuePanelOpen}
         queueAvailable={hasQueue}
+        lyricsOpen={lyricsPanelOpen}
+        canToggleLyrics={canToggleLyrics}
         theme={themeMode}
         onSeek={player.seek}
         onShuffleChange={player.setShuffle}
@@ -1052,13 +1061,10 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         onMutedChange={player.setMuted}
         onVolumeChange={player.setVolume}
         onToggleQueue={toggleQueuePanel}
+        onToggleLyrics={toggleLyricsPanel}
         onClose={closeNowPlaying}
         escapeEnabled={!playlistTrack && !activePlaybackFailure && !queuePanelOpen && !lyricsPanelOpen}
-        onAddToPlaylist={() => {
-          if (!player.current) return;
-          setSidePanel(null);
-          setPlaylistTrack(player.current);
-        }}
+        onAddToPlaylist={openCurrentTrackPlaylistPicker}
       />
 
       {activePlaybackFailure && (
@@ -1126,6 +1132,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         }}
         onToggleQueue={toggleQueuePanel}
         onToggleLyrics={toggleLyricsPanel}
+        onAddToPlaylist={openCurrentTrackPlaylistPicker}
         onOutputAction={() => {
           setNowPlayingOpen(false);
           setPlaylistTrack(undefined);
@@ -3270,7 +3277,7 @@ function PlaylistPicker({ serverId, track, onClose, onAdded }: {
   );
 }
 
-function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded, queueOpen, lyricsOpen, devicesOpen, outputPlatform, canOpenNowPlaying, canToggleQueue, canToggleLyrics, onOpenNowPlaying, onToggleQueue, onToggleLyrics, onOutputAction }: {
+function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded, queueOpen, lyricsOpen, devicesOpen, outputPlatform, canOpenNowPlaying, canToggleQueue, canToggleLyrics, onOpenNowPlaying, onToggleQueue, onToggleLyrics, onAddToPlaylist, onOutputAction }: {
   player: ReturnType<typeof usePlayer>;
   loading: boolean;
   buffering: boolean;
@@ -3286,6 +3293,7 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
   onOpenNowPlaying: () => void;
   onToggleQueue: () => void;
   onToggleLyrics: () => void;
+  onAddToPlaylist: () => void;
   onOutputAction: () => void;
 }) {
   const progressFill = rangeFillPercent(player.progress, player.duration);
@@ -3331,6 +3339,7 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
           lyricsOpen={lyricsOpen}
           onToggle={onToggleLyrics}
         />
+        <IconButton label="添加到歌单" disabled={!canOpenNowPlaying} onClick={onAddToPlaylist}><ListPlus size={19} /></IconButton>
         <IconButton label="播放队列" active={queueOpen} disabled={!canToggleQueue} onClick={onToggleQueue}><ListMusic size={19} /></IconButton>
         {outputPlatform !== "macos" && <IconButton label="播放设备" active={devicesOpen} onClick={onOutputAction}><Speaker size={18} /></IconButton>}
         <SharedVolumeControl variant="compact" volume={player.volume} muted={player.muted} onMutedChange={player.setMuted} onVolumeChange={player.setVolume} />
