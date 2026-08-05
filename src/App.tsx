@@ -89,6 +89,7 @@ import { libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryR
 import { createCadilumeEntryState, historyEntryCacheKey, routeEntryId, routeParentEntryId } from "./routeEntry";
 import { hasDisplayableLyrics } from "./lyrics";
 import { getPlexLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
+import { getLyricsActionPresentation } from "./playerActions";
 import { playbackControlLabel, rangeFillPercent } from "./playerUi";
 import { homeRecommendationHubs, isRecentlyAddedHub, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
 import { createArtistLookup, resolveTrackArtists, type ArtistLookup } from "./trackArtists";
@@ -3324,19 +3325,46 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
         <div className="progress-row"><span>{formatDuration(player.progress * 1000)}</span><input aria-label="播放进度" type="range" min="0" max={Math.max(1, player.duration)} step="1" value={Math.min(player.progress, player.duration || 0)} style={{ "--range-progress": `${progressFill}%` } as CSSProperties} onChange={(event) => player.seek(Number(event.target.value))} /><span>{formatDuration(player.duration * 1000)}</span></div>
       </div>
       <div className="player-extras">
-        <IconButton
-          label={lyricsOpen ? "关闭歌词" : canToggleLyrics ? "打开歌词" : canOpenNowPlaying ? "这首歌暂无歌词" : "请先播放歌曲"}
-          active={lyricsOpen}
-          disabled={!canToggleLyrics}
-          onClick={onToggleLyrics}
-        >
-          <Captions size={19} />
-        </IconButton>
+        <PlayerLyricsAction
+          hasTrack={canOpenNowPlaying}
+          canToggleLyrics={canToggleLyrics}
+          lyricsOpen={lyricsOpen}
+          onToggle={onToggleLyrics}
+        />
         <IconButton label="播放队列" active={queueOpen} disabled={!canToggleQueue} onClick={onToggleQueue}><ListMusic size={19} /></IconButton>
         {outputPlatform !== "macos" && <IconButton label="播放设备" active={devicesOpen} onClick={onOutputAction}><Speaker size={18} /></IconButton>}
         <SharedVolumeControl variant="compact" volume={player.volume} muted={player.muted} onMutedChange={player.setMuted} onVolumeChange={player.setVolume} />
       </div>
     </footer>
+  );
+}
+
+function PlayerLyricsAction({ hasTrack, canToggleLyrics, lyricsOpen, onToggle }: {
+  hasTrack: boolean;
+  canToggleLyrics: boolean;
+  lyricsOpen: boolean;
+  onToggle: () => void;
+}) {
+  const presentation = getLyricsActionPresentation({ hasTrack, canToggleLyrics, lyricsOpen });
+  const action = (
+    <IconButton
+      label={presentation.ariaLabel}
+      tooltip={presentation.showsDisabledTooltip ? null : presentation.tooltip}
+      active={lyricsOpen}
+      disabled={presentation.disabled}
+      onClick={onToggle}
+    >
+      <Captions size={19} />
+    </IconButton>
+  );
+
+  if (!presentation.showsDisabledTooltip) return action;
+
+  return (
+    <span className="player-action-tooltip-anchor is-disabled">
+      {action}
+      <span className="player-action-tooltip" role="tooltip">{presentation.tooltip}</span>
+    </span>
   );
 }
 
@@ -3487,8 +3515,8 @@ function Avatar({ account }: { account: PlexAccount }) {
     : <span className="avatar fallback">{(account.title || account.username || "P").slice(0, 1).toUpperCase()}</span>;
 }
 
-function IconButton({ label, active = false, disabled = false, onClick, children }: { label: string; active?: boolean; disabled?: boolean; onClick?: () => void; children: ReactNode }) {
-  return <button type="button" className={`icon-button ${active ? "active" : ""}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}>{children}</button>;
+function IconButton({ label, tooltip, active = false, disabled = false, onClick, children }: { label: string; tooltip?: string | null; active?: boolean; disabled?: boolean; onClick?: () => void; children: ReactNode }) {
+  return <button type="button" className={`icon-button ${active ? "active" : ""}`} aria-label={label} title={tooltip === null ? undefined : tooltip ?? label} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
 function SourceSyncOverlay() {
