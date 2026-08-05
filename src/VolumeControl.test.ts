@@ -15,6 +15,7 @@ describe("shared volume control state", () => {
     expect(volumePercent(0, false)).toBe(0);
     expect(volumePercent(0.01, false)).toBe(1);
     expect(volumePercent(0.5, false)).toBe(50);
+    expect(volumePercent(0.72, false)).toBe(72);
     expect(volumePercent(1, false)).toBe(100);
     expect(volumePercent(0.9, true)).toBe(0);
   });

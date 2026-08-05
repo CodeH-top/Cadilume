@@ -69,21 +69,23 @@ export function SharedVolumeControl({
         <VolumeIcon volume={volume} muted={muted} />
       </button>
       <div className={popoverClass}>
-        <input
-          className="shared-volume-range"
-          aria-label="播放器独立音量"
-          aria-orientation="vertical"
-          aria-valuetext={`${percent}%`}
-          title={`音量 ${percent}%`}
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={effective}
-          disabled={disabled || !onVolumeChange}
-          style={rangeStyle}
-          onChange={(event) => changeVolume(Number(event.target.value))}
-        />
+        <div className="shared-volume-range-wrap">
+          <input
+            className="shared-volume-range"
+            aria-label="播放器独立音量"
+            aria-orientation="vertical"
+            aria-valuetext={`${percent}%`}
+            title={`音量 ${percent}%`}
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={effective}
+            disabled={disabled || !onVolumeChange}
+            style={rangeStyle}
+            onChange={(event) => changeVolume(Number(event.target.value))}
+          />
+        </div>
         <output aria-live="polite">{percent}%</output>
       </div>
     </div>

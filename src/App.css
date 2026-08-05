@@ -568,11 +568,14 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .volume-control .icon-button { width: 28px; height: 28px; }
 .volume-popover { position: absolute; left: 50%; bottom: calc(100% + 9px); width: 48px; height: 132px; display: grid; grid-template-rows: minmax(0, 1fr) 18px; justify-items: center; gap: 4px; border: 1px solid var(--border-strong); border-radius: 10px; padding: 10px 8px 8px; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 10px 30px rgba(0, 0, 0, 0.28); backdrop-filter: saturate(160%) blur(16px); opacity: 0; visibility: hidden; pointer-events: none; transform: translate(-50%, 6px) scale(0.98); transform-origin: bottom center; transition: opacity 160ms ease, visibility 160ms ease, transform 160ms ease; }
 .volume-control:hover .volume-popover, .volume-control:focus-within .volume-popover { opacity: 1; visibility: visible; pointer-events: auto; transform: translate(-50%, 0) scale(1); }
-.player-bar .volume-popover input[type="range"] { width: 18px; height: 88px; margin: 0; writing-mode: vertical-lr; direction: rtl; appearance: slider-vertical; }
-.player-bar .volume-popover input[type="range"]::-webkit-slider-runnable-track { width: 3px; height: 100%; border-radius: 3px; background: linear-gradient(to top, var(--accent) 0 var(--range-progress), var(--range-track) var(--range-progress) 100%); }
-.player-bar .volume-popover input[type="range"]::-webkit-slider-thumb { width: 11px; height: 11px; margin: 0 0 0 -4px; opacity: 1; }
-.player-bar .volume-popover input[type="range"]::-moz-range-track { width: 3px; height: 100%; border-radius: 3px; background: var(--range-track); }
-.player-bar .volume-popover input[type="range"]::-moz-range-progress { width: 3px; background: var(--accent); }
+.volume-popover .shared-volume-range-wrap { --shared-volume-range-length: 88px; position: relative; width: 18px; height: var(--shared-volume-range-length); align-self: center; }
+.player-bar .volume-popover .shared-volume-range { position: absolute; left: 50%; top: 50%; width: var(--shared-volume-range-length); height: 18px; margin: 0; border: 0; padding: 0; appearance: none; -webkit-appearance: none; background: transparent; cursor: pointer; transform: translate(-50%, -50%) rotate(-90deg); transform-origin: center; }
+.player-bar .volume-popover .shared-volume-range::-webkit-slider-runnable-track { width: 100%; height: 3px; border-radius: 3px; background: linear-gradient(90deg, var(--accent) 0 var(--range-progress), var(--range-track) var(--range-progress) 100%); }
+.player-bar .volume-popover .shared-volume-range::-webkit-slider-thumb { width: 11px; height: 11px; margin-top: -4px; appearance: none; -webkit-appearance: none; border: 0; border-radius: 50%; background: var(--accent); opacity: 1; }
+.player-bar .volume-popover .shared-volume-range::-moz-range-track { height: 3px; border-radius: 3px; background: var(--range-track); }
+.player-bar .volume-popover .shared-volume-range::-moz-range-progress { height: 3px; border-radius: 3px; background: var(--accent); }
+.player-bar .volume-popover .shared-volume-range::-moz-range-thumb { width: 11px; height: 11px; border: 0; border-radius: 50%; background: var(--accent); }
+.player-bar .volume-popover .shared-volume-range:disabled { cursor: not-allowed; opacity: 0.45; }
 .volume-popover output { color: var(--muted-strong); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
 .playlist-picker-backdrop { position: fixed; z-index: var(--z-dialog); inset: 0; display: grid; place-items: center; overflow: hidden; padding: 24px; background: rgba(4, 5, 6, 0.62); backdrop-filter: blur(10px); }
 .playlist-create-dialog { width: min(430px, 100%); max-width: 100%; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--panel); box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42); }
