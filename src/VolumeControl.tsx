@@ -48,6 +48,7 @@ export function SharedVolumeControl({
   const popoverClass = compact ? "volume-popover" : "now-playing-volume-popover";
   const progressProperty = compact ? "--range-progress" : "--now-playing-volume";
   const rangeStyle = { [progressProperty]: `${rangeFillPercent(effective, 1)}%` } as CSSProperties;
+  const muteLabel = muted ? "取消静音" : "静音";
 
   const changeVolume = (next: number) => {
     const normalized = normalizeVolume(next);
@@ -61,9 +62,10 @@ export function SharedVolumeControl({
         className={buttonClass}
         type="button"
         disabled={disabled || !onMutedChange}
-        aria-label={muted ? "取消静音" : "静音"}
+        aria-label={muteLabel}
+        data-tooltip={muteLabel}
         aria-pressed={muted}
-        title={muted ? "取消静音" : "静音"}
+        title={muteLabel}
         onClick={() => onMutedChange?.(!muted)}
       >
         <VolumeIcon volume={volume} muted={muted} />

@@ -1,4 +1,5 @@
 import {
+  Captions,
   ChevronDown,
   Disc3,
   ListMusic,
@@ -13,8 +14,8 @@ import {
   SkipBack,
   SkipForward,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
-import { type LyricLine, type LyricsDocument } from "./lyrics";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { hasDisplayableLyrics, type LyricLine, type LyricsDocument } from "./lyrics";
 import { playbackControlLabel } from "./playerUi";
 import { trackArtistContributors, type PlexContributor, type PlexMedia, type ThemeMode } from "./types";
 import { SharedVolumeControl } from "./VolumeControl";
@@ -81,6 +82,8 @@ export interface NowPlayingViewProps {
   muted?: boolean;
   /** Independent player gain in the inclusive range 0...1. */
   volume?: number;
+  /** The expanded player keeps this lyrics surface visible in its right column. */
+  lyrics?: NowPlayingLyricsState;
   /** The parent owns artwork loading/caching and may pass an image or fallback node. */
   artwork?: ReactNode;
   /** Optional timeline values are in seconds, matching usePlayer's public API. */
@@ -98,7 +101,7 @@ export interface NowPlayingViewProps {
   onMutedChange?: (muted: boolean) => void;
   onVolumeChange?: (volume: number) => void;
   onToggleQueue?: () => void;
-  /** Shared app-level controls displayed before the expanded-player mode switch. */
+  /** Shared app-level controls displayed at the right end of the expanded-player title bar. */
   headerActions?: ReactNode;
   onClose: () => void;
   /** Disable this dialog's keyboard/focus handling while a nested dialog is open. */
@@ -178,6 +181,7 @@ export function NowPlayingView({
   repeat = "off",
   muted = false,
   volume = 1,
+  lyrics,
   artwork,
   progressSeconds,
   durationSeconds,
@@ -310,18 +314,20 @@ export function NowPlayingView({
       <div className="now-playing-frame">
         <header className="now-playing-header">
           <div className="now-playing-header-drag-region" data-tauri-drag-region aria-hidden="true" />
-          <button
-            className="now-playing-icon-button now-playing-close-button"
-            type="button"
-            aria-label="关闭正在播放"
-            title="关闭正在播放"
-            onClick={onClose}
-          >
-            <ChevronDown size={22} strokeWidth={1.8} aria-hidden="true" />
-          </button>
+          <div className="now-playing-header-leading">
+            <button
+              className="now-playing-icon-button now-playing-close-button"
+              type="button"
+              aria-label="关闭正在播放"
+              data-tooltip="关闭正在播放"
+              title="关闭正在播放"
+              onClick={onClose}
+            >
+              <ChevronDown size={22} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+          </div>
           <span className="now-playing-header-spacer" aria-hidden="true" />
           <div className="now-playing-header-actions">
-            {headerActions}
             <div className="now-playing-mode-switch" role="group" aria-label="展开播放器模式">
               <button
                 className={`now-playing-mode-button ${displayMode === "vinyl" ? "is-selected" : ""}`}
@@ -346,6 +352,7 @@ export function NowPlayingView({
                 <span>封面</span>
               </button>
             </div>
+            {headerActions}
           </div>
         </header>
 
@@ -372,6 +379,7 @@ export function NowPlayingView({
               </div>
             )}
           </section>
+          <ExpandedLyricsPanel track={track} lyrics={lyrics} onSeek={onSeek} />
         </div>
 
         <footer className="now-playing-controller" aria-label="完整播放器控制">
@@ -407,6 +415,7 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onShuffleChange}
                 aria-label={shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"}
+                data-tooltip={shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"}
                 aria-pressed={shuffle}
                 title={shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"}
                 onClick={() => onShuffleChange?.(!shuffle)}
@@ -418,6 +427,7 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onPrevious}
                 aria-label="上一首"
+                data-tooltip="上一首"
                 title="上一首"
                 onClick={onPrevious}
               >
@@ -428,6 +438,7 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onTogglePlayback || loading}
                 aria-label={playbackLabel}
+                data-tooltip={playbackLabel}
                 title={playbackLabel}
                 aria-busy={playbackBusy || undefined}
                 aria-disabled={loading || undefined}
@@ -444,6 +455,7 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onNext}
                 aria-label="下一首"
+                data-tooltip="下一首"
                 title="下一首"
                 onClick={onNext}
               >
@@ -454,6 +466,7 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onRepeatChange}
                 aria-label={repeatLabel}
+                data-tooltip={repeatLabel}
                 aria-pressed={repeat !== "off"}
                 title={repeatLabel}
                 onClick={cycleRepeat}
@@ -471,6 +484,7 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onAddToPlaylist}
                 aria-label="添加到歌单"
+                data-tooltip="添加到歌单"
                 title="添加到歌单"
                 onClick={() => track && onAddToPlaylist?.(track)}
               >
@@ -481,6 +495,7 @@ export function NowPlayingView({
                 type="button"
                 disabled={!queueAvailable}
                 aria-label={queueOpen ? "隐藏播放队列" : "显示播放队列"}
+                data-tooltip={queueOpen ? "隐藏播放队列" : "显示播放队列"}
                 aria-pressed={queueOpen}
                 title={queueOpen ? "隐藏播放队列" : "显示播放队列"}
                 onClick={onToggleQueue}
@@ -491,6 +506,87 @@ export function NowPlayingView({
             </div>
           </div>
         </footer>
+      </div>
+    </section>
+  );
+}
+
+function ExpandedLyricsPanel({ track, lyrics, onSeek }: {
+  track?: NowPlayingTrack;
+  lyrics?: NowPlayingLyricsState;
+  onSeek: (seconds: number) => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const lineRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const trackIdentity = String(track?.ratingKey ?? track?.key ?? track?.title ?? "");
+  const previousTrackIdentityRef = useRef(trackIdentity);
+  const lines = lyrics?.document?.lines ?? [];
+  const activeIndex = lyrics?.activeIndex ?? -1;
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    if (previousTrackIdentityRef.current !== trackIdentity) {
+      previousTrackIdentityRef.current = trackIdentity;
+      lineRefs.current = {};
+      list.scrollTop = 0;
+      return;
+    }
+    if (!lyrics?.document?.timed) return;
+    const activeLine = lines[activeIndex];
+    if (!activeLine || activeLine.clear) return;
+    const node = lineRefs.current[activeLine.id];
+    if (!node || typeof list.scrollTo !== "function") return;
+    const listRect = list.getBoundingClientRect();
+    const nodeRect = node.getBoundingClientRect();
+    const nextScrollTop = getPlexLyricsScrollTop({
+      scrollTop: list.scrollTop,
+      viewportHeight: list.clientHeight,
+      contentHeight: list.scrollHeight,
+      targetTop: nodeRect.top - listRect.top,
+      targetHeight: nodeRect.height,
+    });
+    if (Math.abs(nextScrollTop - list.scrollTop) < 0.5) return;
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    list.scrollTo({ top: nextScrollTop, behavior: reducedMotion ? "auto" : "smooth" });
+  }, [activeIndex, lines, lyrics?.document?.timed, trackIdentity]);
+
+  return (
+    <section className="now-playing-panel now-playing-lyrics-panel" aria-label="展开播放器歌词">
+      <div
+        ref={listRef}
+        className="now-playing-lyrics-list"
+        aria-live="polite"
+        aria-busy={lyrics?.loading || undefined}
+        tabIndex={0}
+      >
+        {lyrics?.loading ? (
+          <div className="now-playing-panel-message" role="status"><LoaderCircle className="spin" size={22} /><span>正在读取歌词...</span></div>
+        ) : lyrics?.error ? (
+          <div className="now-playing-panel-message is-error" role="alert"><Captions size={24} /><span>歌词加载失败</span></div>
+        ) : !hasDisplayableLyrics(lyrics?.document) ? (
+          <div className="now-playing-panel-message"><Captions size={24} /><span>{track ? "这首歌暂无可用歌词" : "播放歌曲后显示歌词"}</span></div>
+        ) : lines.map((line, index) => {
+          if (line.clear || !line.texts.some((text) => text.trim())) {
+            return <div className="now-playing-lyric-gap" key={line.id} aria-hidden="true" />;
+          }
+          const timed = lyrics?.document?.timed === true && line.startMs !== null;
+          const active = timed && index === activeIndex;
+          return (
+            <button
+              ref={(node) => { lineRefs.current[line.id] = node; }}
+              className={`now-playing-lyric-line ${active ? "is-active" : ""} ${timed ? "is-timed" : "is-static"}`}
+              key={line.id}
+              type="button"
+              disabled={!timed}
+              aria-current={active ? "true" : undefined}
+              aria-label={timed ? `跳转到 ${formatSeconds((line.startMs || 0) / 1000)}` : undefined}
+              onClick={() => timed && onSeek((line.startMs || 0) / 1000)}
+            >
+              {line.texts.map((text, textIndex) => <span key={`${line.id}-${textIndex}`}>{text}</span>)}
+            </button>
+          );
+        })}
       </div>
     </section>
   );

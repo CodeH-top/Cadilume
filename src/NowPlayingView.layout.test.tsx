@@ -38,17 +38,52 @@ describe("expanded player controller layout", () => {
     expect(markup.slice(actionsStart)).toContain('aria-label="显示播放队列"');
   });
 
-  it("does not render a lyrics entry in the expanded player", () => {
+  it("keeps the right-side lyrics surface without adding a footer lyrics button", () => {
     const markup = renderExpandedPlayer();
+    const controllerStart = markup.indexOf("now-playing-controller");
 
+    expect(markup).toContain('aria-label="展开播放器歌词"');
+    expect(markup).toContain("这首歌暂无可用歌词");
     expect(markup).not.toContain('aria-label="打开歌词"');
-    expect(markup).not.toContain('aria-label="歌词不可用：暂无歌词"');
+    expect(markup.slice(controllerStart)).not.toContain("歌词");
   });
 
-  it("keeps app-level appearance and connection actions in the title bar", () => {
+  it("keeps the close control left while the mode switch precedes the right-side appearance actions", () => {
     const markup = renderExpandedPlayer();
     const headerEnd = markup.indexOf("now-playing-content");
+    const leadingStart = markup.indexOf("now-playing-header-leading");
+    const spacerStart = markup.indexOf("now-playing-header-spacer");
+    const closeStart = markup.indexOf('aria-label="关闭正在播放"');
+    const modeSwitchStart = markup.indexOf("now-playing-mode-switch");
+    const appActionsStart = markup.indexOf('data-testid="expanded-player-header-actions"');
 
     expect(markup.slice(0, headerEnd)).toContain('data-testid="expanded-player-header-actions"');
+    expect(leadingStart).toBeGreaterThan(0);
+    expect(spacerStart).toBeGreaterThan(leadingStart);
+    expect(markup.slice(leadingStart, spacerStart)).toContain('aria-label="关闭正在播放"');
+    expect(markup.slice(leadingStart, spacerStart)).not.toContain("now-playing-mode-switch");
+    expect(closeStart).toBeLessThan(modeSwitchStart);
+    expect(modeSwitchStart).toBeGreaterThan(0);
+    expect(modeSwitchStart).toBeLessThan(appActionsStart);
+  });
+
+  it("keeps the bent tonearm parts mounted with the vinyl stage", () => {
+    const markup = renderExpandedPlayer();
+    const tonearmStart = markup.indexOf("now-playing-tonearm");
+    const recordStart = markup.indexOf('class="now-playing-record"');
+
+    expect(tonearmStart).toBeGreaterThan(0);
+    expect(tonearmStart).toBeLessThan(recordStart);
+    expect(markup).toContain('data-testid="tonearm-pivot"');
+    expect(markup).toContain('data-testid="tonearm-arm"');
+    expect(markup).toContain('data-testid="tonearm-cartridge"');
+  });
+
+  it("exposes centered tooltip content for every icon-only expanded-player control", () => {
+    const markup = renderExpandedPlayer();
+
+    for (const label of ["关闭正在播放", "随机播放当前列表", "上一首", "播放", "下一首", "顺序播放，列表结束后停止", "添加到歌单", "显示播放队列"]) {
+      expect(markup).toContain(`data-tooltip="${label}"`);
+    }
   });
 });

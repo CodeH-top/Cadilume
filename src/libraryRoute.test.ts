@@ -41,11 +41,13 @@ describe("library routes", () => {
 
   it("identifies the current detail route before a duplicate navigation is created", () => {
     const currentArtist = libraryDetailRoute("artist", "artist-42");
+    const currentAlbum = libraryDetailRoute("album", "album-42");
 
     expect(isCurrentLibraryDetailRoute(currentArtist, "artist", "artist-42")).toBe(true);
     expect(isCurrentLibraryDetailRoute(currentArtist, "artist", " artist-42 ")).toBe(true);
     expect(isCurrentLibraryDetailRoute(currentArtist, "album", "artist-42")).toBe(false);
     expect(isCurrentLibraryDetailRoute(currentArtist, "artist", "artist-24")).toBe(false);
+    expect(isCurrentLibraryDetailRoute(currentAlbum, "album", " album-42 ")).toBe(true);
     expect(isCurrentLibraryDetailRoute({ view: "artists" }, "artist", "artist-42")).toBe(false);
   });
 

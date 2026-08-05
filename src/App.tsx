@@ -1109,6 +1109,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         repeat={player.repeat}
         muted={player.muted}
         volume={player.volume}
+        lyrics={nowPlayingLyrics}
         queueOpen={queuePanelOpen}
         queueAvailable={hasQueue}
         theme={themeMode}
@@ -1503,7 +1504,7 @@ function KeepAliveRoutePage({ cacheKey, children }: { cacheKey: string; children
   return <>
     <div ref={pageRef} className={`route-page-scroll ${route.view === "tracks" ? "is-track-workspace" : ""}`.trim()} data-route-entry={cacheKey}>{children}</div>
     {active && showBackToTop && (
-      <button className="route-back-to-top" type="button" aria-label="回到顶部" title="回到顶部" onClick={scrollToRouteTop}>
+      <button className="route-back-to-top" type="button" aria-label="回到顶部" data-tooltip="回到顶部" title="回到顶部" onClick={scrollToRouteTop}>
         <ArrowUp size={18} strokeWidth={2.2} aria-hidden="true" />
       </button>
     )}
@@ -1553,6 +1554,12 @@ function RoutePage() {
 
   const openTrackArtist = useCallback((artist: PlexItem) => {
     if (artist.type === "artist") navigateToDetail("artist", artist.ratingKey);
+  }, [navigateToDetail]);
+
+  const openTrackAlbum = useCallback((track: PlexItem) => {
+    const albumRatingKey = track.parentRatingKey?.trim();
+    if (!albumRatingKey) return;
+    navigateToDetail("album", albumRatingKey);
   }, [navigateToDetail]);
 
   const openPlaylist = useCallback((nextPlaylist: PlexPlaylist) => {
@@ -1698,6 +1705,7 @@ function RoutePage() {
       onShuffle={() => shuffleContext(playlistItems)}
       onPlayTrack={(track, context) => runtime.player.playContext(track, context)}
       onOpenArtist={openTrackArtist}
+      onOpenAlbum={openTrackAlbum}
     />
   ) : loading && view !== "search" ? <LoadingState /> : (
     <ContentView
@@ -1731,6 +1739,7 @@ function RoutePage() {
       onOpen={openItem}
       onTracksRouteChange={handleRouteChange}
       onOpenArtist={openTrackArtist}
+      onOpenAlbum={openTrackAlbum}
       onOpenPlaylist={openPlaylist}
       onPlayRecommendationItem={runtime.playRecommendationItem}
       onPlayRecommendationPlaylist={runtime.playRecommendationPlaylist}
@@ -1785,6 +1794,7 @@ interface ContentViewProps {
   onOpen: (item: PlexItem) => void;
   onTracksRouteChange: (route: LibraryRoute) => void;
   onOpenArtist: (artist: PlexItem) => void;
+  onOpenAlbum: (track: PlexItem) => void;
   onOpenPlaylist: (playlist: PlexPlaylist) => void;
   onPlayRecommendationItem: (item: PlexItem, context: PlexItem[]) => Promise<void>;
   onPlayRecommendationPlaylist: (playlist: PlexPlaylist) => Promise<void>;
@@ -1837,7 +1847,7 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
           <span>歌单</span>
           <ChevronDown size={15} strokeWidth={2} aria-hidden="true" />
         </button>
-        <button className="sidebar-playlists-create" type="button" aria-label="新建歌单" title="新建歌单" onClick={onCreate}>
+        <button className="sidebar-playlists-create" type="button" aria-label="新建歌单" data-tooltip="新建歌单" title="新建歌单" onClick={onCreate}>
           <Plus size={16} strokeWidth={2} aria-hidden="true" />
         </button>
       </div>
@@ -1877,9 +1887,9 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
 
 function ContentView(props: ContentViewProps) {
   if (props.view === "settings") return <SettingsView {...props} />;
-  if (props.detail) return <DetailView detail={props.detail} serverId={props.serverId} artists={props.artists} onBack={props.onBack} onPlay={props.onPlayDetail} onShuffle={props.onShuffleDetail} onOpen={props.onOpen} onOpenArtist={props.onOpenArtist} onPlayTrack={props.onPlayTrack} />;
-  if (props.view === "search") return <SearchResults hubs={props.hubs} query={props.searchText} artists={props.artists} onOpen={props.onOpen} onOpenArtist={props.onOpenArtist} onPlayTrack={props.onPlayTrack} />;
-  if (props.view === "tracks") return <PaginatedTracksView serverId={props.serverId} sectionKey={props.sectionKey} route={props.route} artists={props.artists} onRouteChange={props.onTracksRouteChange} onOpenArtist={props.onOpenArtist} onPlay={props.onPlayTrack} />;
+  if (props.detail) return <DetailView detail={props.detail} serverId={props.serverId} artists={props.artists} onBack={props.onBack} onPlay={props.onPlayDetail} onShuffle={props.onShuffleDetail} onOpen={props.onOpen} onOpenArtist={props.onOpenArtist} onOpenAlbum={props.onOpenAlbum} onPlayTrack={props.onPlayTrack} />;
+  if (props.view === "search") return <SearchResults hubs={props.hubs} query={props.searchText} artists={props.artists} onOpen={props.onOpen} onOpenArtist={props.onOpenArtist} onOpenAlbum={props.onOpenAlbum} onPlayTrack={props.onPlayTrack} />;
+  if (props.view === "tracks") return <PaginatedTracksView serverId={props.serverId} sectionKey={props.sectionKey} route={props.route} artists={props.artists} onRouteChange={props.onTracksRouteChange} onOpenArtist={props.onOpenArtist} onOpenAlbum={props.onOpenAlbum} onPlay={props.onPlayTrack} />;
   if (props.view === "artists") return <CardCollection title="歌手" items={props.items} artistGrid indexed onOpen={props.onOpen} />;
   if (props.view === "albums") return <CardCollection title="专辑" items={props.items} indexed onOpen={props.onOpen} />;
   return (
@@ -2004,7 +2014,7 @@ function RecommendationsView({
   );
 }
 
-function PlaylistDetailView({ playlist, tracks, artists, loading, error, onBack, onRetry, onPlay, onShuffle, onPlayTrack, onOpenArtist }: {
+function PlaylistDetailView({ playlist, tracks, artists, loading, error, onBack, onRetry, onPlay, onShuffle, onPlayTrack, onOpenArtist, onOpenAlbum }: {
   playlist: PlexPlaylist;
   tracks: PlexItem[];
   artists: PlexItem[];
@@ -2016,6 +2026,7 @@ function PlaylistDetailView({ playlist, tracks, artists, loading, error, onBack,
   onShuffle: () => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
   onOpenArtist: (artist: PlexItem) => void;
+  onOpenAlbum: (track: PlexItem) => void;
 }) {
   const trackCount = loading ? playlist.leafCount ?? 0 : tracks.length;
   return (
@@ -2038,7 +2049,7 @@ function PlaylistDetailView({ playlist, tracks, artists, loading, error, onBack,
       ) : error ? (
         <div className="playlist-detail-state is-error" role="alert"><TriangleAlert size={24} /><strong>无法读取这个歌单</strong><span>{error}</span><button className="secondary-button" type="button" onClick={onRetry}><RefreshCw size={15} />重试</button></div>
       ) : tracks.length ? (
-        <TrackTable title="曲目" tracks={tracks} artists={artists} onOpenArtist={onOpenArtist} onPlay={onPlayTrack} />
+        <TrackTable title="曲目" tracks={tracks} artists={artists} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} />
       ) : <EmptyState title="这个歌单还没有歌曲" description={playlist.smart ? "Plex 当前没有返回符合条件的曲目。" : "可以稍后从歌曲菜单向可写歌单添加内容。"} icon={<ListMusic size={28} />} />}
     </>
   );
@@ -2119,7 +2130,11 @@ function MediaCardGrid({ items, round, compact, onOpen }: { items: PlexItem[]; r
   );
 }
 
-function DetailView({ detail, serverId, artists, onBack, onPlay, onShuffle, onOpen, onOpenArtist, onPlayTrack }: {
+function DetailBackButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return <IconButton className="detail-back-button" label={label} onClick={onClick}><ArrowLeft size={18} strokeWidth={2} aria-hidden="true" /></IconButton>;
+}
+
+function DetailView({ detail, serverId, artists, onBack, onPlay, onShuffle, onOpen, onOpenArtist, onOpenAlbum, onPlayTrack }: {
   detail: { source: PlexItem; children: PlexItem[] };
   serverId?: string;
   artists: PlexItem[];
@@ -2128,8 +2143,10 @@ function DetailView({ detail, serverId, artists, onBack, onPlay, onShuffle, onOp
   onShuffle: () => void;
   onOpen: (item: PlexItem) => void;
   onOpenArtist: (artist: PlexItem) => void;
+  onOpenAlbum: (track: PlexItem) => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
 }) {
+  const runtime = useMusicShellRuntime();
   if (detail.source.type === "artist") {
     return (
       <ArtistDetailView
@@ -2140,21 +2157,33 @@ function DetailView({ detail, serverId, artists, onBack, onPlay, onShuffle, onOp
         onBack={onBack}
         onOpen={onOpen}
         onOpenArtist={onOpenArtist}
+        onOpenAlbum={onOpenAlbum}
         onPlayTrack={onPlayTrack}
       />
     );
   }
 
   const tracks = detail.children.filter((item) => item.type === "track");
-  const detailMeta = detail.source.parentTitle ? `专辑 · ${detail.source.parentTitle}` : "专辑";
+  const albumArtist = detail.source.parentTitle?.trim();
+  const albumMetadata = [albumArtist, detail.source.year === undefined ? undefined : String(detail.source.year)].filter(Boolean).join(" · ");
   return (
     <section className="detail-page album-detail-page">
-      <button className="back-button" onClick={onBack}><ArrowLeft size={17} />返回</button>
-      <header className="detail-hero">
+      <DetailBackButton label="返回专辑列表" onClick={onBack} />
+      <header className="detail-hero album-detail-hero">
         <Artwork item={detail.source} size="hero" />
-        <div><h1>{detail.source.title}</h1><p>{detailMeta}</p>{tracks.length > 0 && <div className="detail-actions"><button className="primary-button" onClick={onPlay}><Play size={17} fill="currentColor" />播放</button><button className="secondary-button" onClick={onShuffle}><Shuffle size={16} />随机播放</button></div>}</div>
+        <div className="album-detail-copy">
+          <h1>{detail.source.title}</h1>
+          {albumMetadata && <p className="album-detail-meta">{albumMetadata}</p>}
+          {tracks.length > 0 && (
+            <div className="detail-actions">
+              <button className="primary-button" type="button" onClick={onPlay}><Play size={17} fill="currentColor" aria-hidden="true" />播放</button>
+              <IconButton className="album-action-button" label="随机播放" onClick={onShuffle}><Shuffle size={18} aria-hidden="true" /></IconButton>
+              <IconButton className="album-action-button" label="添加到歌单" disabled={!serverId} onClick={() => runtime.openPlaylistPicker(tracks, `${detail.source.title} · ${tracks.length} 首歌曲`)}><ListPlus size={18} /></IconButton>
+            </div>
+          )}
+        </div>
       </header>
-      {tracks.length > 0 && <TrackTable title="曲目" tracks={tracks} artists={artists} onOpenArtist={onOpenArtist} onPlay={onPlayTrack} />}
+      {tracks.length > 0 && <TrackTable title="曲目" tracks={tracks} artists={artists} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} />}
     </section>
   );
 }
@@ -2209,13 +2238,14 @@ function ArtistBiography({ summary, id }: { summary?: string; id: string }) {
 
 type ArtistBulkAction = "append" | "next" | "playlist";
 
-function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArtist, onPlayTrack }: {
+function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArtist, onOpenAlbum, onPlayTrack }: {
   detail: { source: PlexItem; children: PlexItem[] };
   serverId?: string;
   artists: PlexItem[];
   onBack: () => void;
   onOpen: (item: PlexItem) => void;
   onOpenArtist: (artist: PlexItem) => void;
+  onOpenAlbum: (track: PlexItem) => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
 }) {
   const runtime = useMusicShellRuntime();
@@ -2414,7 +2444,7 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
 
   return (
     <section className="detail-page artist-detail-page">
-      <button className="back-button artist-back-button" type="button" onClick={onBack}><ArrowLeft size={18} strokeWidth={2} />返回歌手列表</button>
+      <DetailBackButton label="返回歌手列表" onClick={onBack} />
       <div className="artist-detail-overview">
         <div className="artist-detail-artwork">
           <Artwork item={detail.source} size="hero" className="round" />
@@ -2468,7 +2498,7 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
         </div>
       ) : (
         <div id={`${tabIdBase}-tracks-panel`} className="artist-detail-panel artist-tracks-panel" role="tabpanel" aria-labelledby={`${tabIdBase}-tracks-tab`} aria-busy={tracksLoading || undefined}>
-          {tracks.length ? <ArtistTrackTable tracks={tracks} artists={artists} totalSize={totalSize} sort={trackSort} onSort={setTrackSort} onOpenArtist={onOpenArtist} onPlay={onPlayTrack} /> : tracksLoading ? (
+          {tracks.length ? <ArtistTrackTable tracks={tracks} artists={artists} totalSize={totalSize} sort={trackSort} onSort={setTrackSort} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} /> : tracksLoading ? (
             <div className="artist-track-list-state" role="status"><LoaderCircle className="spin" size={21} /><span>正在读取歌曲…</span></div>
           ) : tracksError ? (
             <div className="artist-track-list-state is-error" role="alert"><TriangleAlert size={22} /><strong>无法读取歌曲</strong><button className="secondary-button" type="button" onClick={() => void loadNextTrackPage()}><RefreshCw size={15} />重试</button></div>
@@ -2487,16 +2517,17 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
   );
 }
 
-function ArtistTrackTable({ tracks, artists, totalSize, sort, onSort, onOpenArtist, onPlay }: {
+function ArtistTrackTable({ tracks, artists, totalSize, sort, onSort, onOpenArtist, onOpenAlbum, onPlay }: {
   tracks: PlexItem[];
   artists: PlexItem[];
   totalSize?: number;
   sort?: TrackSortState;
   onSort: (sort: TrackSortState | undefined) => void;
   onOpenArtist: (artist: PlexItem) => void;
+  onOpenAlbum: (track: PlexItem) => void;
   onPlay: (track: PlexItem, context: PlexItem[]) => void;
 }) {
-  return <TrackTableGrid label="歌手全部歌曲" tracks={tracks} artists={artists} totalSize={totalSize} sort={sort} onSort={onSort} onOpenArtist={onOpenArtist} onPlay={onPlay} />;
+  return <TrackTableGrid label="歌手全部歌曲" tracks={tracks} artists={artists} totalSize={totalSize} sort={sort} onSort={onSort} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlay} />;
 }
 
 function TrackSortHeader({ label, accessibleLabel = label, sortKey, sort, onSort, className = "" }: {
@@ -2565,7 +2596,26 @@ function TrackArtistsCell({ track, artistLookup, onOpenArtist }: {
   );
 }
 
-function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpenArtist, onPlay, startIndex = 0, selection }: {
+function TrackAlbumCell({ track, onOpenAlbum }: { track: PlexItem; onOpenAlbum: (track: PlexItem) => void }) {
+  const albumTitle = trackAlbum(track);
+  const albumRatingKey = track.parentRatingKey?.trim();
+  if (!albumRatingKey) {
+    return <span className="track-album-cell track-album-unavailable" role="cell" title={albumTitle}>{albumTitle}</span>;
+  }
+  return (
+    <span className="track-album-cell" role="cell" onClick={(event) => event.stopPropagation()}>
+      <button
+        className="track-album-link"
+        type="button"
+        aria-label={`打开专辑“${albumTitle}”`}
+        title={`打开专辑“${albumTitle}”`}
+        onClick={() => onOpenAlbum(track)}
+      >{albumTitle}</button>
+    </span>
+  );
+}
+
+function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpenArtist, onOpenAlbum, onPlay, startIndex = 0, selection }: {
   label: string;
   tracks: PlexItem[];
   artists: PlexItem[];
@@ -2573,6 +2623,7 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
   sort?: TrackSortState;
   onSort: (sort: TrackSortState | undefined) => void;
   onOpenArtist: (artist: PlexItem) => void;
+  onOpenAlbum: (track: PlexItem) => void;
   onPlay: (track: PlexItem, context: PlexItem[]) => void;
   startIndex?: number;
   selection?: {
@@ -2615,7 +2666,7 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
           <span className="track-artwork-cell" role="cell"><Artwork item={track} size="small" /></span>
           <span className="track-title" role="cell" title={track.title}><strong>{track.title}</strong></span>
           <TrackArtistsCell track={track} artistLookup={artistLookup} onOpenArtist={onOpenArtist} />
-          <span className="truncate" role="cell">{trackAlbum(track)}</span>
+          <TrackAlbumCell track={track} onOpenAlbum={onOpenAlbum} />
           <span className="duration-cell" role="cell">{formatDuration(track.duration)}</span>
         </div>
       ))}
@@ -2661,13 +2712,14 @@ function paginationSequence(current: number, total: number): Array<number | "ell
   return sequence;
 }
 
-function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChange, onOpenArtist, onPlay }: {
+function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChange, onOpenArtist, onOpenAlbum, onPlay }: {
   serverId?: string;
   sectionKey?: string;
   route: LibraryRoute;
   artists: PlexItem[];
   onRouteChange: (route: LibraryRoute) => void;
   onOpenArtist: (artist: PlexItem) => void;
+  onOpenAlbum: (track: PlexItem) => void;
   onPlay: (track: PlexItem, context: PlexItem[]) => void;
 }) {
   const runtime = useMusicShellRuntime();
@@ -2761,8 +2813,11 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
   if (error) return <EmptyState title="无法读取歌曲" description={error} icon={<TriangleAlert size={28} />} />;
   return (
     <section className="track-section has-accent-heading paginated-track-section" aria-busy={loading || undefined}>
-      <div className="page-heading sticky-page-heading">
-        <div><LibraryPageTitle>歌曲</LibraryPageTitle><p>{totalSize ? `共 ${totalSize} 首歌曲` : loading ? "正在读取歌曲…" : "当前资料库没有歌曲"}</p></div>
+      <div className="page-heading sticky-page-heading track-page-heading">
+        <div className="track-page-heading-copy">
+          <LibraryPageTitle>歌曲</LibraryPageTitle>
+          <span className="track-page-count" aria-live="polite">{totalSize ? `共 ${totalSize} 首歌曲` : loading ? "正在读取歌曲…" : "当前资料库没有歌曲"}</span>
+        </div>
         {selectedTracks.length > 0 && (
           <div className="track-selection-actions" role="group" aria-label="已选歌曲操作">
             <span className="track-selection-summary">已选择 {selectedTracks.length} 首</span>
@@ -2778,7 +2833,7 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
       {loading && !tracks.length ? <LoadingState /> : tracks.length ? (
         <div className="paginated-track-workspace">
           <div ref={tableScrollRef} className="paginated-track-table-scroll" data-route-scroll-container>
-            <TrackTableGrid label="歌曲" tracks={tracks} artists={artists} totalSize={totalSize} sort={sort} onSort={updateSort} onOpenArtist={onOpenArtist} onPlay={onPlay} startIndex={start} selection={{ selectedRatingKeys, onToggleTrack: toggleTrack, onTogglePage: togglePage }} />
+            <TrackTableGrid label="歌曲" tracks={tracks} artists={artists} totalSize={totalSize} sort={sort} onSort={updateSort} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlay} startIndex={start} selection={{ selectedRatingKeys, onToggleTrack: toggleTrack, onTogglePage: togglePage }} />
           </div>
           <nav className="track-pagination" aria-label="歌曲分页">
             {page > 1 && <button type="button" onClick={() => updatePage(1)} aria-label="首页">首页</button>}
@@ -2793,18 +2848,18 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
   );
 }
 
-function TrackTable({ title, tracks, artists, accentHeading = false, onOpenArtist, onPlay }: { title: string; tracks: PlexItem[]; artists: PlexItem[]; accentHeading?: boolean; onOpenArtist: (artist: PlexItem) => void; onPlay: (track: PlexItem, context: PlexItem[]) => void }) {
+function TrackTable({ title, tracks, artists, accentHeading = false, onOpenArtist, onOpenAlbum, onPlay }: { title: string; tracks: PlexItem[]; artists: PlexItem[]; accentHeading?: boolean; onOpenArtist: (artist: PlexItem) => void; onOpenAlbum: (track: PlexItem) => void; onPlay: (track: PlexItem, context: PlexItem[]) => void }) {
   const [sort, setSort] = useState<TrackSortState>();
   const displayedTracks = useMemo(() => sortTracks(tracks, sort), [sort, tracks]);
   return (
     <section className={`track-section ${accentHeading ? "has-accent-heading" : ""}`.trim()}>
       <div className="section-heading"><h1>{title}</h1></div>
-      <TrackTableGrid label={title} tracks={displayedTracks} artists={artists} sort={sort} onSort={setSort} onOpenArtist={onOpenArtist} onPlay={onPlay} />
+      <TrackTableGrid label={title} tracks={displayedTracks} artists={artists} sort={sort} onSort={setSort} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlay} />
     </section>
   );
 }
 
-function SearchResults({ hubs, query, artists, onOpen, onOpenArtist, onPlayTrack }: { hubs: PlexHub[]; query: string; artists: PlexItem[]; onOpen: (item: PlexItem) => void; onOpenArtist: (artist: PlexItem) => void; onPlayTrack: (track: PlexItem, context: PlexItem[]) => void }) {
+function SearchResults({ hubs, query, artists, onOpen, onOpenArtist, onOpenAlbum, onPlayTrack }: { hubs: PlexHub[]; query: string; artists: PlexItem[]; onOpen: (item: PlexItem) => void; onOpenArtist: (artist: PlexItem) => void; onOpenAlbum: (track: PlexItem) => void; onPlayTrack: (track: PlexItem, context: PlexItem[]) => void }) {
   const total = hubs.reduce((sum, hub) => sum + hub.items.length, 0);
   if (!query) return <EmptyState title="搜索资料库" description="输入歌曲、专辑或歌手名称。" icon={<Search size={28} />} />;
   if (!total) return <EmptyState title={`没有找到“${query}”`} description="尝试更短的关键词，或切换到其他音乐资料库。" icon={<Search size={28} />} />;
@@ -2812,7 +2867,7 @@ function SearchResults({ hubs, query, artists, onOpen, onOpenArtist, onPlayTrack
     <>
       <div className="page-heading"><div><h1>“{query}”的搜索结果</h1><p>共找到 {total} 项内容</p></div></div>
       {hubs.map((hub, index) => hub.type === "track"
-        ? <TrackTable key={`${hub.title}-${index}`} title={hub.title} tracks={hub.items} artists={artists} onOpenArtist={onOpenArtist} onPlay={onPlayTrack} />
+        ? <TrackTable key={`${hub.title}-${index}`} title={hub.title} tracks={hub.items} artists={artists} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} />
         : <CardCollection key={`${hub.title}-${index}`} title={hub.title} items={hub.items} round={hub.type === "artist"} compact onOpen={onOpen} />)}
     </>
   );
@@ -3103,7 +3158,8 @@ function ThemeCycleButton({ mode, resolvedTheme, onChange }: { mode: ThemeMode; 
     const bounds = triggerRef.current?.getBoundingClientRect();
     onChange(nextMode, bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : undefined);
   };
-  return <button ref={triggerRef} className="icon-button theme-cycle-button" type="button" aria-label={`${currentLabel}；点击切换为${nextLabel}`} title={`${currentLabel}；点击切换为${nextLabel}`} onClick={cycle}><CurrentIcon size={18} strokeWidth={1.9} aria-hidden="true" /></button>;
+  const tooltip = `${currentLabel}；点击切换为${nextLabel}`;
+  return <button ref={triggerRef} className="icon-button theme-cycle-button" type="button" aria-label={tooltip} data-tooltip={tooltip} title={tooltip} onClick={cycle}><CurrentIcon size={18} strokeWidth={1.9} aria-hidden="true" /></button>;
 }
 
 const QueueItem = memo(function QueueItem({ track, index, active, onSelect, onRemove }: {
@@ -3683,6 +3739,7 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
           <button
             className={`play-button ${playbackBusy ? "is-loading" : ""}`}
             aria-label={playbackLabel}
+            data-tooltip={playbackLabel}
             title={playbackLabel}
             aria-busy={playbackBusy || undefined}
             aria-disabled={loading || undefined}
@@ -3893,7 +3950,8 @@ function Avatar({ account }: { account: PlexAccount }) {
 }
 
 function IconButton({ label, tooltip, className = "", active = false, disabled = false, onClick, children }: { label: string; tooltip?: string | null; className?: string; active?: boolean; disabled?: boolean; onClick?: () => void; children: ReactNode }) {
-  return <button type="button" className={`icon-button ${active ? "active" : ""} ${className}`.trim()} aria-label={label} title={tooltip === null ? undefined : tooltip ?? label} disabled={disabled} onClick={onClick}>{children}</button>;
+  const tooltipText = tooltip === null ? undefined : tooltip ?? label;
+  return <button type="button" className={`icon-button ${active ? "active" : ""} ${className}`.trim()} aria-label={label} data-tooltip={tooltipText} title={tooltipText} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
 function SourceSyncOverlay() {
