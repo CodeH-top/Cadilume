@@ -139,10 +139,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .theme-transition-snapshot *,
 .theme-transition-snapshot *::before,
 .theme-transition-snapshot *::after { animation: none !important; transition: none !important; }
-#root.theme-transition-reveal-target { position: fixed; z-index: 1001; inset: 0; overflow: hidden; will-change: clip-path; }
-#root.theme-transition-reveal-target .artwork,
-#root.theme-transition-reveal-target .artwork img,
-#root.theme-transition-reveal-target .avatar { animation: none !important; transition: none !important; }
+#root.theme-transition-reveal-target { position: relative; z-index: 1001; isolation: isolate; overflow: hidden; will-change: clip-path; }
+#root.theme-transition-reveal-target :is(
+  .artwork,
+  .artwork img,
+  .avatar,
+  .now-playing-background-artwork,
+  .now-playing-cover-stage,
+  .now-playing-cover-artwork,
+  .now-playing-artwork
+) { animation: none !important; transition: none !important; }
 .app-frame { position: relative; isolation: isolate; width: 100%; height: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: var(--app-titlebar-height) minmax(0, 1fr); overflow: hidden; background: var(--bg); }
 .app-frame.is-integrated { grid-template-rows: minmax(0, 1fr); }
 .app-frame[data-platform="macos"] { --traffic-light-reserved-width: 88px; }

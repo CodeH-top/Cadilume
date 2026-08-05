@@ -3648,6 +3648,17 @@ const APPEARANCE_SNAPSHOT_VARIABLES = [
   "--login-art-ink",
 ] as const;
 
+const APPEARANCE_MEDIA_GEOMETRY_SELECTOR = [
+  "img",
+  "video",
+  ".artwork",
+  ".avatar",
+  ".now-playing-background-artwork",
+  ".now-playing-cover-stage",
+  ".now-playing-cover-artwork",
+  ".now-playing-artwork",
+].join(", ");
+
 function applyAppearance({ theme, brand }: AppearanceState) {
   applyThemeMode(theme);
   applyBrandPreset(brand);
@@ -3666,7 +3677,7 @@ function preserveSnapshotScrollAndMediaGeometry(appRoot: HTMLElement, snapshot: 
       copy.scrollLeft = source.scrollLeft;
     }
 
-    if (!source.matches("img, video, .artwork, .avatar")) continue;
+    if (!source.matches(APPEARANCE_MEDIA_GEOMETRY_SELECTOR)) continue;
     const bounds = source.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) continue;
     const style = window.getComputedStyle(source);
@@ -3680,6 +3691,14 @@ function preserveSnapshotScrollAndMediaGeometry(appRoot: HTMLElement, snapshot: 
     copy.style.objectPosition = style.objectPosition;
     copy.style.filter = style.filter;
     copy.style.transform = style.transform;
+    copy.style.transformOrigin = style.transformOrigin;
+    copy.style.boxSizing = style.boxSizing;
+    copy.style.borderRadius = style.borderRadius;
+    copy.style.overflow = style.overflow;
+    copy.style.aspectRatio = style.aspectRatio;
+    copy.style.clipPath = style.clipPath;
+    copy.style.setProperty("-webkit-mask-image", style.getPropertyValue("-webkit-mask-image"));
+    copy.style.setProperty("mask-image", style.getPropertyValue("mask-image"));
     copy.style.transition = "none";
     copy.style.animation = "none";
   }
