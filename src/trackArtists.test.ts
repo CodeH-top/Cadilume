@@ -13,121 +13,84 @@ describe("resolveTrackArtists", () => {
   const artists = [artist("artist-1", "周杰伦"), artist("artist-2", "Mira Lin")];
   const artistLookup = createArtistLookup(artists);
 
-  it("仅在本地资料库能确认成员时拆分旧式斜杠显示名", () => {
-    const result = resolveTrackArtists("周杰伦 / Kobe Bryant", artistLookup);
+  it("先按精确空格斜杠拆分，即使所有成员均不在本地资料库", () => {
+    const result = resolveTrackArtists("S.H.E / 飞轮海", artistLookup);
 
-    expect(result.map(({ name }) => name)).toEqual(["周杰伦", "Kobe Bryant"]);
-    expect(result[0].artist?.ratingKey).toBe("artist-1");
-    expect(result[1].artist).toBeUndefined();
+    expect(result.map(({ name }) => name)).toEqual(["S.H.E", "飞轮海"]);
+    expect(result.map(({ artist: resolved }) => resolved)).toEqual([undefined, undefined]);
   });
 
-  it("匹配时兼容 Unicode、大小写和重复空格", () => {
+  it("分别按本地歌手名匹配拆分成员，保留原始显示文本", () => {
+    const she = artist("artist-she", "Ｓ．Ｈ．Ｅ");
+    const result = resolveTrackArtists("S.H.E / 飞轮海", createArtistLookup([she]));
+
+    expect(result).toEqual([
+      { name: "S.H.E", artist: she },
+      { name: "飞轮海", artist: undefined },
+    ]);
+  });
+
+  it("只把精确的空格斜杠空格识别为分隔符", () => {
+    for (const displayName of ["AC/DC", "A/B", "A /B", "A/ B"]) {
+      expect(resolveTrackArtists(displayName, artistLookup).map(({ name }) => name)).toEqual([displayName]);
+    }
+    expect(resolveTrackArtists("A / B", artistLookup).map(({ name }) => name)).toEqual(["A", "B"]);
+  });
+
+  it("匹配使用规范化后的完整名称，不做部分匹配", () => {
     const result = resolveTrackArtists("  mira   LIN  ", artistLookup);
 
     expect(result).toEqual([{ name: "mira   LIN", artist: artists[1] }]);
   });
 
-  it("完整歌手名本身含斜杠时优先保留独立实体", () => {
-    const slashArtist = artist("artist-3", "AC/DC");
-
-    expect(resolveTrackArtists("AC/DC", createArtistLookup([...artists, slashArtist]))).toEqual([
-      { name: "AC/DC", artist: slashArtist },
-    ]);
-  });
-
-  it("结构化贡献者保留完整顺序，只有可定位成员变成链接", () => {
-    const track: PlexItem = {
-      ratingKey: "track-1",
-      key: "/library/metadata/track-1",
-      type: "track",
-      title: "Duet",
-      grandparentTitle: "不应作为优先结果的旧字段",
-      contributors: [
-        { name: "周杰伦", ratingKey: "artist-1" },
-        { name: "Kobe Bryant" },
-        { name: "Mira Lin", ratingKey: "unknown-id" },
-      ],
-    };
-
-    const result = resolveTrackArtists(track, artistLookup);
-
-    expect(result.map(({ name }) => name)).toEqual(["周杰伦", "Kobe Bryant", "Mira Lin"]);
-    expect(result.map(({ artist: resolved }) => resolved?.ratingKey)).toEqual(["artist-1", undefined, "artist-2"]);
-    expect(trackArtist(track)).toBe("周杰伦 / Kobe Bryant / Mira Lin");
-  });
-
-  it("优先使用曲目级歌手而不是专辑歌手字段", () => {
-    const track: PlexItem = {
-      ratingKey: "track-distinct-artists",
-      key: "/library/metadata/track-distinct-artists",
-      type: "track",
-      title: "Collaboration",
-      grandparentTitle: "Album Artist",
-      grandparentRatingKey: "album-artist",
-      originalTitle: "Track Artist",
-      trackArtists: [{ name: "Mira Lin", ratingKey: "artist-2" }, { name: "Guest Artist" }],
-    };
-
-    expect(resolveTrackArtists(track, artistLookup)).toEqual([
-      { name: "Mira Lin", artist: artists[1] },
-      { name: "Guest Artist", artist: undefined },
-    ]);
-    expect(trackArtist(track)).toBe("Mira Lin / Guest Artist");
-  });
-
-  it("keeps a raw originalTitle credit intact when PMS has no structured members", () => {
+  it("originalTitle 优先于 PMS 结构化成员，并在拆分前保持原始歌手文本", () => {
+    const she = artist("artist-she", "S.H.E");
+    const fahrenheit = artist("artist-fahrenheit", "飞轮海");
     const track: PlexItem = {
       ratingKey: "track-original-title",
       key: "/library/metadata/track-original-title",
       type: "track",
-      title: "Slash Name",
-      grandparentTitle: "Album Artist",
-      originalTitle: "AC/DC",
+      title: "酸甜",
+      originalTitle: "S.H.E / 飞轮海",
+      trackArtists: [{ name: "PMS 不应覆盖原文", ratingKey: "artist-ignored" }],
     };
 
-    expect(resolveTrackArtists(track, artistLookup)).toEqual([{ name: "AC/DC", artist: undefined }]);
-    expect(trackArtist(track)).toBe("AC/DC");
+    expect(trackArtist(track)).toBe("S.H.E / 飞轮海");
+    expect(resolveTrackArtists(track, createArtistLookup([she, fahrenheit]))).toEqual([
+      { name: "S.H.E", artist: she },
+      { name: "飞轮海", artist: fahrenheit },
+    ]);
   });
 
-  it("结构化成员即使全都不能匹配资料库也不会被过滤", () => {
+  it("原始文本缺失时才使用结构化字段作为显示来源，且忽略其 rating key", () => {
     const track: PlexItem = {
-      ratingKey: "track-2",
-      key: "/library/metadata/track-2",
+      ratingKey: "track-structured-fallback",
+      key: "/library/metadata/track-structured-fallback",
       type: "track",
-      title: "Guests",
-      contributors: [{ name: "Guest A" }, { name: "Guest B" }],
+      title: "Collaboration",
+      trackArtists: [
+        { name: "Mira Lin", ratingKey: "incorrect-pms-key" },
+        { name: "Guest Artist", ratingKey: "artist-2" },
+      ],
     };
 
+    expect(trackArtist(track)).toBe("Mira Lin / Guest Artist");
     expect(resolveTrackArtists(track, artistLookup)).toEqual([
-      { name: "Guest A", artist: undefined },
-      { name: "Guest B", artist: undefined },
+      { name: "Mira Lin", artist: artists[1] },
+      { name: "Guest Artist", artist: undefined },
     ]);
   });
 
-  it("未结构化且无法确认成员的 AC/DC 不会被错误拆开", () => {
-    expect(resolveTrackArtists("AC/DC", artistLookup)).toEqual([
-      { name: "AC/DC", artist: undefined },
-    ]);
-  });
-
-  it("兼容旧式 grandparent 字段，并忽略结构化列表中的空值和重复项", () => {
+  it("兼容旧式专辑歌手回退，但不使用其 rating key 决定可点击性", () => {
     const legacyTrack: PlexItem = {
-      ratingKey: "track-3",
-      key: "/library/metadata/track-3",
+      ratingKey: "track-legacy",
+      key: "/library/metadata/track-legacy",
       type: "track",
       title: "Legacy",
       grandparentTitle: "周杰伦",
-      grandparentRatingKey: "artist-1",
-    };
-    const repeatedStructuredTrack: PlexItem = {
-      ratingKey: "track-4",
-      key: "/library/metadata/track-4",
-      type: "track",
-      title: "Repeated",
-      contributors: [{ name: "Mira Lin" }, { name: "  " }, { name: "Mira Lin", ratingKey: "artist-2" }],
+      grandparentRatingKey: "not-the-local-rating-key",
     };
 
     expect(resolveTrackArtists(legacyTrack, artistLookup)).toEqual([{ name: "周杰伦", artist: artists[0] }]);
-    expect(resolveTrackArtists(repeatedStructuredTrack, artistLookup)).toEqual([{ name: "Mira Lin", artist: artists[1] }]);
   });
 });

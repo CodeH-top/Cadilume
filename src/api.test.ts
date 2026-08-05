@@ -70,6 +70,14 @@ describe("PMS structured contributors", () => {
     })).toEqual([{ name: "AC/DC" }]);
   });
 
+  it("uses originalTitle before structured PMS members when both are present", () => {
+    expect(normalizePlexTrackArtists({
+      type: "track",
+      originalTitle: "S.H.E / 飞轮海",
+      Role: [{ tag: "S.H.E", tagKey: "artist-she" }, { tag: "飞轮海", tagKey: "artist-fahrenheit" }],
+    })).toEqual([{ name: "S.H.E / 飞轮海" }]);
+  });
+
   it("preserves normalized Role members when a PMS track page enters the shared data layer", async () => {
     invokeMock.mockResolvedValueOnce({
       MediaContainer: {

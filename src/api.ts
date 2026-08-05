@@ -125,14 +125,13 @@ export function normalizePlexContributors(value: Record<string, unknown>): PlexC
 /**
  * Normalize the artist credit of one music track. `grandparentTitle` is the
  * album artist in PMS' music model; `originalTitle` is the track artist. Keep
- * the latter as one text contributor when PMS has no structured member list so
- * names such as `AC/DC` are never guessed apart by the client.
+ * that raw text as the display source when available; structured metadata only
+ * supplies a display source when PMS omitted the track-credit text.
  */
 export function normalizePlexTrackArtists(value: Record<string, unknown>): PlexContributor[] | undefined {
-  const structured = normalizePlexContributors(value);
-  if (structured?.length) return structured;
   const originalTitle = normalizedContributorString(value.originalTitle);
-  return originalTitle ? [{ name: originalTitle }] : undefined;
+  if (originalTitle) return [{ name: originalTitle }];
+  return normalizePlexContributors(value);
 }
 
 function normalizePlexItems(value: unknown): PlexItem[] {

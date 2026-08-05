@@ -174,6 +174,10 @@ export interface NowPlaying {
 }
 
 export function trackArtistContributors(track: Pick<PlexItem, "trackArtists" | "contributors" | "originalTitle">): PlexContributor[] | undefined {
+  // PMS preserves the track-credit text in originalTitle. It is Cadilume's
+  // display source when available; structured members are only a fallback.
+  const originalTitle = track.originalTitle?.trim();
+  if (originalTitle) return [{ name: originalTitle }];
   const contributors = track.trackArtists?.length ? track.trackArtists : track.contributors;
   const normalizedContributors = contributors
     ?.flatMap((contributor) => {
@@ -181,8 +185,7 @@ export function trackArtistContributors(track: Pick<PlexItem, "trackArtists" | "
       return name ? [{ name, ...(contributor.ratingKey ? { ratingKey: contributor.ratingKey } : {}) }] : [];
     });
   if (normalizedContributors?.length) return normalizedContributors;
-  const originalTitle = track.originalTitle?.trim();
-  return originalTitle ? [{ name: originalTitle }] : undefined;
+  return undefined;
 }
 
 export function trackArtist(track: PlexItem): string {

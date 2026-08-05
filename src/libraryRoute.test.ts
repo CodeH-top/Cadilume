@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryRoute } from "./libraryRoute";
+import { isCurrentLibraryDetailRoute, libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryRoute } from "./libraryRoute";
 
 describe("library routes", () => {
   it("maps primary views to stable hash routes", () => {
@@ -37,6 +37,16 @@ describe("library routes", () => {
     expect(parseLibraryRoute(libraryRouteHash(artistRoute))).toEqual(artistRoute);
     expect(parseLibraryRoute(libraryRouteHash(albumRoute))).toEqual(albumRoute);
     expect(parseLibraryRoute(libraryRouteHash(playlistRoute))).toEqual(playlistRoute);
+  });
+
+  it("identifies the current detail route before a duplicate navigation is created", () => {
+    const currentArtist = libraryDetailRoute("artist", "artist-42");
+
+    expect(isCurrentLibraryDetailRoute(currentArtist, "artist", "artist-42")).toBe(true);
+    expect(isCurrentLibraryDetailRoute(currentArtist, "artist", " artist-42 ")).toBe(true);
+    expect(isCurrentLibraryDetailRoute(currentArtist, "album", "artist-42")).toBe(false);
+    expect(isCurrentLibraryDetailRoute(currentArtist, "artist", "artist-24")).toBe(false);
+    expect(isCurrentLibraryDetailRoute({ view: "artists" }, "artist", "artist-42")).toBe(false);
   });
 
   it("encodes detail identifiers and rejects malformed detail paths", () => {

@@ -78,6 +78,10 @@ export function libraryDetailRoute(type: LibraryDetailType, ratingKey: string): 
   };
 }
 
+export function isCurrentLibraryDetailRoute(route: LibraryRoute, type: LibraryDetailType, ratingKey: string): boolean {
+  return route.detail?.type === type && route.detail.ratingKey === ratingKey.trim();
+}
+
 export function libraryTracksRoute(page = 1, sort?: TrackSortState): LibraryRoute {
   return {
     view: "tracks",

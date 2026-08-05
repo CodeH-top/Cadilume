@@ -86,7 +86,7 @@ import { ARTIST_BIOGRAPHY_COLLAPSE_LINES, normalizeArtistBiography, previewArtis
 import { appendUniqueArtistTracks } from "./artistTracks";
 import { selectRandomContextPlayback } from "./contextPlayback";
 import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
-import { libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryRoute, type LibraryDetailType, type LibraryRoute } from "./libraryRoute";
+import { isCurrentLibraryDetailRoute, libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryRoute, type LibraryDetailType, type LibraryRoute } from "./libraryRoute";
 import { createCadilumeEntryState, historyEntryCacheKey, routeEntryId, routeParentEntryId } from "./routeEntry";
 import { hasDisplayableLyrics } from "./lyrics";
 import { getPlexLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
@@ -1431,8 +1431,9 @@ function RoutePage() {
   }, [entryLocation.state, onBack, onNavigate, route.detail?.type, route.view]);
 
   const navigateToDetail = useCallback((type: LibraryDetailType, ratingKey: string) => {
+    if (isCurrentLibraryDetailRoute(route, type, ratingKey)) return;
     onNavigate(libraryDetailRoute(type, ratingKey));
-  }, [onNavigate]);
+  }, [onNavigate, route]);
 
   const openItem = useCallback((item: PlexItem) => {
     if (item.type === "track") {
