@@ -9,6 +9,7 @@ function renderExpandedPlayer() {
       track={{ title: "布局验证歌曲", artist: "布局验证歌手", duration: 210_000 }}
       playing={false}
       queueAvailable
+      headerActions={<div data-testid="expanded-player-header-actions">外观与连接状态</div>}
       onSeek={() => undefined}
       onClose={() => undefined}
       onToggleQueue={() => undefined}
@@ -42,5 +43,12 @@ describe("expanded player controller layout", () => {
 
     expect(markup).not.toContain('aria-label="打开歌词"');
     expect(markup).not.toContain('aria-label="歌词不可用：暂无歌词"');
+  });
+
+  it("keeps app-level appearance and connection actions in the title bar", () => {
+    const markup = renderExpandedPlayer();
+    const headerEnd = markup.indexOf("now-playing-content");
+
+    expect(markup.slice(0, headerEnd)).toContain('data-testid="expanded-player-header-actions"');
   });
 });

@@ -1,5 +1,13 @@
 # ERRORS
 
+## 2026-08-05 — 辅助功能服务无法定位裸 Tauri Debug 可执行文件
+
+- 当前已确认运行的 `src-tauri/target/debug/Cadilume` 进程，在 `@oai/sky` 中不能按显示名
+  `Cadilume`、Bundle ID `top.codeh.cadilume` 或绝对可执行路径被定位；三种目标都会返回
+  `Invalid app`，即使 PID 和可执行文件路径仍可由只读进程检查确认。
+- 这不是 HMR、Vite 或 WebView 启动失败的证据。不要为绕过它重启唯一开发链、启动已安装版或
+  截图；本轮可用 Codex 内部浏览器的 DOM、computed style、控制台和 Tauri 构建补足验证。
+
 ## 2026-08-05 — 本地 Python 未提供 Playwright 验收运行时
 
 - 系统 `python3` 和 Codex 工作区随附 Python 都无法导入 `playwright`，因此 `webapp-testing` 的原生 Python 脚本流程不能直接用于 Cadilume。

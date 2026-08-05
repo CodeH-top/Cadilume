@@ -1112,6 +1112,12 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         queueOpen={queuePanelOpen}
         queueAvailable={hasQueue}
         theme={themeMode}
+        headerActions={(
+          <div className="now-playing-header-status-actions" role="group" aria-label="外观与连接状态">
+            <ThemeCycleButton mode={themeMode} resolvedTheme={resolvedTheme} onChange={onThemeMode} />
+            <ConnectionIndicator server={selectedServer} connected={connectionAvailable} />
+          </div>
+        )}
         onSeek={player.seek}
         onShuffleChange={player.setShuffle}
         onPrevious={player.previous}
@@ -4154,7 +4160,7 @@ function settleAppearanceSnapshot(snapshot: HTMLElement): Promise<void> {
   });
 }
 
-function playAppearanceReveal(previousAppearance: AppearanceState, applyAppearanceState: () => void): Promise<void> {
+function playAppearanceReveal(origin: ThemeTransitionOrigin, previousAppearance: AppearanceState, applyAppearanceState: () => void): Promise<void> {
   const layers = createAppearanceSnapshot(previousAppearance);
   if (!layers) {
     applyAppearanceState();
@@ -4162,11 +4168,21 @@ function playAppearanceReveal(previousAppearance: AppearanceState, applyAppearan
   }
 
   const { snapshot } = layers;
+  const horizontalDistance = Math.max(origin.x, window.innerWidth - origin.x);
+  const verticalDistance = Math.max(origin.y, window.innerHeight - origin.y);
+  const radius = Math.hypot(horizontalDistance, verticalDistance);
+  const circleStart = `circle(0px at ${origin.x}px ${origin.y}px)`;
+  const circleEnd = `circle(${radius}px at ${origin.x}px ${origin.y}px)`;
   return settleAppearanceSnapshot(snapshot).then(() => {
     // Keep the stable old snapshot above the app while the live tree changes
     // theme. Masking #root re-composites every image layer in WebKit and can
     // make artwork flash even when its layout geometry is unchanged.
     flushSync(applyAppearanceState);
+    // The snapshot completely covers the live tree at first, then contracts
+    // around the trigger. This restores the circular reveal without clipping
+    // the live WebKit layer that owns the artwork.
+    snapshot.style.clipPath = circleEnd;
+    snapshot.style.setProperty("-webkit-clip-path", circleEnd);
     return nextAppearancePaint();
   }).then(() => new Promise((resolve) => {
     let completed = false;
@@ -4180,11 +4196,14 @@ function playAppearanceReveal(previousAppearance: AppearanceState, applyAppearan
       snapshot.remove();
       resolve();
     };
-    timeout = window.setTimeout(release, 520);
+    timeout = window.setTimeout(release, 760);
     try {
       animation = snapshot.animate(
-        { opacity: [1, 0] },
-        { duration: 220, easing: "ease-out", fill: "both" },
+        [
+          { clipPath: circleEnd, opacity: 1 },
+          { clipPath: circleStart, opacity: 1 },
+        ],
+        { duration: 500, easing: "cubic-bezier(0.2, 0.74, 0.22, 1)", fill: "both" },
       );
       void animation.finished.catch(() => undefined).finally(release);
     } catch {
@@ -4252,7 +4271,7 @@ function useAppearance() {
     const release = () => {
       transitionLockRef.current = false;
     };
-    void playAppearanceReveal({ theme: themeMode, brand: brandPreset }, applyAtomically).finally(release);
+    void playAppearanceReveal(origin, { theme: themeMode, brand: brandPreset }, applyAtomically).finally(release);
   }, [brandPreset, themeMode]);
 
   const updateBrandPreset = useCallback<BrandPresetChange>(async (next, origin) => {
@@ -4268,7 +4287,7 @@ function useAppearance() {
       if (!origin || reducedMotion) {
         applyAtomically();
       } else {
-        await playAppearanceReveal({ theme: themeMode, brand: brandPreset }, applyAtomically);
+        await playAppearanceReveal(origin, { theme: themeMode, brand: brandPreset }, applyAtomically);
       }
       await saveBrandPreset(next);
     } finally {

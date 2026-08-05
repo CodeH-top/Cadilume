@@ -98,6 +98,8 @@ export interface NowPlayingViewProps {
   onMutedChange?: (muted: boolean) => void;
   onVolumeChange?: (volume: number) => void;
   onToggleQueue?: () => void;
+  /** Shared app-level controls displayed before the expanded-player mode switch. */
+  headerActions?: ReactNode;
   onClose: () => void;
   /** Disable this dialog's keyboard/focus handling while a nested dialog is open. */
   escapeEnabled?: boolean;
@@ -191,6 +193,7 @@ export function NowPlayingView({
   onMutedChange,
   onVolumeChange,
   onToggleQueue,
+  headerActions,
   onClose,
   escapeEnabled = true,
   onAddToPlaylist,
@@ -318,6 +321,7 @@ export function NowPlayingView({
           </button>
           <span className="now-playing-header-spacer" aria-hidden="true" />
           <div className="now-playing-header-actions">
+            {headerActions}
             <div className="now-playing-mode-switch" role="group" aria-label="展开播放器模式">
               <button
                 className={`now-playing-mode-button ${displayMode === "vinyl" ? "is-selected" : ""}`}
