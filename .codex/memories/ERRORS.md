@@ -1,5 +1,15 @@
 # ERRORS
 
+## 2026-08-05 — 本地 Python 未提供 Playwright 验收运行时
+
+- 系统 `python3` 和 Codex 工作区随附 Python 都无法导入 `playwright`，因此 `webapp-testing` 的原生 Python 脚本流程不能直接用于 Cadilume。
+- 在不启动第二条 Tauri 原生链、且用户禁止截图的验收中，使用 Codex 内部浏览器读取构建预览的 DOM、可访问性状态和控制台；临时 Vite 预览须以实际监听的 IPv6 回环地址作为浏览器目标。
+
+## 2026-08-05 — 内部浏览器的本地预览等待状态
+
+- 内部浏览器可访问 `http://[::1]:4173`，但 `tab.playwright.waitForLoadState({ state: "networkidle" })` 在当前后端会直接报告不支持；不要把该 API 错误误判为页面加载失败。
+- 对本地 Cadilume 预览改用 `domcontentloaded`、短暂稳定等待、DOM / computed-style 与控制台读取；结束后关闭临时浏览器标签、复位视口并终止明确由本轮创建的 preview 进程。
+
 ## 2026-08-01 — 重启开发链时，钥匙串授权会在窗口创建前阻塞启动
 
 - `PlexState::load()` 在 Tauri `setup` 的主线程读取 Keychain；如果 macOS 为新的开发可执行文件弹出 `SecurityAgent` 的“允许 Cadilume 使用钥匙串机密信息”对话框，主窗口和菜单栏状态图标都会在授权前尚未创建。这不是无窗口后台行为，也不能把它判为启动失败。
@@ -8,6 +18,11 @@
 ## 2026-08-01 — 无截图验收时避免用内置浏览器 locator 点击
 
 - 本地内部浏览器的 Playwright locator 点击有时会由浏览器后端自动附带预览图，即使调用方没有请求截图。在用户要求不截图的 Cadilume 验收中，停止使用这类交互路径；改用只读 DOM / computed-style / 控制台检查，并把真实交互留给 macOS Accessibility 树。
+
+## 2026-08-04 — 内部浏览器键盘注入不能证明原生 button 默认激活
+
+- `tab.playwright` 的 `press("Enter")` / `press("Space")`、`dom_cua.keypress` 与 `cua.keypress` 在本地 Cadilume fixture 中会把原生 `<button>` 聚焦，却不触发其默认 click；同一控件的 pointer click 可正常更新 React 状态。
+- 这不是产品键盘交互失败的证据。遇到此类验收时，不要为迁就自动化而给原生 button 额外添加可能双触发的 `onKeyDown`；保留语义化 button、ARIA 状态和组件级回归，并用真实 WebView / 原生辅助功能树补足交互验证。
 
 ## 2026-08-01 — 内部浏览器 CUA 对非原生焦点容器的 hover / Tab 验证不可靠
 

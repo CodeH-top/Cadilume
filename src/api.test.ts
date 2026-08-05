@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
+import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -598,6 +598,26 @@ describe("Plex audio playlists", () => {
       playlistId: "987654321012345678",
       ratingKey: "track-17",
     });
+  });
+
+  it("deduplicates an ordered batch before invoking the native playlist command", async () => {
+    invokeMock.mockResolvedValueOnce({ requested: 2, added: 1, failedRatingKeys: ["track-2"] });
+
+    await expect(addTracksToPlaylist("server-a", "playlist-1", ["track-1", "track-2", "track-1"])).resolves.toEqual({
+      requested: 2,
+      added: 1,
+      failedRatingKeys: ["track-2"],
+    });
+    expect(invokeMock).toHaveBeenCalledWith("add_tracks_to_playlist", {
+      serverId: "server-a",
+      playlistId: "playlist-1",
+      ratingKeys: ["track-1", "track-2"],
+    });
+  });
+
+  it("rejects an empty or malformed batch before invoking Tauri", async () => {
+    await expect(addTracksToPlaylist("server-a", "playlist-1", [])).rejects.toThrow("请至少选择一首歌曲");
+    await expect(addTracksToPlaylist("server-a", "playlist-1", ["../track"])).rejects.toThrow("无效的 Plex 歌曲标识");
   });
 });
 

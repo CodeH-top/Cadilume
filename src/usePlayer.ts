@@ -324,6 +324,65 @@ const validQueueIndex = (index: number, queueLength: number): boolean => (
   Number.isInteger(index) && index >= 0 && index < queueLength
 );
 
+export interface QueueBatchTransition {
+  queue: PlexItem[];
+  currentIndex: number;
+  addedCount: number;
+  /** A queue without a current item starts from its first available track. */
+  shouldStart: boolean;
+}
+
+/** Keep one artist-level action stable even when PMS repeats a rating key across pages. */
+export function normalizeQueueBatch(items: readonly PlexItem[]): PlexItem[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (item.type !== "track" || !item.ratingKey || seen.has(item.ratingKey)) return false;
+    seen.add(item.ratingKey);
+    return true;
+  });
+}
+
+/** Append a batch without replacing or advancing an active queue. */
+export function appendQueueBatch(
+  queue: readonly PlexItem[],
+  currentIndex: number,
+  incoming: readonly PlexItem[],
+): QueueBatchTransition {
+  const tracks = normalizeQueueBatch(incoming);
+  if (!tracks.length) return { queue: [...queue], currentIndex, addedCount: 0, shouldStart: false };
+
+  const nextQueue = [...queue, ...tracks];
+  const hasCurrent = validQueueIndex(currentIndex, queue.length);
+  return {
+    queue: nextQueue,
+    currentIndex: hasCurrent ? currentIndex : 0,
+    addedCount: tracks.length,
+    shouldStart: !hasCurrent,
+  };
+}
+
+/** Insert a batch directly after the active item while preserving its order. */
+export function insertQueueBatchNext(
+  queue: readonly PlexItem[],
+  currentIndex: number,
+  incoming: readonly PlexItem[],
+): QueueBatchTransition {
+  const tracks = normalizeQueueBatch(incoming);
+  if (!tracks.length) return { queue: [...queue], currentIndex, addedCount: 0, shouldStart: false };
+
+  if (!validQueueIndex(currentIndex, queue.length)) {
+    return appendQueueBatch(queue, currentIndex, tracks);
+  }
+
+  const insertAt = currentIndex + 1;
+  return {
+    queue: [...queue.slice(0, insertAt), ...tracks, ...queue.slice(insertAt)],
+    currentIndex,
+    addedCount: tracks.length,
+    shouldStart: false,
+  };
+}
+
 /** Start a shuffle traversal without consuming any candidate. */
 export function createShuffleNavigationState(queueLength: number, currentIndex: number): ShuffleNavigationState {
   const hasCurrent = validQueueIndex(currentIndex, queueLength);
@@ -1151,6 +1210,53 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     void loadAt(index, true);
   }, [loadAt, schedulePersistedSession]);
 
+  const playTracks = useCallback((incoming: readonly PlexItem[]): boolean => {
+    const tracks = normalizeQueueBatch(incoming);
+    if (!tracks.length) return false;
+    queueRef.current = tracks;
+    queueServerIdRef.current = serverIdRef.current;
+    resumeProgressRef.current = null;
+    shuffleNavigationRef.current = createShuffleNavigationState(tracks.length, 0);
+    prebufferRequestRef.current += 1;
+    audioPoolRef.current?.cancelPrepared();
+    setQueue(tracks);
+    indexRef.current = 0;
+    setCurrentIndex(0);
+    progressRef.current = 0;
+    setProgress(0);
+    schedulePersistedSession(true);
+    void loadAt(0, true);
+    return true;
+  }, [loadAt, schedulePersistedSession]);
+
+  const applyQueueBatch = useCallback((transition: QueueBatchTransition): boolean => {
+    if (!transition.addedCount) return false;
+    queueRef.current = transition.queue;
+    queueServerIdRef.current = serverIdRef.current;
+    indexRef.current = transition.currentIndex;
+    shuffleNavigationRef.current = createShuffleNavigationState(transition.queue.length, transition.currentIndex);
+    prebufferRequestRef.current += 1;
+    audioPoolRef.current?.cancelPrepared();
+    setQueue(transition.queue);
+    setCurrentIndex(transition.currentIndex);
+    if (transition.shouldStart) {
+      resumeProgressRef.current = null;
+      progressRef.current = 0;
+      setProgress(0);
+    }
+    schedulePersistedSession(true);
+    if (transition.shouldStart) void loadAt(transition.currentIndex, true);
+    return true;
+  }, [loadAt, schedulePersistedSession]);
+
+  const appendTracks = useCallback((incoming: readonly PlexItem[]): boolean => (
+    applyQueueBatch(appendQueueBatch(queueRef.current, indexRef.current, incoming))
+  ), [applyQueueBatch]);
+
+  const insertTracksNext = useCallback((incoming: readonly PlexItem[]): boolean => (
+    applyQueueBatch(insertQueueBatchNext(queueRef.current, indexRef.current, incoming))
+  ), [applyQueueBatch]);
+
   const advance = useCallback((naturalEnded: boolean) => {
     const tracks = queueRef.current;
     if (!tracks.length) return;
@@ -1834,6 +1940,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     retryCurrent,
     dismissPlaybackFailure,
     playContext,
+    playTracks,
+    appendTracks,
+    insertTracksNext,
     toggle,
     next,
     previous,
@@ -1847,5 +1956,5 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     removeFromQueue,
     flushPlaybackSession,
     discardPlaybackSession,
-  }), [buffering, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, loading, muted, next, outputSinkId, playContext, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
+  }), [appendTracks, buffering, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, insertTracksNext, loading, muted, next, outputSinkId, playContext, playTracks, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
 }

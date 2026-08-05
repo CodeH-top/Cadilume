@@ -11,6 +11,7 @@ import {
   CircleUserRound,
   Cloud,
   Database,
+  Ellipsis,
   Globe2,
   Headphones,
   History,
@@ -54,7 +55,7 @@ import { createContext, FormEvent, ReactNode, useCallback, useContext, useEffect
 import { flushSync } from "react-dom";
 import {
   artworkUrl,
-  addTrackToPlaylist,
+  addTracksToPlaylist,
   bootstrap,
   canWritePlaylist,
   clearArtworkCache,
@@ -83,11 +84,12 @@ import {
 } from "./api";
 import "./App.css";
 import { ARTIST_BIOGRAPHY_COLLAPSE_LINES, normalizeArtistBiography, previewArtistBiography, shouldCollapseArtistBiography } from "./artistBiography";
-import { appendUniqueArtistTracks } from "./artistTracks";
+import { appendUniqueArtistTracks, collectAllArtistTracks, isArtistTrackCollectionCancelled } from "./artistTracks";
 import { selectRandomContextPlayback } from "./contextPlayback";
 import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
 import { isCurrentLibraryDetailRoute, libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryRoute, type LibraryDetailType, type LibraryRoute } from "./libraryRoute";
 import { createCadilumeEntryState, historyEntryCacheKey, routeEntryId, routeParentEntryId } from "./routeEntry";
+import { routeScrollBehavior, shouldShowRouteBackToTop } from "./routeScroll";
 import { hasDisplayableLyrics } from "./lyrics";
 import { getPlexLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
 import { getLyricsActionPresentation } from "./playerActions";
@@ -104,6 +106,7 @@ import type {
   PlexAccount,
   PlexHub,
   PlexItem,
+  PlexItemPage,
   PlexPlaylist,
   PlexServer,
   StreamQuality,
@@ -153,6 +156,7 @@ type BrandPresetChange = (preset: BrandPreset, origin?: ThemeTransitionOrigin) =
 type AppearanceState = { theme: ThemeMode; brand: BrandPreset };
 
 type MusicPlayer = ReturnType<typeof usePlayer>;
+type PlaylistSelection = { tracks: PlexItem[]; label: string };
 
 interface MusicShellRuntime {
   initialSession: BootstrapResponse;
@@ -207,8 +211,8 @@ interface MusicShellRuntime {
   refreshCacheStatus: () => Promise<void>;
   openDeviceNameDialog: () => void;
   openPlaylistCreation: () => void;
+  openPlaylistPicker: (tracks: readonly PlexItem[], label?: string) => void;
   setSidePanel: (value: "queue" | "lyrics" | "devices" | null) => void;
-  setPlaylistTrack: (track: PlexItem | undefined) => void;
   setNowPlayingOpen: (open: boolean) => void;
   setPlaybackSettingsRequest: React.Dispatch<React.SetStateAction<number>>;
 }
@@ -455,7 +459,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [sidePanel, setSidePanel] = useState<"queue" | "lyrics" | "devices" | null>(null);
   const [nowPlayingOpen, setNowPlayingOpen] = useState(false);
   const [nowPlayingMode, setNowPlayingMode] = useState<NowPlayingMode>(readNowPlayingMode);
-  const [playlistTrack, setPlaylistTrack] = useState<PlexItem>();
+  const [playlistSelection, setPlaylistSelection] = useState<PlaylistSelection>();
   const [playlistCreationOpen, setPlaylistCreationOpen] = useState(false);
   const [deviceNameDialogOpen, setDeviceNameDialogOpen] = useState(false);
   const [playlists, setPlaylists] = useState<PlexPlaylist[]>([]);
@@ -588,7 +592,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 
   useEffect(() => {
     if (!activePlaybackFailure) return;
-    setPlaylistTrack(undefined);
+    setPlaylistSelection(undefined);
   }, [activePlaybackFailure]);
 
   useEffect(() => {
@@ -605,7 +609,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   useEffect(() => {
     if (player.current) return;
     setNowPlayingOpen(false);
-    setPlaylistTrack(undefined);
+    setPlaylistSelection(undefined);
     setSidePanel((value) => value === "queue" || value === "lyrics" ? null : value);
   }, [player.current]);
 
@@ -874,21 +878,35 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 
   const toggleQueuePanel = useCallback(() => {
     if (!player.current || player.queue.length === 0) return;
-    setPlaylistTrack(undefined);
+    setPlaylistSelection(undefined);
     setSidePanel((value) => value === "queue" ? null : "queue");
   }, [player.current, player.queue.length]);
 
   const toggleLyricsPanel = useCallback(() => {
     if (!canToggleLyrics) return;
-    setPlaylistTrack(undefined);
+    setPlaylistSelection(undefined);
     setSidePanel((value) => value === "lyrics" ? null : "lyrics");
   }, [canToggleLyrics]);
 
+  const openPlaylistPicker = useCallback((tracks: readonly PlexItem[], label?: string) => {
+    const uniqueTracks = appendUniqueArtistTracks([], tracks.filter((track) => track.type === "track"));
+    if (!uniqueTracks.length) {
+      notify("当前没有可添加到歌单的歌曲。");
+      return;
+    }
+    setSidePanel(null);
+    setPlaylistSelection({
+      tracks: uniqueTracks,
+      label: label || (uniqueTracks.length === 1
+        ? `《${uniqueTracks[0].title}》 · ${trackArtist(uniqueTracks[0])}`
+        : `已选择 ${uniqueTracks.length} 首歌曲`),
+    });
+  }, [notify]);
+
   const openCurrentTrackPlaylistPicker = useCallback(() => {
     if (!player.current) return;
-    setSidePanel(null);
-    setPlaylistTrack(player.current);
-  }, [player.current]);
+    openPlaylistPicker([player.current]);
+  }, [openPlaylistPicker, player.current]);
 
   const dismissPlaybackFailure = useCallback(() => {
     setPlaybackFailurePreview(undefined);
@@ -905,7 +923,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const openPlaybackSettings = useCallback(() => {
     dismissPlaybackFailure();
     setNowPlayingOpen(false);
-    setPlaylistTrack(undefined);
+    setPlaylistSelection(undefined);
     setSidePanel(null);
     setPlaybackSettingsRequest((request) => request + 1);
     const location = router.state.location;
@@ -986,11 +1004,11 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         return;
       }
       setSidePanel(null);
-      setPlaylistTrack(undefined);
+      setPlaylistSelection(undefined);
       setPlaylistCreationOpen(true);
     },
+    openPlaylistPicker,
     setSidePanel,
-    setPlaylistTrack,
     setNowPlayingOpen,
     setPlaybackSettingsRequest,
   };
@@ -1063,7 +1081,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         onToggleQueue={toggleQueuePanel}
         onToggleLyrics={toggleLyricsPanel}
         onClose={closeNowPlaying}
-        escapeEnabled={!playlistTrack && !activePlaybackFailure && !queuePanelOpen && !lyricsPanelOpen}
+        escapeEnabled={!playlistSelection && !activePlaybackFailure && !queuePanelOpen && !lyricsPanelOpen}
         onAddToPlaylist={openCurrentTrackPlaylistPicker}
       />
 
@@ -1085,14 +1103,17 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         />
       )}
 
-      {playlistTrack && hasCurrentTrack && serverId && (
+      {playlistSelection && serverId && (
         <PlaylistPicker
           serverId={serverId}
-          track={playlistTrack}
-          onClose={() => setPlaylistTrack(undefined)}
-          onAdded={(playlist) => {
-            setPlaylistTrack(undefined);
-            notify(`已将《${playlistTrack.title}》添加到“${playlist.title}”。`);
+          tracks={playlistSelection.tracks}
+          label={playlistSelection.label}
+          onClose={() => setPlaylistSelection(undefined)}
+          onAdded={(playlist, result) => {
+            setPlaylistSelection(undefined);
+            notify(result.requested === 1
+              ? `已将${playlistSelection.label}添加到“${playlist.title}”。`
+              : `已将 ${result.requested} 首歌曲添加到“${playlist.title}”。`);
           }}
         />
       )}
@@ -1127,7 +1148,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         onOpenNowPlaying={() => {
           if (!player.current) return;
           setSidePanel((value) => value === "devices" ? null : value);
-          setPlaylistTrack(undefined);
+          setPlaylistSelection(undefined);
           setNowPlayingOpen(true);
         }}
         onToggleQueue={toggleQueuePanel}
@@ -1135,7 +1156,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         onAddToPlaylist={openCurrentTrackPlaylistPicker}
         onOutputAction={() => {
           setNowPlayingOpen(false);
-          setPlaylistTrack(undefined);
+          setPlaylistSelection(undefined);
           setSidePanel((value) => value === "devices" ? null : "devices");
         }}
       />
@@ -1347,6 +1368,7 @@ function KeepAliveRoutePage({ cacheKey, children }: { cacheKey: string; children
   const scrollPositionsRef = useRef<Array<{ target: HTMLElement; top: number; left: number }>>([]);
   const restoreFocusTargetRef = useRef<HTMLElement | null>(null);
   const restoreFocusFrameRef = useRef<number | undefined>(undefined);
+  const [showBackToTop, setShowBackToTop] = useState(false);
   useLayoutEffect(() => {
     const page = pageRef.current;
     const cacheNode = page?.closest<HTMLElement>(".keepalive-cache-div");
@@ -1400,7 +1422,38 @@ function KeepAliveRoutePage({ cacheKey, children }: { cacheKey: string; children
       }
     };
   }, [active]);
-  return <div ref={pageRef} className="route-page-scroll" data-route-entry={cacheKey}>{children}</div>;
+
+  useEffect(() => {
+    const page = pageRef.current;
+    if (!page || !active) {
+      setShowBackToTop(false);
+      return;
+    }
+    const syncBackToTop = () => setShowBackToTop(shouldShowRouteBackToTop(page.scrollTop, page.clientHeight));
+    syncBackToTop();
+    const frame = window.requestAnimationFrame(syncBackToTop);
+    page.addEventListener("scroll", syncBackToTop, { passive: true });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      page.removeEventListener("scroll", syncBackToTop);
+    };
+  }, [active, cacheKey]);
+
+  const scrollToRouteTop = useCallback(() => {
+    const page = pageRef.current;
+    if (!page) return;
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    page.scrollTo({ top: 0, behavior: routeScrollBehavior(reducedMotion) });
+  }, []);
+
+  return <>
+    <div ref={pageRef} className="route-page-scroll" data-route-entry={cacheKey}>{children}</div>
+    {active && showBackToTop && (
+      <button className="route-back-to-top" type="button" aria-label="回到顶部" title="回到顶部" onClick={scrollToRouteTop}>
+        <ArrowUp size={18} strokeWidth={2.2} aria-hidden="true" />
+      </button>
+    )}
+  </>;
 }
 
 function RoutePage() {
@@ -2089,7 +2142,7 @@ function ArtistBiography({ summary, id }: { summary?: string; id: string }) {
 
   return (
     <aside className={`artist-biography ${biography ? "" : "is-empty"}`.trim()} aria-labelledby={headingId}>
-      <h2 id={headingId}>个人资料</h2>
+      <h2 id={headingId}>歌手资料</h2>
       {biography ? (
         <>
           <p ref={contentRef} id={contentId} className={collapsible && !expanded ? "is-collapsed" : undefined} style={{ "--artist-biography-line-limit": ARTIST_BIOGRAPHY_COLLAPSE_LINES } as CSSProperties}>{biography}</p>
@@ -2097,6 +2150,90 @@ function ArtistBiography({ summary, id }: { summary?: string; id: string }) {
         </>
       ) : <p>暂无可用简介。</p>}
     </aside>
+  );
+}
+
+type ArtistBulkAction = "append" | "next" | "playlist";
+
+function ArtistActionMenu({ id, disabled, onAction }: {
+  id: string;
+  disabled: boolean;
+  onAction: (action: ArtistBulkAction) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => {
+      menuRef.current?.querySelector<HTMLButtonElement>("[role='menuitem']")?.focus();
+    });
+    const closeOnOutsidePointer = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpen(false);
+      window.requestAnimationFrame(() => triggerRef.current?.focus());
+    };
+    document.addEventListener("mousedown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("mousedown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!disabled) return;
+    setOpen(false);
+  }, [disabled]);
+
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || []);
+    if (!items.length) return;
+    event.preventDefault();
+    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? items.length - 1
+        : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    items[nextIndex]?.focus();
+  };
+
+  const selectAction = (action: ArtistBulkAction) => {
+    setOpen(false);
+    onAction(action);
+  };
+
+  return (
+    <div className="artist-action-menu" ref={rootRef}>
+      <button
+        ref={triggerRef}
+        className="icon-button artist-more-button"
+        type="button"
+        aria-label="更多歌手操作"
+        title="更多歌手操作"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={id}
+        disabled={disabled}
+        onClick={() => setOpen((value) => !value)}
+      ><Ellipsis size={19} strokeWidth={2.1} aria-hidden="true" /></button>
+      {open && (
+        <div id={id} ref={menuRef} className="artist-more-menu" role="menu" aria-label="歌手更多操作" onKeyDown={onMenuKeyDown}>
+          <button type="button" role="menuitem" onClick={() => selectAction("append")}><ListPlus size={16} aria-hidden="true" />添加到队列</button>
+          <button type="button" role="menuitem" onClick={() => selectAction("next")}><SkipForward size={16} aria-hidden="true" />播放下一个</button>
+          <button type="button" role="menuitem" onClick={() => selectAction("playlist")}><ListMusic size={16} aria-hidden="true" />添加到歌单</button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2109,13 +2246,16 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
   onOpenArtist: (artist: PlexItem) => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
 }) {
+  const runtime = useMusicShellRuntime();
   const albums = detail.children.filter((item) => item.type === "album");
   const [activeTab, setActiveTab] = useState<ArtistDetailTab>("albums");
   const [tracks, setTracks] = useState<PlexItem[]>([]);
   const [trackSort, setTrackSort] = useState<TrackSortState>();
   const [totalSize, setTotalSize] = useState<number>();
+  const [nextStart, setNextStart] = useState(0);
   const [tracksLoading, setTracksLoading] = useState(false);
   const [tracksError, setTracksError] = useState<string>();
+  const [bulkAction, setBulkAction] = useState<"play" | ArtistBulkAction>();
   const albumsTabRef = useRef<HTMLButtonElement>(null);
   const tracksTabRef = useRef<HTMLButtonElement>(null);
   const loadSentinelRef = useRef<HTMLDivElement>(null);
@@ -2123,12 +2263,59 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
   const loadingRef = useRef(false);
   const nextStartRef = useRef(0);
   const totalSizeRef = useRef<number | undefined>(undefined);
+  const bulkAbortRef = useRef<AbortController | undefined>(undefined);
+  const pageCacheRef = useRef<{
+    key: string;
+    generation: number;
+    pages: Map<number, PlexItemPage>;
+    requests: Map<number, Promise<PlexItemPage>>;
+  }>({ key: "", generation: 0, pages: new Map(), requests: new Map() });
   const tabIdBase = `artist-${detail.source.ratingKey.replace(/[^A-Za-z0-9_-]/g, "-")}`;
-  const hasMoreTracks = totalSize === undefined || tracks.length < totalSize;
+  const pageCacheKey = `${serverId || "none"}:${detail.source.ratingKey}:${trackSort?.key || "default"}:${trackSort?.direction || "default"}`;
+  const hasMoreTracks = totalSize === undefined || nextStart < totalSize;
   const biographyPreview = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("artist-bio-preview")
     : null;
   const artistBiography = previewArtistBiography(detail.source.summary, biographyPreview);
+
+  const resetPageCache = useCallback(() => {
+    const cache = pageCacheRef.current;
+    if (cache.key !== pageCacheKey) {
+      cache.key = pageCacheKey;
+      cache.generation += 1;
+      cache.pages.clear();
+      cache.requests.clear();
+    }
+    return cache;
+  }, [pageCacheKey]);
+
+  const getArtistPage = useCallback((start: number): Promise<PlexItemPage> => {
+    if (!serverId) return Promise.reject(new Error("请先在设置中选择音乐服务器。"));
+    const normalizedStart = Math.max(0, Math.floor(Number.isFinite(start) ? start : 0));
+    const cache = resetPageCache();
+    const cached = cache.pages.get(normalizedStart);
+    if (cached) return Promise.resolve(cached);
+    const pending = cache.requests.get(normalizedStart);
+    if (pending) return pending;
+
+    const generation = cache.generation;
+    const request = getArtistTracksPage(serverId, detail.source.ratingKey, normalizedStart, ARTIST_TRACK_PAGE_SIZE, trackSort)
+      .then((page) => {
+        const activeCache = pageCacheRef.current;
+        if (activeCache.key === pageCacheKey && activeCache.generation === generation) {
+          activeCache.pages.set(normalizedStart, page);
+        }
+        return page;
+      });
+    cache.requests.set(normalizedStart, request);
+    void request.finally(() => {
+      const activeCache = pageCacheRef.current;
+      if (activeCache.key === pageCacheKey && activeCache.generation === generation && activeCache.requests.get(normalizedStart) === request) {
+        activeCache.requests.delete(normalizedStart);
+      }
+    }).catch(() => undefined);
+    return request;
+  }, [detail.source.ratingKey, pageCacheKey, resetPageCache, serverId, trackSort]);
 
   const loadNextTrackPage = useCallback(async () => {
     if (!serverId || loadingRef.current) return;
@@ -2139,13 +2326,23 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
     setTracksLoading(true);
     setTracksError(undefined);
     try {
-      const page = await getArtistTracksPage(serverId, detail.source.ratingKey, start, ARTIST_TRACK_PAGE_SIZE, trackSort);
+      const page = await getArtistPage(start);
       if (requestId !== requestRef.current) return;
+      const resolvedNextStart = Number.isFinite(page.nextStart)
+        ? Math.max(start, Math.floor(page.nextStart))
+        : start;
+      const resolvedTotalSize = Math.max(
+        0,
+        Number.isFinite(page.totalSize) ? Math.floor(page.totalSize) : 0,
+        resolvedNextStart,
+        start + page.items.length,
+      );
+      if (resolvedNextStart <= start && resolvedTotalSize > start) {
+        throw new Error("歌手歌曲分页没有继续前进。");
+      }
       setTracks((current) => appendUniqueArtistTracks(current, page.items));
-      nextStartRef.current = page.nextStart;
-      const resolvedTotalSize = page.items.length
-        ? Math.max(page.totalSize, nextStartRef.current)
-        : nextStartRef.current;
+      nextStartRef.current = resolvedNextStart;
+      setNextStart(resolvedNextStart);
       totalSizeRef.current = resolvedTotalSize;
       setTotalSize(resolvedTotalSize);
     } catch (reason) {
@@ -2158,29 +2355,27 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
         setTracksLoading(false);
       }
     }
-  }, [detail.source.ratingKey, serverId, trackSort]);
+  }, [getArtistPage, serverId]);
 
   useEffect(() => {
+    bulkAbortRef.current?.abort();
+    resetPageCache();
     requestRef.current += 1;
     loadingRef.current = false;
     nextStartRef.current = 0;
     totalSizeRef.current = undefined;
     setTracks([]);
     setTotalSize(undefined);
+    setNextStart(0);
     setTracksError(undefined);
     setTracksLoading(false);
-  }, [trackSort]);
-
-  useEffect(() => () => {
-    requestRef.current += 1;
-    loadingRef.current = false;
-  }, []);
-
-  useEffect(() => {
-    if (activeTab === "tracks" && !tracks.length && !tracksLoading && !tracksError) {
-      void loadNextTrackPage();
-    }
-  }, [activeTab, loadNextTrackPage, tracks.length, tracksError, tracksLoading]);
+    void loadNextTrackPage();
+    return () => {
+      requestRef.current += 1;
+      loadingRef.current = false;
+      bulkAbortRef.current?.abort();
+    };
+  }, [loadNextTrackPage, resetPageCache]);
 
   useEffect(() => {
     const sentinel = loadSentinelRef.current;
@@ -2204,15 +2399,65 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
     window.requestAnimationFrame(() => (nextTab === "albums" ? albumsTabRef : tracksTabRef).current?.focus());
   };
 
+  const runArtistAction = useCallback(async (action: "play" | ArtistBulkAction) => {
+    if (!serverId || bulkAction) return;
+    const controller = new AbortController();
+    bulkAbortRef.current?.abort();
+    bulkAbortRef.current = controller;
+    setBulkAction(action);
+    try {
+      const collection = await collectAllArtistTracks(getArtistPage, { signal: controller.signal });
+      if (!collection.tracks.length) {
+        runtime.notify(`“${detail.source.title}”当前没有可操作的歌曲。`);
+        return;
+      }
+      if (action === "play") {
+        runtime.player.playTracks(collection.tracks);
+        runtime.player.setShuffle(false);
+      } else if (action === "append") {
+        runtime.player.appendTracks(collection.tracks);
+        runtime.notify(`已将 ${collection.tracks.length} 首歌曲添加到播放队列。`);
+      } else if (action === "next") {
+        runtime.player.insertTracksNext(collection.tracks);
+        runtime.notify(`已安排 ${collection.tracks.length} 首歌曲在下一首后播放。`);
+      } else {
+        runtime.openPlaylistPicker(collection.tracks, `${detail.source.title} · ${collection.tracks.length} 首歌曲`);
+      }
+    } catch (reason) {
+      if (!isArtistTrackCollectionCancelled(reason)) {
+        runtime.notify(reason instanceof Error ? reason.message : String(reason));
+      }
+    } finally {
+      // A rapid second action aborts this collection and takes ownership of
+      // the shared busy state. The cancelled request must not re-enable the
+      // controls while its replacement is still collecting pages.
+      if (bulkAbortRef.current === controller) {
+        bulkAbortRef.current = undefined;
+        setBulkAction(undefined);
+      }
+    }
+  }, [bulkAction, detail.source.title, getArtistPage, runtime, serverId]);
+
+  const artistActionBusy = Boolean(bulkAction);
+
   return (
     <section className="detail-page artist-detail-page">
       <button className="back-button artist-back-button" type="button" onClick={onBack}><ArrowLeft size={18} strokeWidth={2} />返回歌手列表</button>
       <div className="artist-detail-overview">
-        <header className="detail-hero artist-detail-hero">
+        <div className="artist-detail-artwork">
           <Artwork item={detail.source} size="hero" className="round" />
-          <div><h1>{detail.source.title}</h1><p>歌手</p></div>
-        </header>
-        <ArtistBiography id={`${tabIdBase}-biography`} summary={artistBiography} />
+        </div>
+        <div className="artist-detail-main">
+          <header className="artist-detail-identity"><h1>{detail.source.title}</h1><p>歌手</p></header>
+          <div className="artist-detail-actions" aria-busy={artistActionBusy || undefined}>
+            <button className="primary-button" type="button" disabled={!serverId || artistActionBusy} onClick={() => void runArtistAction("play")}>
+              {bulkAction === "play" ? <LoaderCircle className="spin" size={17} aria-hidden="true" /> : <Play size={17} fill="currentColor" aria-hidden="true" />}
+              {bulkAction === "play" ? "正在准备…" : "播放"}
+            </button>
+            <ArtistActionMenu id={`${tabIdBase}-actions-menu`} disabled={!serverId || artistActionBusy} onAction={(action) => void runArtistAction(action)} />
+          </div>
+          <ArtistBiography id={`${tabIdBase}-biography`} summary={artistBiography} />
+        </div>
       </div>
       <div className="artist-detail-tabs" role="tablist" aria-label={`${detail.source.title}内容`}>
         <button
@@ -2236,7 +2481,7 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
           tabIndex={activeTab === "tracks" ? 0 : -1}
           onClick={() => setActiveTab("tracks")}
           onKeyDown={selectTabFromKeyboard}
-        >歌曲</button>
+        >{totalSize === undefined ? "歌曲" : `歌曲 (${totalSize})`}</button>
       </div>
       {activeTab === "albums" ? (
         <div id={`${tabIdBase}-albums-panel`} className="artist-detail-panel" role="tabpanel" aria-labelledby={`${tabIdBase}-albums-tab`}>
@@ -3153,18 +3398,25 @@ function CreatePlaylistDialog({ serverId, onClose, onCreated, onError }: {
   );
 }
 
-function PlaylistPicker({ serverId, track, onClose, onAdded }: {
+function PlaylistPicker({ serverId, tracks, label, onClose, onAdded }: {
   serverId: string;
-  track: PlexItem;
+  tracks: readonly PlexItem[];
+  label: string;
   onClose: () => void;
-  onAdded: (playlist: PlexPlaylist) => void;
+  onAdded: (playlist: PlexPlaylist, result: { requested: number; added: number; failedRatingKeys: string[] }) => void;
 }) {
   const [playlists, setPlaylists] = useState<PlexPlaylist[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string>();
   const [error, setError] = useState<string>();
+  const [remainingTracks, setRemainingTracks] = useState<PlexItem[]>(() => appendUniqueArtistTracks([], tracks));
   const dialogRef = useRef<HTMLElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    setRemainingTracks(appendUniqueArtistTracks([], tracks));
+    setError(undefined);
+  }, [tracks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3230,11 +3482,24 @@ function PlaylistPicker({ serverId, track, onClose, onAdded }: {
   }, [busyId, onClose]);
 
   const add = async (playlist: PlexPlaylist) => {
+    if (!remainingTracks.length) return;
     setBusyId(playlist.ratingKey);
     setError(undefined);
     try {
-      await addTrackToPlaylist(serverId, playlist.ratingKey, track.ratingKey);
-      onAdded(playlist);
+      const result = await addTracksToPlaylist(serverId, playlist.ratingKey, remainingTracks.map((track) => track.ratingKey));
+      const failedRatingKeys = new Set(result.failedRatingKeys);
+      if (result.added === result.requested && failedRatingKeys.size === 0) {
+        onAdded(playlist, result);
+        return;
+      }
+
+      const failedTracks = remainingTracks.filter((track) => failedRatingKeys.has(track.ratingKey));
+      setRemainingTracks(failedTracks.length ? failedTracks : remainingTracks);
+      const failedCount = Math.max(result.requested - result.added, failedTracks.length);
+      setError(result.added > 0
+        ? `已添加 ${result.added} 首；${failedCount} 首未能写入，可再次选择同一歌单重试。`
+        : `未能添加这 ${failedCount || remainingTracks.length} 首歌曲，请检查歌单写入权限后重试。`);
+      setBusyId(undefined);
     } catch (reason) {
       setError(playlistErrorMessage(reason));
       setBusyId(undefined);
@@ -3247,7 +3512,7 @@ function PlaylistPicker({ serverId, track, onClose, onAdded }: {
         <header>
           <div>
             <h2 id="playlist-picker-title" ref={titleRef} tabIndex={-1}>添加到歌单</h2>
-            <small>《{track.title}》 · {trackArtist(track)}</small>
+            <small>{label}{remainingTracks.length !== tracks.length ? ` · 剩余 ${remainingTracks.length} 首` : ""}</small>
           </div>
           <IconButton label="关闭歌单选择" disabled={Boolean(busyId)} onClick={onClose}><X size={18} /></IconButton>
         </header>

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, FileTimes, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -39,7 +39,16 @@ const ARTWORK_CACHE_EXTENSION: &str = "cadart";
 const ARTWORK_CACHE_MAGIC: &[u8; 8] = b"CADART01";
 const MAX_CACHE_MIME_BYTES: usize = 127;
 const MAX_DEVICE_NAME_CHARACTERS: usize = 80;
+const MAX_PLAYLIST_BATCH_TRACKS: usize = 10_000;
 const FALLBACK_DEVICE_NAME: &str = "Desktop";
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistBatchAddResult {
+    requested: usize,
+    added: usize,
+    failed_rating_keys: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1039,6 +1048,43 @@ pub async fn add_to_playlist(
         .await
         .map_err(display_error)?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn add_tracks_to_playlist(
+    server_id: String,
+    playlist_id: String,
+    rating_keys: Vec<String>,
+    state: State<'_, PlexState>,
+) -> Result<PlaylistBatchAddResult, String> {
+    if !valid_plex_identifier(&server_id) {
+        return Err("无效的 Plex 歌单项目标识".to_string());
+    }
+    let rating_keys = normalize_playlist_batch_rating_keys(rating_keys).map_err(display_error)?;
+    let path = playlist_items_path(&playlist_id).map_err(display_error)?;
+    let requested = rating_keys.len();
+    let mut added = 0;
+    let mut failed_rating_keys = Vec::new();
+
+    // PMS accepts one library URI per mutation on the compatible endpoint.
+    // Keep it serial here so the returned counts describe the real write order.
+    for rating_key in rating_keys {
+        let uri = playlist_item_uri(&server_id, &rating_key).map_err(display_error)?;
+        let query = HashMap::from([("uri".to_string(), uri)]);
+        match state
+            .server_request_response(&server_id, Method::PUT, &path, &query)
+            .await
+        {
+            Ok(_) => added += 1,
+            Err(_) => failed_rating_keys.push(rating_key),
+        }
+    }
+
+    Ok(PlaylistBatchAddResult {
+        requested,
+        added,
+        failed_rating_keys,
+    })
 }
 
 #[tauri::command]
@@ -2249,6 +2295,32 @@ fn playlist_item_uri(server_id: &str, rating_key: &str) -> Result<String> {
     ))
 }
 
+fn normalize_playlist_batch_rating_keys(rating_keys: Vec<String>) -> Result<Vec<String>> {
+    if rating_keys.is_empty() {
+        return Err(anyhow!("请至少选择一首歌曲"));
+    }
+    if rating_keys.len() > MAX_PLAYLIST_BATCH_TRACKS {
+        return Err(anyhow!(
+            "一次最多可添加 {MAX_PLAYLIST_BATCH_TRACKS} 首歌曲到歌单"
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(rating_keys.len());
+    for rating_key in rating_keys {
+        if !valid_plex_identifier(&rating_key) {
+            return Err(anyhow!("无效的 Plex 歌单项目标识"));
+        }
+        if seen.insert(rating_key.clone()) {
+            normalized.push(rating_key);
+        }
+    }
+    if normalized.is_empty() {
+        return Err(anyhow!("请至少选择一首歌曲"));
+    }
+    Ok(normalized)
+}
+
 fn valid_plex_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
@@ -2474,6 +2546,22 @@ mod tests {
             assert!(playlist_item_uri("server-1", invalid).is_err());
         }
         assert!(playlist_item_uri("a".repeat(257).as_str(), "track-42").is_err());
+    }
+
+    #[test]
+    fn playlist_batch_keys_are_bounded_validated_and_stably_deduplicated() {
+        assert_eq!(
+            normalize_playlist_batch_rating_keys(vec![
+                "track-1".to_string(),
+                "track-2".to_string(),
+                "track-1".to_string(),
+            ])
+            .unwrap(),
+            vec!["track-1", "track-2"]
+        );
+        assert!(normalize_playlist_batch_rating_keys(Vec::new()).is_err());
+        assert!(normalize_playlist_batch_rating_keys(vec!["../track".to_string()]).is_err());
+        assert!(normalize_playlist_batch_rating_keys(vec!["track".repeat(100)]).is_err());
     }
 
     #[test]

@@ -258,6 +258,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .route-page-scroll::-webkit-scrollbar-track { background: transparent; }
 .route-page-scroll::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 99px; background-clip: padding-box; background-color: color-mix(in srgb, var(--muted-faint) 58%, transparent); }
 .route-page-scroll:hover::-webkit-scrollbar-thumb, .route-page-scroll:focus-within::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--muted) 72%, transparent); }
+.route-back-to-top { position: absolute; z-index: 8; right: 22px; bottom: 18px; width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; padding: 0; background: color-mix(in srgb, var(--panel) 94%, transparent); color: var(--muted-strong); box-shadow: 0 7px 18px rgba(0, 0, 0, 0.2); backdrop-filter: saturate(150%) blur(12px); -webkit-backdrop-filter: saturate(150%) blur(12px); transition: color 150ms ease, border-color 150ms ease, background 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
+.route-back-to-top:hover, .route-back-to-top:focus-visible { border-color: color-mix(in srgb, var(--accent) 52%, var(--border-strong)); background: var(--accent-soft); color: var(--accent); box-shadow: 0 10px 24px rgba(0, 0, 0, 0.26); transform: translateY(-1px); }
 .source-sync-overlay { position: fixed; z-index: var(--z-source-sync); inset: 0; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, var(--bg) 68%, transparent); backdrop-filter: saturate(125%) blur(6px); -webkit-backdrop-filter: saturate(125%) blur(6px); animation: source-sync-overlay-in 160ms ease-out; }
 .source-sync-overlay-panel { min-width: 238px; min-height: 54px; display: flex; align-items: center; justify-content: center; gap: 10px; border: 1px solid var(--border-strong); border-radius: 12px; padding: 12px 18px; background: var(--panel); color: var(--text); box-shadow: 0 18px 54px rgba(0, 0, 0, 0.28); font-size: 13px; font-weight: 650; }
 .source-sync-overlay-panel svg { flex: 0 0 auto; color: var(--accent); }
@@ -375,19 +377,27 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .playlist-detail-meta { display: flex; align-items: center; gap: 7px; }
 .playlist-detail-meta .playlist-kind-icons { color: var(--accent); }
 .detail-hero .playlist-detail-summary { max-width: 620px; margin-top: 7px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.45; white-space: pre-line; }
-.artist-detail-hero { min-height: 144px; align-items: center; gap: 20px; }
-.artist-detail-hero .artwork-hero { width: 144px; height: 144px; box-shadow: 0 0 0 0.5px var(--border-strong), 0 10px 26px rgba(0, 0, 0, 0.22), 0 22px 44px rgba(0, 0, 0, 0.1); }
-.artist-detail-hero > div { padding-bottom: 0; }
-.artist-detail-hero h1 { font-size: clamp(25px, 2.4vw, 34px); }
-.artist-detail-overview { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(288px, 0.72fr); align-items: stretch; gap: 28px; }
-.artist-biography { min-width: 0; min-height: 144px; display: grid; align-content: start; gap: 9px; border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; background: color-mix(in srgb, var(--panel) 92%, var(--surface-deep)); box-shadow: inset 0 1px color-mix(in srgb, var(--border) 58%, transparent); }
+.artist-detail-overview { min-width: 0; max-width: 940px; display: grid; grid-template-columns: 144px minmax(0, 1fr); align-items: start; gap: 24px; }
+.artist-detail-artwork { width: 144px; height: 144px; align-self: start; }
+.artist-detail-artwork .artwork-hero { width: 144px; height: 144px; box-shadow: 0 0 0 0.5px var(--border-strong), 0 10px 26px rgba(0, 0, 0, 0.22), 0 22px 44px rgba(0, 0, 0, 0.1); }
+.artist-detail-main { min-width: 0; display: grid; align-content: start; gap: 14px; padding-top: 2px; }
+.artist-detail-identity h1 { max-width: 700px; margin: 0 0 5px; font-size: clamp(25px, 2.4vw, 34px); line-height: 1.08; }
+.artist-detail-identity p { margin: 0; color: var(--muted); font-size: 13px; }
+.artist-detail-actions { display: flex; align-items: center; gap: 7px; min-height: 37px; }
+.artist-detail-actions .primary-button { margin-top: 0; }
+.artist-action-menu { position: relative; display: inline-grid; flex: 0 0 auto; }
+.artist-more-button { color: var(--muted-strong); }
+.artist-more-menu { position: absolute; z-index: 12; top: calc(100% + 7px); left: 0; width: max-content; min-width: 154px; display: grid; gap: 2px; border: 1px solid var(--border-strong); border-radius: 8px; padding: 5px; background: color-mix(in srgb, var(--panel) 97%, transparent); box-shadow: 0 13px 34px rgba(0, 0, 0, 0.26); backdrop-filter: saturate(150%) blur(14px); -webkit-backdrop-filter: saturate(150%) blur(14px); }
+.artist-more-menu button { min-height: 32px; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 5px; padding: 0 9px; background: transparent; color: var(--muted-strong); font-size: 12px; font-weight: 650; text-align: left; white-space: nowrap; }
+.artist-more-menu button:hover, .artist-more-menu button:focus-visible { background: var(--accent-soft); color: var(--text); }
+.artist-biography { min-width: 0; display: grid; align-content: start; gap: 9px; padding-top: 3px; }
 .artist-biography h2 { margin: 0; color: var(--muted); font-size: 12px; font-weight: 750; letter-spacing: 0.08em; line-height: 1.25; text-transform: uppercase; }
 .artist-biography p { margin: 0; color: var(--muted-strong); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-line; }
 .artist-biography p.is-collapsed { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: var(--artist-biography-line-limit); }
 .artist-biography.is-empty p { color: var(--muted); }
 .artist-biography-toggle { width: fit-content; min-height: 28px; border: 0; border-radius: 6px; padding: 3px 7px; background: transparent; color: var(--accent); font-size: 12px; font-weight: 700; line-height: 1.2; transition: color 150ms ease, background 150ms ease; }
 .artist-biography-toggle:hover { background: var(--accent-soft); color: var(--text); }
-.artist-detail-tabs { width: fit-content; display: inline-grid; grid-template-columns: repeat(2, minmax(82px, 1fr)); gap: 3px; margin: 22px 0 18px; border: 1px solid var(--border); border-radius: 9px; padding: 3px; background: var(--surface-deep); box-shadow: inset 0 1px rgba(255, 255, 255, 0.025); }
+.artist-detail-tabs { width: fit-content; display: inline-grid; grid-template-columns: repeat(2, minmax(82px, 1fr)); gap: 3px; margin: 24px 0 18px; border: 1px solid var(--border); border-radius: 9px; padding: 3px; background: var(--surface-deep); box-shadow: inset 0 1px rgba(255, 255, 255, 0.025); }
 .artist-detail-tabs button { min-width: 82px; height: 32px; border: 0; border-radius: 6px; padding: 0 14px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 650; transition: color 150ms ease, background 150ms ease, box-shadow 150ms ease; }
 .artist-detail-tabs button:hover { color: var(--text); background: var(--hover-fill); }
 .artist-detail-tabs button[aria-selected="true"] { color: var(--text); background: var(--panel); box-shadow: 0 0 0 0.5px var(--border), 0 2px 7px rgba(0, 0, 0, 0.13); }
@@ -433,7 +443,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .sortable-column-header:hover, .sortable-column-header:focus-visible { color: var(--accent); background: var(--accent-soft); }
 .sortable-column-header.is-active { color: var(--accent); }
 .sortable-column-header.is-active svg { opacity: 1; }
-.sortable-column-header.duration-sort-header { min-width: var(--track-duration-column); justify-content: flex-end; padding-inline: 7px; text-align: right; white-space: nowrap; }
+.sortable-column-header.duration-sort-header { min-width: 0; justify-content: center; padding-inline: 0; text-align: center; white-space: nowrap; }
 .track-artwork-cell { display: grid; place-items: center; }
 .track-selection-heading, .track-selection-cell { display: grid; place-items: center; }
 .track-selection-checkbox { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; }
@@ -452,7 +462,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .track-row:hover .track-index span { display: none; }
 .track-row:hover .track-index svg { display: block; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.duration-cell { min-width: var(--track-duration-column); justify-self: end; padding-inline: 7px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.duration-cell { width: 100%; min-width: 0; display: grid; place-items: center; padding: 0; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
 .track-selection-summary { display: inline-flex; align-items: center; min-height: 28px; border-radius: 14px; padding: 0 10px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; }
 .track-pagination { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 20px; color: var(--muted); }
 .track-pagination button { min-width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; background: var(--surface-soft); color: var(--muted-strong); font-size: 12px; font-weight: 650; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
@@ -825,7 +835,8 @@ button.device-option:hover { border-color: var(--border-strong); background: var
   .lyrics-panel { width: min(720px, calc(100% - 32px)); }
 }
 @media (max-width: 980px) {
-  .artist-detail-overview { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .artist-detail-overview { grid-template-columns: 112px minmax(0, 1fr); gap: 18px; }
+  .artist-detail-artwork, .artist-detail-artwork .artwork-hero { width: 112px; height: 112px; }
   .track-row { grid-template-columns: 30px 40px minmax(180px, 1.1fr) minmax(120px, 0.8fr) var(--track-duration-column); }
   .track-row > :nth-child(5) { display: none; }
   .track-table.has-selection .track-row { grid-template-columns: 24px 30px 40px minmax(180px, 1.1fr) minmax(120px, 0.8fr) var(--track-duration-column); }

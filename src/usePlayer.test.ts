@@ -13,13 +13,16 @@ import {
   createShuffleBag,
   createShuffleNavigationState,
   decidePlaybackFallback,
+  appendQueueBatch,
   formatMediaError,
   getManualNextIndex,
   getPrebufferTargetIndex,
   getSequentialNextIndex,
+  insertQueueBatchNext,
   mergeFreshTrackMetadata,
   moveShufflePrevious,
   normalizeRestoredProgress,
+  normalizeQueueBatch,
   parsePersistedPlaybackSession,
   previewShuffleNext,
   readPersistedPlaybackSession,
@@ -276,6 +279,30 @@ describe("persisted playback session", () => {
 });
 
 describe("queue transition rules", () => {
+  it("keeps a full artist batch ordered, unique, and separate from existing queue entries", () => {
+    const incoming = [track(2), track(3), track(2), { ...track(4), type: "album" }];
+    expect(normalizeQueueBatch(incoming).map((item) => item.ratingKey)).toEqual(["track-2", "track-3"]);
+
+    const appended = appendQueueBatch([track(1), track(2)], 0, incoming);
+    expect(appended).toMatchObject({ currentIndex: 0, addedCount: 2, shouldStart: false });
+    expect(appended.queue.map((item) => item.ratingKey)).toEqual(["track-1", "track-2", "track-2", "track-3"]);
+  });
+
+  it("inserts the whole batch after the current item without reversing it", () => {
+    const inserted = insertQueueBatchNext([track(1), track(4)], 0, [track(2), track(3)]);
+    expect(inserted).toMatchObject({ currentIndex: 0, addedCount: 2, shouldStart: false });
+    expect(inserted.queue.map((item) => item.ratingKey)).toEqual(["track-1", "track-2", "track-3", "track-4"]);
+  });
+
+  it("starts a queued batch only when there is no current track", () => {
+    const empty = appendQueueBatch([], -1, [track(1), track(2)]);
+    expect(empty).toMatchObject({ currentIndex: 0, addedCount: 2, shouldStart: true });
+
+    const noCurrent = insertQueueBatchNext([track(1)], -1, [track(2)]);
+    expect(noCurrent).toMatchObject({ currentIndex: 0, addedCount: 1, shouldStart: true });
+    expect(noCurrent.queue.map((item) => item.ratingKey)).toEqual(["track-1", "track-2"]);
+  });
+
   it("never leaves the current queue in sequential mode", () => {
     expect(getSequentialNextIndex(0, 3, "off")).toBe(1);
     expect(getSequentialNextIndex(2, 3, "off")).toBeNull();

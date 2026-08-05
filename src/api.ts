@@ -620,6 +620,37 @@ export async function addTrackToPlaylist(serverId: string, playlistId: string, r
   if (isDesktopRuntime()) await invoke("add_to_playlist", { serverId, playlistId, ratingKey });
 }
 
+export interface PlaylistBatchAddResult {
+  requested: number;
+  added: number;
+  failedRatingKeys: string[];
+}
+
+/** Submit a deduplicated, ordered track batch through the native PMS boundary. */
+export async function addTracksToPlaylist(
+  serverId: string,
+  playlistId: string,
+  ratingKeys: readonly string[],
+): Promise<PlaylistBatchAddResult> {
+  if (!isCleanPlexIdentifier(serverId) || !isCleanPlexIdentifier(playlistId)) {
+    throw new Error("无效的 Plex 歌单标识");
+  }
+  const uniqueRatingKeys: string[] = [];
+  const seen = new Set<string>();
+  for (const ratingKey of ratingKeys) {
+    if (!isCleanPlexIdentifier(ratingKey)) throw new Error("无效的 Plex 歌曲标识");
+    if (!seen.has(ratingKey)) {
+      seen.add(ratingKey);
+      uniqueRatingKeys.push(ratingKey);
+    }
+  }
+  if (!uniqueRatingKeys.length) throw new Error("请至少选择一首歌曲");
+  if (!isDesktopRuntime()) {
+    return { requested: uniqueRatingKeys.length, added: uniqueRatingKeys.length, failedRatingKeys: [] };
+  }
+  return invoke("add_tracks_to_playlist", { serverId, playlistId, ratingKeys: uniqueRatingKeys });
+}
+
 export async function getLyrics(serverId: string, ratingKey: string): Promise<PlexLyricsPayload | null> {
   if (!isDesktopRuntime()) {
     return {

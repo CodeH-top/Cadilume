@@ -1,5 +1,10 @@
 # LEARNINGS
 
+## 2026-08-05 — 批量歌手操作的取消所有权
+
+- 歌手级“播放 / 添加到队列 / 播放下一个 / 添加到歌单”会用共享 `AbortController` 和忙碌状态串行化整批分页读取。快速连续触发时，新动作会取消旧动作；旧动作的 `finally` 只能在它仍是 controller ref 的拥有者时清理忙碌状态，否则会把新动作的按钮错误地重新启用。
+- 批量歌单写入继续保持在 Rust/Tauri 命令中按顺序执行，前端只保留失败的 rating key 供同一歌单重试；不能以 WebView 并发逐首请求替代该边界。
+
 ## 2026-08-01 — keepalive-for-react 可作为 R15 缓存底座，但不是完整路由方案
 
 - `keepalive-for-react@5.0.11` 的 `KeepAlive` 会通过 Portal 保留 React 子树和 DOM，`activeCacheKey` 可使用 Cadilume 自己生成的 History entry id；设置 `max={Infinity}`、`maxAliveTime={0}` 可满足当前上下文不做 LRU/时间淘汰，登出或切换服务器/资料库时再用 `aliveRef.destroyAll()`。
@@ -15,12 +20,13 @@
 
 - 用户实测纠正：即使 `Role` / `Contributor` 夹具、链接解析和恢复快照测试通过，真实多歌手曲目仍可能因未读取曲目自身的“歌曲歌手”字段而退化成单歌手。不要将这些局部回归当作真实 PMS 字段映射已闭环的证据。
 - 后续先用“曲目歌手与专辑歌手不同”的已授权只读 raw PMS 元数据建立字段契约；曲目级歌手必须优先、无损贯穿所有显示与持久化路径，专辑歌手不能覆盖它。`grandparentTitle` 等层级字段的实际语义须以该契约验证，不能按字段名或演示数据猜测。
+- 2026-08-04 的真实只读核对已确认该契约：`originalTitle` 是所验样本的曲目歌手，`grandparentTitle` 是不同的专辑歌手。该服务器对完整扫描结果及样本详情均未给出 `Role` / `Contributor`，因此新鲜详情与版本化队列快照必须无损保留完整 `originalTitle`，且不能回退专辑歌手。2026-08-05 用户明确覆盖此前“原文一律不拆”的显示规则：Cadilume 的 UI 解析独立于 PMS 结构化字段，必须先按精确 `" / "` 拆成成员再本地匹配；仅 `AC/DC`、`A/B`、`A /B`、`A/ B` 等非精确形式保持一个成员。该覆盖只改变显示/链接成员表示，不改变原始曲目歌手文本的持久化。
 
 ## [LRN-20260801-001] History Back 需要完整路由页缓存，不能退化为滚动恢复
 
 **Logged**: 2026-08-01T15:57:40+08:00
 **Priority**: high
-**Status**: pending
+**Status**: resolved
 **Area**: frontend
 
 ### Metadata
@@ -45,6 +51,10 @@
 ### Suggested Action
 
 以 History entry id 建立页面级 KeepAlive 缓存，离开前冻结活动页面、返回时重新激活同一 React/DOM 实例；History state 只保存可序列化身份和重启水合快照。页面各自拥有视口，滚动监听绑定 DOM 实例的固定 entry id，平滑滚动只用于用户主动锚点操作，并以 app Back / browser Back / Forward 的状态与时序回归证明行为。
+
+### Resolution
+
+2026-08-04 已由 R15 实现并完成真实开发态验收：`createHashRouter`、History entry key、页面级 `KeepAlive` 与每页滚动容器共同保留 React / DOM 实例；只在登出或服务器 / 资料库上下文切换时销毁。实现提交为 `bd557fa`。
 
 ## 2026-08-01 — 全局通知队列的 presence、暂停计时与可访问性堆叠
 
@@ -118,3 +128,14 @@
 - Plexamp 4.12.4 is an Electron/React Native Web app around 206 MB. Its default 270×515 window hides the independent volume slider because the narrow layout requires roughly 675px height.
 - Windows uses a null media-service implementation and only global media shortcuts, so it lacks complete SMTC metadata/progress/Seek.
 - The private Treble/BASS engine is not reusable; build a clean native playback engine behind an `AudioEngine` boundary.
+
+## 2026-08-01 — Plex Companion 可行性边界：控制端可落地，接收端需实验性拆分
+
+- 2026-08-03 用户决定暂不考虑 L1；后续默认不启动 Companion 协议 POC、设备发现、Receiver 入站服务、控制端 UI、依赖引入或真实互操作验收，只有用户重新明确开启后才恢复评估。
+- Plex 官方当前支持矩阵将 Plexamp（包含移动端实例）列为同时具备 Controller 与 Receiver 角色的 Companion app。因此 L1a 的首个真实互操作目标可以是“Cadilume 控制同一账号下、正在前台/可发现的 iOS 或 Android Plexamp”；它不要求 Cadilume 先实现 Receiver。
+- 手机端作为 Receiver 并不等于所有远端交接都可靠：官方人员说明简单的播放控制可经云端中介，但完整连接/“play here”通常要求控制端能连到播放器端，实践中应把同一 Wi-Fi / 同网段作为首轮验收前提，并覆盖 iOS、Android、前后台切换和断网恢复。
+- 当前 Tauri/Rust 框架已经具备控制端可复用的基础：Rust `reqwest`、Keychain/资源级 PMS token、per-server 连接回退、Plex identity headers、Tauri command/event 桥和 React 播放状态；但 `canControlCompanion` 仍为显式 `false`，没有播放器发现、订阅、commandID、timeline 回调或远端目标状态。
+- 当前 `axum` 仅绑定 `127.0.0.1` 并服务音频/封面票据；它不是可被局域网 Plex 客户端发现的 Companion receiver。接收端还需要独立的 LAN HTTP listener、GDM/`/resources` 广告、`/player/*` 命令、订阅者管理和从 WebView 播放状态向 Rust 的稳定时间线发布。
+- Plex 官方支持矩阵把 macOS/Windows 桌面应用列为 controller-only；官方 `plex-media-player` 仓库的 Remote control API wiki 已归档，且页面最后编辑于 2015 年。协议字段可作为 clean-room 实现参考，但不能据此宣称现代 Plex 客户端一定支持第三方桌面 receiver。
+- 后续应把 L1 拆为：L1a 控制端（优先用 `/clients`/已授权资源和 `timeline/poll`，避免首版开放入站端口），L1b 远端播放交接与 server playQueue，L1c 可选、默认关闭的实验性 receiver。所有网络与 token 处理留在 Rust；接收 `playMedia` 只允许已发现且用户确认的服务器/设备，不能信任局域网请求携带的任意地址或 token。
+- R14、R15、R13 及其验收完成前不开始 L1 UI；实施时 Companion 应作为独立 `CompanionManager/Gateway`，不要把远端播放器协议直接塞进现有 `MusicProviderGateway` 或 `usePlayer` 的本地 HTMLAudio 状态机。
