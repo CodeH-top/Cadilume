@@ -15,6 +15,7 @@ export const PLAYBACK_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const PLAYBACK_SESSION_MAX_QUEUE = 500;
 const PLAYBACK_SESSION_WRITE_THROTTLE_MS = 5_000;
 const PLAYBACK_CLOCK_PUBLISH_INTERVAL_MS = 50;
+export const PLAYBACK_START_TIMEOUT_MS = 12_000;
 
 const STREAM_QUALITY_VALUES: readonly StreamQuality[] = ["auto", "original", "320", "256", "192"];
 
@@ -640,6 +641,20 @@ export function formatMediaError(error: MediaErrorDetails | null | undefined): s
     : `MediaError code ${code}（${label}）；浏览器未提供 message`;
 }
 
+/**
+ * Media events carry no request identity. Only a non-empty source that still
+ * belongs to the active ticket may change playback state; WebKit can emit a
+ * late error for an empty or replaced source during the first load.
+ */
+export function isCurrentPlaybackErrorSource(expectedSource: string, reportedSource: string): boolean {
+  if (!expectedSource || !reportedSource) return false;
+  try {
+    return new URL(expectedSource, "http://localhost").href === new URL(reportedSource, "http://localhost").href;
+  } catch {
+    return expectedSource === reportedSource;
+  }
+}
+
 export function sourceAlreadyUses320Kbps(source: string): boolean {
   return sourceStreamQuality(source) === "320";
 }
@@ -848,6 +863,51 @@ export async function seekAfterMetadata(
   seek();
 }
 
+/**
+ * `play()` can remain pending in WKWebView after a stale media error. Treat a
+ * source as started only once it emits `playing` or advances its clock, so the
+ * existing bounded compatibility fallback can recover instead of leaving the
+ * first selected song silently loading forever.
+ */
+export function waitForAudioPlaybackStart(
+  audio: Pick<HTMLAudioElement, "addEventListener" | "removeEventListener" | "play" | "currentTime">,
+  timeoutMs = PLAYBACK_START_TIMEOUT_MS,
+): Promise<void> {
+  const initialTime = finiteNumber(audio.currentTime) ? audio.currentTime : 0;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeout: number | undefined;
+    const cleanup = () => {
+      audio.removeEventListener("playing", onPlaying);
+      audio.removeEventListener("timeupdate", onTimeUpdate);
+      if (timeout !== undefined) globalThis.clearTimeout(timeout);
+    };
+    const finish = (reason?: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (reason) {
+        reject(reason instanceof Error ? reason : new Error(formatPlaybackFailure(reason)));
+        return;
+      }
+      resolve();
+    };
+    const onPlaying = () => finish();
+    const onTimeUpdate = () => {
+      if (finiteNumber(audio.currentTime) && audio.currentTime > initialTime + 0.01) finish();
+    };
+
+    audio.addEventListener("playing", onPlaying, { once: true });
+    audio.addEventListener("timeupdate", onTimeUpdate);
+    timeout = globalThis.setTimeout(() => finish(new Error("播放启动超时")), Math.max(1, timeoutMs));
+    try {
+      void Promise.resolve(audio.play()).catch((reason) => finish(reason));
+    } catch (reason) {
+      finish(reason);
+    }
+  });
+}
+
 async function applyOutputSink(audios: readonly RoutableAudioElement[], sinkId: string): Promise<boolean> {
   const setters = audios.map((audio) => audio.setSinkId?.bind(audio));
   const resetToDefault = async () => {
@@ -974,6 +1034,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const scrobbledRef = useRef(new Set<string>());
   const playbackFallbackRef = useRef<PlaybackFallbackState>(createPlaybackFallbackState(quality));
   const playbackFailureHandlerRef = useRef<(diagnostic: string, source: string) => boolean>(() => false);
+  const activePlaybackSourceRef = useRef<{ audio: RoutableAudioElement; requestId: number; source: string } | undefined>(undefined);
   const playbackLoadingRef = useRef(false);
   const loadRequestRef = useRef(0);
   const prebufferRequestRef = useRef(0);
@@ -1081,6 +1142,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const track = tracks[index];
     if (!track || !serverId) return;
     const requestId = ++loadRequestRef.current;
+    activePlaybackSourceRef.current = undefined;
     setPlaybackLoading(autoplay);
     setBuffering(false);
     prebufferRequestRef.current += 1;
@@ -1125,10 +1187,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         if (preparedAudio) {
           audioRef.current = preparedAudio;
           assignedSource = preparedAudio.currentSrc || preparedAudio.src;
+          activePlaybackSourceRef.current = { audio: preparedAudio, requestId, source: assignedSource };
           await seekAfterMetadata(preparedAudio, () => resumeProgressRef.current ?? progressRef.current);
           if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
           resumeProgressRef.current = null;
-          if (autoplay) await preparedAudio.play();
+          if (autoplay) await waitForAudioPlaybackStart(preparedAudio);
           else setPlaying(false);
           finishCurrentLoad();
           return;
@@ -1146,13 +1209,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
       const url = await plexMusicGateway.playback.streamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
+      activePlaybackSourceRef.current = { audio, requestId, source: url };
       audio.src = url;
       assignedSource = url;
       audio.load();
       await seekAfterMetadata(audio, () => resumeProgressRef.current ?? progressRef.current);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       resumeProgressRef.current = null;
-      if (autoplay) await audio.play();
+      if (autoplay) await waitForAudioPlaybackStart(audio);
       finishCurrentLoad();
     } catch (reason) {
       if (requestId !== loadRequestRef.current) return;
@@ -1598,6 +1662,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         .then(async (url) => {
           if (!isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)) return;
           if (playbackFallbackRef.current.pendingQuality !== fallbackQuality) return;
+          activePlaybackSourceRef.current = { audio, requestId: retryLoadRequest, source: url };
           audio.src = url;
           fallbackAssigned = true;
           playbackFallbackRef.current = activatePlaybackFallback(playbackFallbackRef.current, fallbackQuality);
@@ -1605,7 +1670,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           await seekAfterMetadata(audio, () => resumeProgressRef.current ?? progressRef.current);
           if (!isActiveFallback()) return;
           resumeProgressRef.current = null;
-          await audio.play();
+          await waitForAudioPlaybackStart(audio);
           if (!isActiveFallback()) return;
           setPlaybackLoading(false);
           setBuffering(false);
@@ -1689,7 +1754,15 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           pool.discardPreparedAudio(audio);
           return;
         }
-        handlePlaybackFailure(audio, formatMediaError(audio.error), audio.currentSrc || audio.src);
+        const source = audio.currentSrc || audio.src;
+        const activeSource = activePlaybackSourceRef.current;
+        if (
+          !activeSource
+          || activeSource.audio !== audio
+          || activeSource.requestId !== loadRequestRef.current
+          || !isCurrentPlaybackErrorSource(activeSource.source, source)
+        ) return;
+        handlePlaybackFailure(audio, formatMediaError(audio.error), source);
       };
 
       audio.addEventListener("timeupdate", updateTime);
@@ -1736,6 +1809,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       }
       for (const dispose of disposeEvents) dispose();
       pool.destroy();
+      if (activePlaybackSourceRef.current && pool.elements.includes(activePlaybackSourceRef.current.audio)) {
+        activePlaybackSourceRef.current = undefined;
+      }
       if (audioPoolRef.current === pool) audioPoolRef.current = null;
       if (audioRef.current && pool.elements.includes(audioRef.current as RoutableAudioElement)) audioRef.current = null;
     };

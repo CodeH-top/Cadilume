@@ -1,5 +1,4 @@
 import {
-  Captions,
   ChevronDown,
   Disc3,
   ListMusic,
@@ -16,7 +15,6 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { type LyricLine, type LyricsDocument } from "./lyrics";
-import { getLyricsActionPresentation } from "./playerActions";
 import { playbackControlLabel } from "./playerUi";
 import { trackArtistContributors, type PlexContributor, type PlexMedia, type ThemeMode } from "./types";
 import { SharedVolumeControl } from "./VolumeControl";
@@ -90,8 +88,6 @@ export interface NowPlayingViewProps {
   durationSeconds?: number;
   queueOpen?: boolean;
   queueAvailable?: boolean;
-  lyricsOpen?: boolean;
-  canToggleLyrics?: boolean;
   theme?: NowPlayingTheme;
   onSeek: (seconds: number) => void;
   onShuffleChange?: (enabled: boolean) => void;
@@ -102,7 +98,6 @@ export interface NowPlayingViewProps {
   onMutedChange?: (muted: boolean) => void;
   onVolumeChange?: (volume: number) => void;
   onToggleQueue?: () => void;
-  onToggleLyrics?: () => void;
   onClose: () => void;
   /** Disable this dialog's keyboard/focus handling while a nested dialog is open. */
   escapeEnabled?: boolean;
@@ -186,8 +181,6 @@ export function NowPlayingView({
   durationSeconds,
   queueOpen = false,
   queueAvailable = false,
-  lyricsOpen = false,
-  canToggleLyrics = false,
   theme,
   onSeek,
   onShuffleChange,
@@ -198,14 +191,12 @@ export function NowPlayingView({
   onMutedChange,
   onVolumeChange,
   onToggleQueue,
-  onToggleLyrics,
   onClose,
   escapeEnabled = true,
   onAddToPlaylist,
 }: NowPlayingViewProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLElement>(null);
-  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const addToPlaylistButtonRef = useRef<HTMLButtonElement>(null);
   const escapeEnabledRef = useRef(escapeEnabled);
   const previousEscapeEnabledRef = useRef(escapeEnabled);
@@ -230,7 +221,9 @@ export function NowPlayingView({
 
   useEffect(() => {
     if (!visible || !escapeEnabledRef.current) return;
-    closeButtonRef.current?.focus();
+    // Focusing the dialog establishes a predictable modal entry point without
+    // showing a keyboard-only focus ring on the collapse button on first open.
+    dialogRef.current?.focus({ preventScroll: true });
   }, [visible]);
 
   useEffect(() => {
@@ -315,7 +308,6 @@ export function NowPlayingView({
         <header className="now-playing-header">
           <div className="now-playing-header-drag-region" data-tauri-drag-region aria-hidden="true" />
           <button
-            ref={closeButtonRef}
             className="now-playing-icon-button now-playing-close-button"
             type="button"
             aria-label="关闭正在播放"
@@ -403,12 +395,6 @@ export function NowPlayingView({
                 </div>
                 <p>{artist}</p>
               </div>
-              <NowPlayingLyricsAction
-                hasTrack={Boolean(track)}
-                canToggleLyrics={canToggleLyrics}
-                lyricsOpen={lyricsOpen}
-                onToggle={onToggleLyrics}
-              />
             </div>
 
             <div className="now-playing-transport" role="group" aria-label="播放控制">
@@ -503,37 +489,6 @@ export function NowPlayingView({
         </footer>
       </div>
     </section>
-  );
-}
-
-function NowPlayingLyricsAction({ hasTrack, canToggleLyrics, lyricsOpen, onToggle }: {
-  hasTrack: boolean;
-  canToggleLyrics: boolean;
-  lyricsOpen: boolean;
-  onToggle?: () => void;
-}) {
-  const presentation = getLyricsActionPresentation({ hasTrack, canToggleLyrics, lyricsOpen });
-  const action = (
-    <button
-      className={`now-playing-control-button ${lyricsOpen ? "is-active" : ""}`}
-      type="button"
-      disabled={presentation.disabled}
-      aria-label={presentation.ariaLabel}
-      aria-pressed={lyricsOpen}
-      title={presentation.showsDisabledTooltip ? undefined : presentation.tooltip}
-      onClick={onToggle}
-    >
-      <Captions size={19} strokeWidth={1.8} aria-hidden="true" />
-    </button>
-  );
-
-  if (!presentation.showsDisabledTooltip) return action;
-
-  return (
-    <span className="now-playing-action-tooltip-anchor is-disabled">
-      {action}
-      <span className="now-playing-action-tooltip" role="tooltip">{presentation.tooltip}</span>
-    </span>
   );
 }
 

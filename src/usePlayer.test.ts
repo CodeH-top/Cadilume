@@ -17,6 +17,7 @@ import {
   formatMediaError,
   getManualNextIndex,
   getPrebufferTargetIndex,
+  isCurrentPlaybackErrorSource,
   getSequentialNextIndex,
   insertQueueBatchNext,
   mergeFreshTrackMetadata,
@@ -32,6 +33,7 @@ import {
   sourceAlreadyUses320Kbps,
   takeShuffleIndex,
   type AudioPreparation,
+  waitForAudioPlaybackStart,
 } from "./usePlayer";
 import type { PlexItem } from "./types";
 
@@ -94,6 +96,22 @@ class DeferredMetadataAudio extends FakeAudio {
     }
   }
 }
+
+class PlaybackStartAudio extends EventTarget {
+  currentTime = 0;
+  playCalls = 0;
+
+  constructor(private readonly onPlay: () => Promise<void> = async () => undefined) {
+    super();
+  }
+
+  play(): Promise<void> {
+    this.playCalls += 1;
+    return this.onPlay();
+  }
+}
+
+const asPlaybackStartAudio = (audio: PlaybackStartAudio) => audio as unknown as Pick<HTMLAudioElement, "addEventListener" | "removeEventListener" | "play" | "currentTime">;
 
 const asAudio = (audio: FakeAudio): HTMLAudioElement => audio as unknown as HTMLAudioElement;
 
@@ -467,6 +485,14 @@ describe("next-track prebuffer selection", () => {
 });
 
 describe("media playback diagnostics", () => {
+  it("ignores blank and replaced media sources before handling an error event", () => {
+    const active = "http://127.0.0.1:49152/stream/current-ticket?quality=auto";
+
+    expect(isCurrentPlaybackErrorSource(active, "")).toBe(false);
+    expect(isCurrentPlaybackErrorSource(active, "http://127.0.0.1:49152/stream/old-ticket?quality=auto")).toBe(false);
+    expect(isCurrentPlaybackErrorSource(active, active)).toBe(true);
+  });
+
   it("keeps MediaError code and safe message details without exposing a token URL", () => {
     const diagnostic = formatMediaError({
       code: 3,
@@ -491,6 +517,45 @@ describe("media playback diagnostics", () => {
 
     expect(sourceAlreadyUses320Kbps(auto320)).toBe(true);
     expect(sourceAlreadyUses320Kbps("https://music.test/library/parts/1.flac?X-Plex-Token=secret-token")).toBe(false);
+  });
+
+  it("treats the playing event as the successful start boundary", async () => {
+    const audio = new PlaybackStartAudio();
+    const started = waitForAudioPlaybackStart(asPlaybackStartAudio(audio), 50);
+
+    expect(audio.playCalls).toBe(1);
+    audio.dispatchEvent(new Event("playing"));
+    await expect(started).resolves.toBeUndefined();
+  });
+
+  it("also accepts clock progress when WebKit omits a playing event", async () => {
+    const audio = new PlaybackStartAudio();
+    const started = waitForAudioPlaybackStart(asPlaybackStartAudio(audio), 50);
+
+    audio.currentTime = 0.25;
+    audio.dispatchEvent(new Event("timeupdate"));
+    await expect(started).resolves.toBeUndefined();
+  });
+
+  it("propagates a rejected play request instead of waiting for timeout", async () => {
+    const audio = new PlaybackStartAudio(async () => {
+      throw new Error("autoplay denied");
+    });
+
+    await expect(waitForAudioPlaybackStart(asPlaybackStartAudio(audio), 50)).rejects.toThrow("autoplay denied");
+  });
+
+  it("fails a silently stuck start after the bounded timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const audio = new PlaybackStartAudio();
+      const timedOut = expect(waitForAudioPlaybackStart(asPlaybackStartAudio(audio), 25)).rejects.toThrow("播放启动超时");
+
+      await vi.advanceTimersByTimeAsync(25);
+      await timedOut;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("falls back from direct play through a finite descending compatibility chain", () => {

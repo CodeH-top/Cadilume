@@ -9,6 +9,7 @@
 
 - 内部浏览器可访问 `http://[::1]:4173`，但 `tab.playwright.waitForLoadState({ state: "networkidle" })` 在当前后端会直接报告不支持；不要把该 API 错误误判为页面加载失败。
 - 对本地 Cadilume 预览改用 `domcontentloaded`、短暂稳定等待、DOM / computed-style 与控制台读取；结束后关闭临时浏览器标签、复位视口并终止明确由本轮创建的 preview 进程。
+- 2026-08-05 在 `http://localhost:1420` 又出现标签会话失配：`tabs.new()` / `tabs.get()` 返回的 handle 不在当前 browser session，虽然列表仍显示新的空白标签；按浏览器恢复流程重新取 handle 后仍复现。此时停止重复导航和交互，不将其误判为应用加载失败，也不以截图或另一浏览器绕过 Cadilume 的内部浏览器验收约束；保留自动化检查，并把真实开发态交互列为待回归项。
 
 ## 2026-08-01 — 重启开发链时，钥匙串授权会在窗口创建前阻塞启动
 
@@ -45,7 +46,7 @@
 
 - 在内部浏览器打开 Ant Design 官方主题页时，页面运行态返回 `typeof document.startViewTransition === "undefined"`，因此该环境只会执行无动画降级，不能用它判断 Ant Design 或 Cadilume 的 View Transition 揭示观感。
 - 真实 Tauri WKWebView 中，即使关闭 `::view-transition-group/image-pair/old/new` 的默认动画，`document.startViewTransition` 的 root 圆形揭示仍会先闪出一帧；Cadilume 不应把它作为主题动效主路径。
-- 稳定方案是应用自管双层揭示：切换前克隆 `#root` 为 `aria-hidden`、`inert` 的旧主题快照并内联旧 CSS token；把真实根节点放在上层，以标准元素 `clip-path: circle()` 从触发点扩开，完成后删除快照。重复点击只由状态锁忽略，主题按钮不设置 `disabled`，以保持正常 `pointer` 状态。
+- 2026-08-05 用户仍观察到封面闪烁后，原先对真实 `#root` 的 `clip-path` 圆形揭示被判定为不稳定：裁剪根节点会让 WKWebView 重新合成全部媒体层。稳定方案改为旧主题快照覆盖 live tree，等待快照图片解码和双 `requestAnimationFrame` 后同步更新 live theme，再仅将快照 `opacity` 淡出；绝不为 `#root` 设置 clip、filter 或过渡。重复点击仍由状态锁忽略，主题按钮不设置 `disabled`，以保持正常 `pointer` 状态。
 
 ## 2026-07-30 — 路由 revision 不能把同页激活误判为页面切换
 
