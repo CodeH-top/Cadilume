@@ -6,7 +6,7 @@ use std::fs;
 
 use plex::PlexState;
 use stream_proxy::StreamProxy;
-use tauri::Manager;
+use tauri::{Listener, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,6 +22,13 @@ pub fn run() {
             app.manage(plex_state);
             app.manage(StreamProxy::start(app.handle().clone())?);
             app.manage(window::QuitCoordinator::default());
+            app.listen("playback://log", |event| {
+                // Development/diagnostic channel only: the WebView player logs
+                // sanitized playback decisions through this event so the same
+                // terminal can explain a failing source without exposing PMS
+                // URIs, paths, tokens, tickets, or private track identifiers.
+                eprintln!("[播放] {}", event.payload());
+            });
             window::set_status_icon_enabled(&app.handle(), status_icon_enabled)?;
             window::reveal_main_window(&app.handle())?;
             Ok(())
@@ -34,7 +41,7 @@ pub fn run() {
             plex::discover_servers,
             plex::server_get,
             plex::create_playlist,
-            plex::delete_playlist,
+            plex::remove_playlist_items,
             plex::get_playlists,
             plex::get_playlist_items,
             plex::add_to_playlist,

@@ -52,7 +52,7 @@ import * as Select from "@radix-ui/react-select";
 import { KeepAlive, type KeepAliveRef, useKeepAliveContext, useKeepAliveRef } from "keepalive-for-react";
 import { createHashRouter, Navigate, RouterProvider, useLocation, useNavigate, useOutlet } from "react-router-dom";
 import { createContext, FormEvent, memo, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import {
   artworkUrl,
   addTracksToPlaylist,
@@ -60,7 +60,6 @@ import {
   canWritePlaylist,
   clearArtworkCache,
   createPlaylist,
-  deletePlaylist,
   discoverServers,
   getArtistTracksPage,
   getCacheStatus,
@@ -77,6 +76,7 @@ import {
   logout,
   normalizeDeviceName,
   openWindowsAudioSettings,
+  removeTracksFromPlaylist,
   searchLibrary,
   setStatusIconEnabled as saveStatusIconEnabled,
   setBrandPreset as saveBrandPreset,
@@ -212,7 +212,6 @@ interface MusicShellRuntime {
   refreshCacheStatus: () => Promise<void>;
   openDeviceNameDialog: () => void;
   openPlaylistCreation: () => void;
-  openPlaylistDeletion: (playlist: PlexPlaylist) => void;
   openPlaylistPicker: (tracks: readonly PlexItem[], label?: string) => void;
   setSidePanel: (value: "queue" | "lyrics" | "devices" | null) => void;
   setNowPlayingOpen: (open: boolean) => void;
@@ -467,7 +466,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [nowPlayingMode, setNowPlayingMode] = useState<NowPlayingMode>(readNowPlayingMode);
   const [playlistSelection, setPlaylistSelection] = useState<PlaylistSelection>();
   const [playlistCreationOpen, setPlaylistCreationOpen] = useState(false);
-  const [playlistDeletion, setPlaylistDeletion] = useState<PlexPlaylist>();
   const [deviceNameDialogOpen, setDeviceNameDialogOpen] = useState(false);
   const [playlists, setPlaylists] = useState<PlexPlaylist[]>([]);
   const [playlistListLoading, setPlaylistListLoading] = useState(false);
@@ -1053,15 +1051,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       }
       setSidePanel(null);
       setPlaylistSelection(undefined);
-      setPlaylistDeletion(undefined);
       setPlaylistCreationOpen(true);
-    },
-    openPlaylistDeletion: (playlist) => {
-      if (!canWritePlaylist(playlist)) return;
-      setSidePanel(null);
-      setPlaylistSelection(undefined);
-      setPlaylistCreationOpen(false);
-      setPlaylistDeletion(playlist);
     },
     openPlaylistPicker,
     setSidePanel,
@@ -1192,29 +1182,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
             setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
             notify(`已创建歌单“${playlist.title}”。`);
             void loadPlaylistList();
-          }}
-          onError={notify}
-        />
-      )}
-
-      {playlistDeletion && serverId && (
-        <DeletePlaylistDialog
-          serverId={serverId}
-          playlist={playlistDeletion}
-          onClose={() => setPlaylistDeletion(undefined)}
-          onDeleted={() => {
-            const deletedPlaylist = playlistDeletion;
-            setPlaylistDeletion(undefined);
-            setPlaylists((current) => current.filter((playlist) => playlist.ratingKey !== deletedPlaylist.ratingKey));
-            const location = router.state.location;
-            const currentRoute = parseLibraryRoute(`${location.pathname}${location.search}`);
-            if (currentRoute.detail?.type === "playlist" && currentRoute.detail.ratingKey === deletedPlaylist.ratingKey) {
-              void router.navigate("/home", {
-                replace: true,
-                state: createCadilumeEntryState(location.state, { route: { view: "home" } }),
-              });
-            }
-            notify(`已删除歌单“${deletedPlaylist.title}”。`);
           }}
           onError={notify}
         />
@@ -1380,7 +1347,6 @@ function MusicRouterLayout() {
           onOpen={openPlaylist}
           onRetry={() => void runtime.loadPlaylistList(true)}
           onCreate={runtime.openPlaylistCreation}
-          onDelete={runtime.openPlaylistDeletion}
         />
       </aside>
       <section className="workspace" aria-hidden={runtime.expandedPlayerOpen || undefined} inert={runtime.expandedPlayerOpen || undefined}>
@@ -1626,6 +1592,29 @@ function RoutePage() {
     runtime.player.setShuffle(false);
   }, [playlistItems, runtime.player]);
 
+  const removePlaylistTrack = useCallback(async (track: PlexItem) => {
+    if (!runtime.serverId || !playlist || !canWritePlaylist(playlist)) {
+      runtime.notify("这个歌单不可编辑。");
+      return;
+    }
+    const playlistItemId = track.playlistItemID;
+    if (!playlistItemId) {
+      runtime.notify("这首歌曲缺少歌单项标识，无法从歌单移除。");
+      return;
+    }
+    try {
+      const result = await removeTracksFromPlaylist(runtime.serverId, playlist.ratingKey, [playlistItemId]);
+      if (result.removed > 0) {
+        setPlaylistItems((current) => current.filter((item) => item.playlistItemID !== playlistItemId));
+        runtime.notify(`已从歌单移除《${track.title}》。`);
+      } else {
+        runtime.notify("没有从歌单移除任何歌曲，请刷新后重试。");
+      }
+    } catch (reason) {
+      runtime.notify(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, [playlist, runtime]);
+
   const handleRouteChange = useCallback((nextRoute: LibraryRoute) => {
     onNavigate(nextRoute);
   }, [onNavigate]);
@@ -1742,6 +1731,7 @@ function RoutePage() {
       onPlay={playPlaylist}
       onShuffle={() => shuffleContext(playlistItems)}
       onPlayTrack={(track, context) => runtime.player.playContext(track, context)}
+      onRemoveTrack={removePlaylistTrack}
       onOpenArtist={openTrackArtist}
       onOpenAlbum={openTrackAlbum}
     />
@@ -1868,7 +1858,7 @@ function PlaylistKindIcons({ playlist, className = "" }: { playlist: PlexPlaylis
   );
 }
 
-function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetry, onCreate, onDelete }: {
+function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetry, onCreate }: {
   playlists: PlexPlaylist[];
   selectedId?: string;
   loading: boolean;
@@ -1876,7 +1866,6 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
   onOpen: (playlist: PlexPlaylist) => void;
   onRetry: () => void;
   onCreate: () => void;
-  onDelete: (playlist: PlexPlaylist) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
@@ -1900,37 +1889,23 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
         ) : playlists.map((playlist) => {
           const capability = [playlist.smart ? "智能" : "普通", playlist.readOnly ? "只读" : undefined].filter(Boolean).join(" · ");
           const active = selectedId === playlist.ratingKey;
-          const deletable = canWritePlaylist(playlist);
           return (
-            <div className={`sidebar-playlist-row ${deletable ? "is-deletable" : ""}`.trim()} key={playlist.ratingKey}>
-              <button
-                type="button"
-                className={`sidebar-playlist-item ${active ? "active" : ""}`}
-                aria-current={active ? "page" : undefined}
-                aria-label={`${playlist.title}，${capability}歌单`}
-                title={playlist.title}
-                onClick={() => onOpen(playlist)}
-              >
-                <Artwork item={playlist} size="small" className="sidebar-playlist-artwork" />
-                <span>
-                  <strong>{playlist.title}</strong>
-                  <small className="sidebar-playlist-meta"><PlaylistKindIcons playlist={playlist} /><span>{playlist.leafCount ?? 0} 首</span></small>
-                </span>
-                <span className="sidebar-playlist-selected-dot" aria-hidden="true" />
-              </button>
-              {deletable && (
-                <button
-                  className="sidebar-playlist-delete"
-                  type="button"
-                  aria-label={`删除歌单“${playlist.title}”`}
-                  data-tooltip="删除歌单"
-                  title="删除歌单"
-                  onClick={() => onDelete(playlist)}
-                >
-                  <Trash2 size={15} strokeWidth={1.9} aria-hidden="true" />
-                </button>
-              )}
-            </div>
+            <button
+              type="button"
+              className={`sidebar-playlist-item ${active ? "active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              aria-label={`${playlist.title}，${capability}歌单`}
+              title={playlist.title}
+              key={playlist.ratingKey}
+              onClick={() => onOpen(playlist)}
+            >
+              <Artwork item={playlist} size="small" className="sidebar-playlist-artwork" />
+              <span>
+                <strong>{playlist.title}</strong>
+                <small className="sidebar-playlist-meta"><PlaylistKindIcons playlist={playlist} /><span>{playlist.leafCount ?? 0} 首</span></small>
+              </span>
+              <span className="sidebar-playlist-selected-dot" aria-hidden="true" />
+            </button>
           );
         })}
       </div>
@@ -2067,7 +2042,7 @@ function RecommendationsView({
   );
 }
 
-function PlaylistDetailView({ playlist, tracks, artists, loading, error, onRetry, onPlay, onShuffle, onPlayTrack, onOpenArtist, onOpenAlbum }: {
+function PlaylistDetailView({ playlist, tracks, artists, loading, error, onRetry, onPlay, onShuffle, onPlayTrack, onRemoveTrack, onOpenArtist, onOpenAlbum }: {
   playlist: PlexPlaylist;
   tracks: PlexItem[];
   artists: PlexItem[];
@@ -2077,10 +2052,12 @@ function PlaylistDetailView({ playlist, tracks, artists, loading, error, onRetry
   onPlay: () => void;
   onShuffle: () => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
+  onRemoveTrack: (track: PlexItem) => void;
   onOpenArtist: (artist: PlexItem) => void;
   onOpenAlbum: (track: PlexItem) => void;
 }) {
   const trackCount = loading ? playlist.leafCount ?? 0 : tracks.length;
+  const removable = canWritePlaylist(playlist);
   return (
     <section className="detail-page playlist-detail-page">
       <header className="detail-hero playlist-detail-hero">
@@ -2100,7 +2077,7 @@ function PlaylistDetailView({ playlist, tracks, artists, loading, error, onRetry
       ) : error ? (
         <div className="playlist-detail-state is-error" role="alert"><TriangleAlert size={24} /><strong>无法读取这个歌单</strong><span>{error}</span><button className="secondary-button" type="button" onClick={onRetry}><RefreshCw size={15} />重试</button></div>
       ) : tracks.length ? (
-        <TrackTable title="曲目" tracks={tracks} artists={artists} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} />
+        <TrackTable title="曲目" tracks={tracks} artists={artists} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} onRemoveTrack={removable ? onRemoveTrack : undefined} />
       ) : <EmptyState title="这个歌单还没有歌曲" description={playlist.smart ? "Plex 当前没有返回符合条件的曲目。" : "可以稍后从歌曲菜单向可写歌单添加内容。"} icon={<ListMusic size={28} />} />}
     </section>
   );
@@ -2666,7 +2643,7 @@ function TrackAlbumCell({ track, onOpenAlbum }: { track: PlexItem; onOpenAlbum: 
   );
 }
 
-function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpenArtist, onOpenAlbum, onPlay, startIndex = 0, selection }: {
+function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpenArtist, onOpenAlbum, onPlay, onRemoveTrack, startIndex = 0, selection }: {
   label: string;
   tracks: PlexItem[];
   artists: PlexItem[];
@@ -2676,6 +2653,7 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
   onOpenArtist: (artist: PlexItem) => void;
   onOpenAlbum: (track: PlexItem) => void;
   onPlay: (track: PlexItem, context: PlexItem[]) => void;
+  onRemoveTrack?: (track: PlexItem) => void;
   startIndex?: number;
   selection?: {
     selectedRatingKeys: ReadonlySet<string>;
@@ -2686,38 +2664,169 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
   const artistLookup = useMemo(() => createArtistLookup(artists), [artists]);
   const selectedOnPage = tracks.filter((track) => selection?.selectedRatingKeys.has(track.ratingKey)).length;
   const allPageSelected = tracks.length > 0 && selectedOnPage === tracks.length;
+  const [pendingRemove, setPendingRemove] = useState<PlexItem>();
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const removeAnchorRef = useRef<HTMLButtonElement | null>(null);
+  const closeRemoveConfirm = useCallback(() => {
+    if (removeBusy) return;
+    setPendingRemove(undefined);
+    removeAnchorRef.current = null;
+  }, [removeBusy]);
   return (
-    <div className={`track-table ${selection ? "has-selection" : ""}`} role="table" aria-label={label} aria-rowcount={(totalSize ?? tracks.length) + 1}>
-      <div className="track-row table-head" role="row">
-        {selection && <span className="track-selection-heading" role="columnheader"><SelectionCheckbox checked={allPageSelected} indeterminate={selectedOnPage > 0 && !allPageSelected} label="选择当前页全部歌曲" onChange={(checked) => selection.onTogglePage(checked)} /></span>}
-        <span className="track-number-heading" role="columnheader">#</span>
-        <span className="track-artwork-heading" role="columnheader">封面</span>
-        <TrackSortHeader label="标题" accessibleLabel="歌曲名称" sortKey="title" sort={sort} onSort={onSort} />
-        <span className="track-artist-heading" role="columnheader">歌手</span>
-        <TrackSortHeader label="专辑" sortKey="album" sort={sort} onSort={onSort} />
-        <TrackSortHeader className="duration-sort-header" label="时长" sortKey="duration" sort={sort} onSort={onSort} />
-      </div>
-      {tracks.map((track, index) => (
-        <div
-          className="track-row track-data-row"
-          role="row"
-          aria-rowindex={index + 2}
-          key={`${track.ratingKey}-${index}`}
-        >
-          {selection && <span className="track-selection-cell" role="cell"><SelectionCheckbox checked={selection.selectedRatingKeys.has(track.ratingKey)} label={`选择《${track.title}》`} onChange={(checked) => selection.onToggleTrack(track.ratingKey, checked)} /></span>}
-          <span className="track-index" role="cell">
-            <button className="track-play-button" type="button" aria-label={`播放《${track.title}》`} onClick={() => onPlay(track, tracks)}>
-              <span>{startIndex + index + 1}</span><Play size={13} fill="currentColor" aria-hidden="true" />
-            </button>
-          </span>
-          <span className="track-artwork-cell" role="cell"><Artwork item={track} size="small" /></span>
-          <span className="track-title" role="cell" title={track.title}><strong>{track.title}</strong></span>
-          <TrackArtistsCell track={track} artistLookup={artistLookup} onOpenArtist={onOpenArtist} />
-          <TrackAlbumCell track={track} onOpenAlbum={onOpenAlbum} />
-          <span className="duration-cell" role="cell">{formatDuration(track.duration)}</span>
+    <>
+      <div className={`track-table ${selection ? "has-selection" : ""}`} role="table" aria-label={label} aria-rowcount={(totalSize ?? tracks.length) + 1}>
+        <div className="track-row table-head" role="row">
+          {selection && <span className="track-selection-heading" role="columnheader"><SelectionCheckbox checked={allPageSelected} indeterminate={selectedOnPage > 0 && !allPageSelected} label="选择当前页全部歌曲" onChange={(checked) => selection.onTogglePage(checked)} /></span>}
+          <span className="track-number-heading" role="columnheader">#</span>
+          <span className="track-artwork-heading" role="columnheader">封面</span>
+          <TrackSortHeader label="标题" accessibleLabel="歌曲名称" sortKey="title" sort={sort} onSort={onSort} />
+          <span className="track-artist-heading" role="columnheader">歌手</span>
+          <TrackSortHeader label="专辑" sortKey="album" sort={sort} onSort={onSort} />
+          <TrackSortHeader className="duration-sort-header" label="时长" sortKey="duration" sort={sort} onSort={onSort} />
         </div>
-      ))}
-    </div>
+        {tracks.map((track, index) => (
+          <div
+            className="track-row track-data-row"
+            role="row"
+            aria-rowindex={index + 2}
+            key={`${track.ratingKey}-${index}`}
+          >
+            {selection && <span className="track-selection-cell" role="cell"><SelectionCheckbox checked={selection.selectedRatingKeys.has(track.ratingKey)} label={`选择《${track.title}》`} onChange={(checked) => selection.onToggleTrack(track.ratingKey, checked)} /></span>}
+            <span className="track-index" role="cell">
+              <button className="track-play-button" type="button" aria-label={`播放《${track.title}》`} onClick={() => onPlay(track, tracks)}>
+                <span>{startIndex + index + 1}</span><Play size={13} fill="currentColor" aria-hidden="true" />
+              </button>
+            </span>
+            <span className="track-artwork-cell" role="cell"><Artwork item={track} size="small" /></span>
+            <span className="track-title" role="cell" title={track.title}><strong>{track.title}</strong></span>
+            <TrackArtistsCell track={track} artistLookup={artistLookup} onOpenArtist={onOpenArtist} />
+            <TrackAlbumCell track={track} onOpenAlbum={onOpenAlbum} />
+            <span className="duration-cell" role="cell">
+              <span className="duration-label">{formatDuration(track.duration)}</span>
+              {onRemoveTrack && (
+                <button
+                  className="track-remove-button"
+                  type="button"
+                  aria-label={`从歌单移除《${track.title}》`}
+                  data-tooltip="从歌单移除"
+                  title="从歌单移除"
+                  onClick={(event) => {
+                    removeAnchorRef.current = event.currentTarget;
+                    setPendingRemove(track);
+                  }}
+                >
+                  <Trash2 size={14} strokeWidth={1.9} aria-hidden="true" />
+                </button>
+              )}
+            </span>
+          </div>
+        ))}
+      </div>
+      {onRemoveTrack && pendingRemove && (
+        <Popconfirm
+          title={`从歌单移除《${pendingRemove.title}》？`}
+          description="只会从当前歌单移除，不会删除歌曲本身。"
+          confirmLabel="移除"
+          cancelLabel="取消"
+          busy={removeBusy}
+          danger
+          anchor={removeAnchorRef.current}
+          onCancel={closeRemoveConfirm}
+          onConfirm={async () => {
+            setRemoveBusy(true);
+            try {
+              await onRemoveTrack(pendingRemove);
+            } finally {
+              setRemoveBusy(false);
+              setPendingRemove(undefined);
+              removeAnchorRef.current = null;
+            }
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function Popconfirm({ title, description, confirmLabel = "确认", cancelLabel = "取消", busy = false, danger = false, anchor, onConfirm, onCancel }: {
+  title: string;
+  description?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  busy?: boolean;
+  danger?: boolean;
+  anchor: HTMLElement | null;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const popRef = useRef<HTMLDivElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const [style, setStyle] = useState<CSSProperties>({ visibility: "hidden" });
+  const [placement, setPlacement] = useState<"above" | "below">("above");
+
+  useLayoutEffect(() => {
+    if (!anchor) return;
+    const pop = popRef.current;
+    const update = () => {
+      if (!pop || !anchor) return;
+      const anchorRect = anchor.getBoundingClientRect();
+      const width = pop.offsetWidth || 232;
+      const height = pop.offsetHeight || 76;
+      const left = Math.max(8, Math.min(window.innerWidth - width - 8, anchorRect.left + anchorRect.width / 2 - width / 2));
+      const above = anchorRect.top - height - 8;
+      const top = above >= 8
+        ? above
+        : Math.min(window.innerHeight - height - 8, anchorRect.bottom + 8);
+      setPlacement(above >= 8 ? "above" : "below");
+      setStyle({ top, left, visibility: "visible" });
+    };
+    update();
+    const frame = window.requestAnimationFrame(update);
+    return () => window.cancelAnimationFrame(frame);
+  }, [anchor]);
+
+  useEffect(() => {
+    if (!anchor) return;
+    confirmRef.current?.focus();
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (popRef.current?.contains(target) || anchor.contains(target)) return;
+      onCancel();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancel();
+      }
+    };
+    const onScroll = () => onCancel();
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("scroll", onScroll, true);
+    };
+  }, [anchor, onCancel]);
+
+  return createPortal(
+    <div
+      ref={popRef}
+      className={`popconfirm ${danger ? "is-danger" : ""} ${placement === "below" ? "is-below" : ""}`.trim()}
+      role="alertdialog"
+      aria-label={title}
+      style={style}
+    >
+      <div className="popconfirm-title">{title}</div>
+      {description && <div className="popconfirm-description">{description}</div>}
+      <div className="popconfirm-actions">
+        <button className="popconfirm-cancel" type="button" disabled={busy} onClick={onCancel}>{cancelLabel}</button>
+        <button ref={confirmRef} className="popconfirm-ok" type="button" disabled={busy} onClick={onConfirm}>{busy ? "处理中…" : confirmLabel}</button>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -2891,13 +3000,13 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
   );
 }
 
-function TrackTable({ title, tracks, artists, accentHeading = false, onOpenArtist, onOpenAlbum, onPlay }: { title: string; tracks: PlexItem[]; artists: PlexItem[]; accentHeading?: boolean; onOpenArtist: (artist: PlexItem) => void; onOpenAlbum: (track: PlexItem) => void; onPlay: (track: PlexItem, context: PlexItem[]) => void }) {
+function TrackTable({ title, tracks, artists, accentHeading = false, onOpenArtist, onOpenAlbum, onPlay, onRemoveTrack }: { title: string; tracks: PlexItem[]; artists: PlexItem[]; accentHeading?: boolean; onOpenArtist: (artist: PlexItem) => void; onOpenAlbum: (track: PlexItem) => void; onPlay: (track: PlexItem, context: PlexItem[]) => void; onRemoveTrack?: (track: PlexItem) => void }) {
   const [sort, setSort] = useState<TrackSortState>();
   const displayedTracks = useMemo(() => sortTracks(tracks, sort), [sort, tracks]);
   return (
     <section className={`track-section ${accentHeading ? "has-accent-heading" : ""}`.trim()}>
       <div className="section-heading"><h1>{title}</h1></div>
-      <TrackTableGrid label={title} tracks={displayedTracks} artists={artists} sort={sort} onSort={setSort} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlay} />
+      <TrackTableGrid label={title} tracks={displayedTracks} artists={artists} sort={sort} onSort={setSort} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlay} onRemoveTrack={onRemoveTrack} />
     </section>
   );
 }
@@ -3526,98 +3635,6 @@ function CreatePlaylistDialog({ serverId, sectionKey, onClose, onCreated, onErro
             </button>
           </footer>
         </form>
-      </section>
-    </div>
-  );
-}
-
-function DeletePlaylistDialog({ serverId, playlist, onClose, onDeleted, onError }: {
-  serverId: string;
-  playlist: PlexPlaylist;
-  onClose: () => void;
-  onDeleted: () => void;
-  onError: (message: string) => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const dialogRef = useRef<HTMLElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
-  const busyRef = useRef(busy);
-
-  useEffect(() => {
-    busyRef.current = busy;
-  }, [busy]);
-
-  useEffect(() => {
-    const restoreTarget = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
-      ? document.activeElement
-      : null;
-    cancelRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busyRef.current) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.requestAnimationFrame(() => {
-        if (restoreTarget?.isConnected && !restoreTarget.closest("[inert]")) restoreTarget.focus();
-      });
-    };
-  }, [onClose]);
-
-  const confirmDelete = async () => {
-    if (busy) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      await deletePlaylist(serverId, playlist.ratingKey);
-      onDeleted();
-    } catch (reason) {
-      const message = playlistDeleteErrorMessage(reason);
-      setError(message);
-      setBusy(false);
-      onError(message);
-    }
-  };
-
-  return (
-    <div className="playlist-picker-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
-      <section ref={dialogRef} className="playlist-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="playlist-delete-title" aria-describedby="playlist-delete-description">
-        <header>
-          <div>
-            <h2 id="playlist-delete-title">删除歌单</h2>
-            <small>只会删除歌单，不会删除其中的歌曲</small>
-          </div>
-          <IconButton label="关闭删除歌单确认" disabled={busy} onClick={onClose}><X size={18} /></IconButton>
-        </header>
-        <div className="playlist-delete-content">
-          <span className="playlist-delete-icon" aria-hidden="true"><Trash2 size={20} /></span>
-          <p id="playlist-delete-description">确认删除普通歌单“{playlist.title}”？此操作无法撤销。</p>
-          {error && <p className="playlist-delete-error" role="alert">{error}</p>}
-        </div>
-        <footer>
-          <button ref={cancelRef} className="secondary-button" type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button className="danger-button" type="button" disabled={busy} aria-busy={busy || undefined} onClick={() => void confirmDelete()}>
-            {busy ? <><LoaderCircle className="spin" size={15} />正在删除…</> : <><Trash2 size={15} />删除</>}
-          </button>
-        </footer>
       </section>
     </div>
   );
@@ -4252,17 +4269,6 @@ function playlistCreateErrorMessage(reason: unknown): string {
   const message = reason instanceof Error ? reason.message : String(reason || "未知错误");
   if (/\b(?:401|403)\b|forbidden|permission|unauthori[sz]ed|无权|权限/iu.test(message)) {
     return "当前账号没有在这台 Plex 服务器创建歌单的权限。";
-  }
-  return message;
-}
-
-function playlistDeleteErrorMessage(reason: unknown): string {
-  const message = reason instanceof Error ? reason.message : String(reason || "未知错误");
-  if (/\b(?:401|403)\b|forbidden|permission|unauthori[sz]ed|无权|权限/iu.test(message)) {
-    return "当前账号没有删除这个歌单的权限。";
-  }
-  if (/\b404\b|not found|不存在/iu.test(message)) {
-    return "这个歌单已不存在，刷新歌单列表后即可同步。";
   }
   return message;
 }

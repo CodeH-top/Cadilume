@@ -337,8 +337,23 @@ pub fn stream_url(
     if server.connections.is_empty() {
         return Err("服务器没有可用连接".to_string());
     }
-    target.public_bitrate_marker =
-        public_bitrate_marker(&effective_quality(&target.quality, &server.connections[0]));
+    let effective = effective_quality(&target.quality, &server.connections[0]);
+    let connection_kind = if server.connections[0].local {
+        "local"
+    } else if server.connections[0].relay {
+        "relay"
+    } else {
+        "remote"
+    };
+    target.public_bitrate_marker = public_bitrate_marker(&effective);
+    eprintln!(
+        "[播放] 发行流票据：server={} 请求质量={} 实际质量={} 首选连接={} 连接数={}",
+        target.server_id.chars().take(8).collect::<String>(),
+        target.quality,
+        effective,
+        connection_kind,
+        server.connections.len(),
+    );
     proxy.issue(target).map_err(|error| error.to_string())
 }
 
@@ -550,6 +565,20 @@ async fn forward_to_plex(
                         || response.status() == StatusCode::RANGE_NOT_SATISFIABLE =>
                 {
                     if !is_supported_audio_content_type(response.headers()) {
+                        let content_type = response
+                            .headers()
+                            .get(CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("(无 Content-Type)")
+                            .to_string();
+                        eprintln!(
+                            "[播放] 上游返回非音频：质量={} 连接={} 端点={} HTTP={} Content-Type={}",
+                            effective_quality,
+                            connection_kind,
+                            endpoint_kind,
+                            response.status().as_u16(),
+                            content_type,
+                        );
                         attempts.push(UpstreamAttempt {
                             quality: effective_quality.clone(),
                             connection_kind,
@@ -563,10 +592,39 @@ async fn forward_to_plex(
                         });
                         continue;
                     }
+                    let content_type = response
+                        .headers()
+                        .get(CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("(无 Content-Type)")
+                        .to_string();
+                    eprintln!(
+                        "[播放] 上游可播放：质量={} 连接={} 端点={} HTTP={} Content-Type={} Range={}",
+                        effective_quality,
+                        connection_kind,
+                        endpoint_kind,
+                        response.status().as_u16(),
+                        content_type,
+                        range.as_ref().map(|value| value.to_str().unwrap_or("?")).unwrap_or("无"),
+                    );
                     plex.promote_connection(&target.server_id, &connection.uri);
                     return downstream_response(response, &method);
                 }
                 Ok(Ok(response)) => {
+                    let content_type = response
+                        .headers()
+                        .get(CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("(无 Content-Type)")
+                        .to_string();
+                    eprintln!(
+                        "[播放] 上游失败：质量={} 连接={} 端点={} HTTP={} Content-Type={}",
+                        effective_quality,
+                        connection_kind,
+                        endpoint_kind,
+                        response.status().as_u16(),
+                        content_type,
+                    );
                     attempts.push(UpstreamAttempt {
                         quality: effective_quality.clone(),
                         connection_kind,
@@ -580,6 +638,10 @@ async fn forward_to_plex(
                     });
                 }
                 Ok(Err(_)) | Err(_) => {
+                    eprintln!(
+                        "[播放] 上游连接失败：质量={} 连接={} 端点={}",
+                        effective_quality, connection_kind, endpoint_kind,
+                    );
                     attempts.push(UpstreamAttempt {
                         quality: effective_quality.clone(),
                         connection_kind,
@@ -599,6 +661,7 @@ async fn forward_to_plex(
         } else {
             format!("{} 个端点", attempts.len())
         };
+        eprintln!("[播放] 代理全部尝试失败：{attempts_label}，最后一次为 {summary}");
         error_response(
             StatusCode::BAD_GATEWAY,
             format!("Plex 音频代理失败：已尝试 {attempts_label}，最后一次为 {summary}"),

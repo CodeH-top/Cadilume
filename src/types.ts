@@ -100,6 +100,8 @@ export interface PlexItem {
   addedAt?: number;
   lastViewedAt?: number;
   viewCount?: number;
+  /** PMS playlist-item identity; only present on `/playlists/{id}/items` rows. */
+  playlistItemID?: string;
   Media?: PlexMedia[];
   imageUrl?: string;
 }

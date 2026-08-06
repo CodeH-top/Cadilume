@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { acknowledgeQuit, isDesktopRuntime } from "./api";
 import { plexMusicGateway } from "./musicGateway";
+import { playbackLog } from "./playbackLog";
 import { usableDurationSeconds } from "./playerUi";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
 
@@ -900,7 +901,10 @@ export function waitForAudioPlaybackStart(
 
     audio.addEventListener("playing", onPlaying, { once: true });
     audio.addEventListener("timeupdate", onTimeUpdate);
-    timeout = globalThis.setTimeout(() => finish(new Error("播放启动超时")), Math.max(1, timeoutMs));
+    timeout = globalThis.setTimeout(() => {
+      playbackLog("warn", `播放启动超时（${timeoutMs}ms），将进入兼容回退或报错`);
+      finish(new Error("播放启动超时"));
+    }, Math.max(1, timeoutMs));
     try {
       void Promise.resolve(audio.play()).catch((reason) => finish(reason));
     } catch (reason) {
@@ -1143,6 +1147,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const track = tracks[index];
     if (!track || !serverId) return;
     const requestId = ++loadRequestRef.current;
+    playbackLog("info", `加载请求：index=${index} 队列长度=${tracks.length} 自动播放=${autoplay} 质量=${quality} 强制新票据=${forceFreshTicket}`);
     activePlaybackSourceRef.current = undefined;
     setPlaybackLoading(autoplay);
     setBuffering(false);
@@ -1192,6 +1197,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           await seekAfterMetadata(preparedAudio, () => resumeProgressRef.current ?? progressRef.current);
           if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
           resumeProgressRef.current = null;
+          playbackLog("info", `预缓冲命中：index=${index}，准备播放`);
           if (autoplay) await waitForAudioPlaybackStart(preparedAudio);
           else setPlaying(false);
           finishCurrentLoad();
@@ -1210,6 +1216,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
       const url = await plexMusicGateway.playback.streamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
+      playbackLog("info", `流地址已取得：index=${index} 质量=${quality}（仅本机回环票据）`);
       activePlaybackSourceRef.current = { audio, requestId, source: url };
       audio.src = url;
       assignedSource = url;
@@ -1225,6 +1232,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       const diagnostic = assignedSource && audio?.error
         ? formatMediaError(audio.error)
         : formatPlaybackFailure(reason);
+      playbackLog("error", `加载异常：index=${index} ${diagnostic}`);
       if (!playbackFailureHandlerRef.current(diagnostic, assignedSource)) {
         const message = `音频无法播放（${diagnostic}）。`;
         setPlaybackLoading(false);
@@ -1347,6 +1355,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       );
       shuffleNavigationRef.current = selected.state;
       if (selected.index != null) {
+        playbackLog("info", `切歌（随机）：${currentIndexValue} -> ${selected.index} 自然结束=${naturalEnded}`);
         void loadAt(selected.index, true);
       } else {
         setPlaybackLoading(false);
@@ -1361,6 +1370,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       : getManualNextIndex(currentIndexValue, tracks.length);
     if (nextIndex != null) void loadAt(nextIndex, true);
     else {
+      playbackLog("info", `队列结束：index=${currentIndexValue} 自然结束=${naturalEnded} 循环=${mode}`);
       setPlaybackLoading(false);
       setBuffering(false);
       setPlaying(false);
@@ -1622,6 +1632,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       if (!track || !activeServerId) return false;
 
       const decision = decidePlaybackFallback(playbackFallbackRef.current, source);
+      playbackLog("warn", `播放失败：index=${indexRef.current} ${diagnostic} 决策=${decision.action === "retry" ? `回退到 ${decision.quality} kbps` : decision.action === "wait" ? "等待中" : "停止"}`);
       playbackFallbackRef.current = decision.state;
       if (decision.action === "wait") return true;
 
@@ -1663,6 +1674,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         .then(async (url) => {
           if (!isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)) return;
           if (playbackFallbackRef.current.pendingQuality !== fallbackQuality) return;
+          playbackLog("info", `兼容串流已取得：index=${indexRef.current} 回退质量=${fallbackQuality}`);
           activePlaybackSourceRef.current = { audio, requestId: retryLoadRequest, source: url };
           audio.src = url;
           fallbackAssigned = true;
@@ -1673,6 +1685,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           resumeProgressRef.current = null;
           await waitForAudioPlaybackStart(audio);
           if (!isActiveFallback()) return;
+          playbackLog("info", `兼容串流播放成功：index=${indexRef.current} 回退质量=${fallbackQuality}`);
           setPlaybackLoading(false);
           setBuffering(false);
           setError(undefined);
@@ -1749,6 +1762,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       };
       const onEnded = () => {
         if (!isCurrent()) return;
+        playbackLog("info", `自然播放结束：index=${indexRef.current}`);
         setPlaybackLoading(false);
         setBuffering(false);
         endedRef.current();
@@ -1756,16 +1770,20 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       const onError = () => {
         if (!isCurrent()) {
           pool.discardPreparedAudio(audio);
+          playbackLog("info", "收到非活动音频错误，忽略（预缓冲或旧槽位）");
           return;
         }
         const source = audio.currentSrc || audio.src;
         const activeSource = activePlaybackSourceRef.current;
-        if (
-          !activeSource
-          || activeSource.audio !== audio
-          || activeSource.requestId !== loadRequestRef.current
-          || !isCurrentPlaybackErrorSource(activeSource.source, source)
-        ) return;
+        if (!activeSource || activeSource.audio !== audio || activeSource.requestId !== loadRequestRef.current) {
+          playbackLog("warn", "忽略过期 source 的媒体错误（加载请求已替换）");
+          return;
+        }
+        if (!isCurrentPlaybackErrorSource(activeSource.source, source)) {
+          playbackLog("warn", "忽略不匹配当前 source 的媒体错误");
+          return;
+        }
+        playbackLog("error", `当前 source 媒体错误：index=${indexRef.current} ${formatMediaError(audio.error)}`);
         handlePlaybackFailure(audio, formatMediaError(audio.error), source);
       };
 

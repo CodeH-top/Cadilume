@@ -1,5 +1,38 @@
 # LEARNINGS
 
+## 2026-08-06 — “歌单可删除”指删除歌单内的歌曲；用 Popconfirm 二次确认
+
+- 用户澄清：普通歌单“可以删除”指的是从歌单中移除歌曲，不是删除整个歌单；右侧栏不应出现
+  删除歌单入口。误解产物（`delete_playlist` 命令、右侧删除按钮、删除确认对话框）已整套移除。
+- Plex 删除歌单项用 `DELETE /playlists/{playlistId}/items/{playlistItemID}`，
+  `playlistItemID` 只出现在 `/playlists/{id}/items` 行上；批量删除必须串行并返回
+  成功/失败列表，与批量添加同一 Rust/Tauri 边界。
+- 歌单详情歌曲行的删除按钮复用播放按钮的交互语义：默认时长列显示时长，整行 hover 时在
+  时长列位置替换为删除图标；点击后弹出类似 Ant Design Popconfirm 的 portal 气泡
+  （触发按钮上方优先、空间不足转下方），带确认/取消、busy 态、Escape/外部点击/滚动关闭。
+
+## 2026-08-06 — 播放链路调试日志通道
+
+- Cadilume 之前没有播放日志：Rust 流代理只有启动日志，WKWebView console 不会进入 Tauri
+  开发终端。排查切歌 `MediaError code 4` 时先建立两条日志：
+  - Rust 代理在发行票据、每次上游尝试、成功转发、全部失败时 `eprintln!`（脱敏：只输出
+    server 前 8 位、质量、连接类型、端点类型、HTTP 状态、Content-Type，不输出路径/token/
+    票据/曲目标识）。
+  - 前端 `playbackLog()` 通过 `emit("playback://log", ...)` 上报，Rust
+    `app.listen("playback://log", ...)` 转发到终端；Tauri 2 中 `AppHandle::listen` 需要
+    `use tauri::Listener`，且 `app` 是 `&mut App` 时闭包事件类型需显式标注。
+- 覆盖的关键事件：加载请求、预缓冲命中、流地址取得、加载异常、播放失败决策、兼容串流
+  成功/失败、当前/过期 source 媒体错误、播放启动超时、自然结束、切歌、队列结束。
+
+## 2026-08-06 — 歌词列表首句顶格与全局滚动条统一
+
+- 歌词容器之前用 `padding: 40%`（弹出层）和 `34%`（展开播放器）制造“当前行居中”，副作用是
+  第一句不在顶部、打开时首行不可见，用户会误以为歌名/首句被过滤。改为固定小顶部 padding
+  后首句顶格，滚动定位仍由 `getPlexLyricsScrollTop` 控制。
+- 用户要求全局滚动条统一：用 `* { scrollbar-width: thin; scrollbar-color: ... }` 加
+  `*::-webkit-scrollbar` 一套 muted 灰色规则，删除歌词/队列/通知/路由页等各自 accent 色
+  规则；仅功能性隐藏（如字母索引 `scrollbar-width: none`）保留。
+
 ## 2026-08-06 — MediaError code 4 的代理根因与 Plex 音乐转码参数
 
 - WKWebView 的 `MediaError code 4` 不一定是原文件不支持：PMS 在转码/直放失败时可能返回

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
+import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -594,7 +594,7 @@ describe("Plex audio playlists", () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("creates seeded demo playlists, clears compatibility seeds, and deletes writable playlists", async () => {
+  it("creates seeded demo playlists, clears compatibility seeds, and removes their tracks", async () => {
     Object.defineProperty(globalThis, "window", {
       configurable: true,
       value: {},
@@ -615,20 +615,23 @@ describe("Plex audio playlists", () => {
     expect(empty.leafCount).toBe(0);
     await expect(getPlaylistItems("demo-server", empty.ratingKey)).resolves.toEqual([]);
 
-    await deletePlaylist("demo-server", seeded.ratingKey);
-    expect((await getPlaylists("demo-server")).some((playlist) => playlist.ratingKey === seeded.ratingKey)).toBe(false);
-    await expect(getPlaylistItems("demo-server", seeded.ratingKey)).rejects.toThrow("演示资料库中找不到这个歌单");
+    const removed = await removeTracksFromPlaylist("demo-server", seeded.ratingKey, [seedTrack!.ratingKey]);
+    expect(removed).toEqual({ requested: 1, removed: 1, failedItemIds: [] });
+    await expect(getPlaylistItems("demo-server", seeded.ratingKey)).resolves.toEqual([]);
+    expect((await getPlaylists("demo-server")).some((playlist) => playlist.ratingKey === seeded.ratingKey)).toBe(true);
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("deletes a regular playlist through the scoped Rust command", async () => {
-    invokeMock.mockResolvedValueOnce(undefined);
+  it("removes playlist items through the scoped Rust command", async () => {
+    invokeMock.mockResolvedValueOnce({ requested: 2, removed: 1, failedItemIds: ["item-2"] });
 
-    await deletePlaylist("server-a", "playlist-99");
+    const result = await removeTracksFromPlaylist("server-a", "playlist-99", ["item-1", "item-2"]);
 
-    expect(invokeMock).toHaveBeenCalledWith("delete_playlist", {
+    expect(result).toEqual({ requested: 2, removed: 1, failedItemIds: ["item-2"] });
+    expect(invokeMock).toHaveBeenCalledWith("remove_playlist_items", {
       serverId: "server-a",
       playlistId: "playlist-99",
+      playlistItemIds: ["item-1", "item-2"],
     });
   });
 
@@ -637,8 +640,10 @@ describe("Plex audio playlists", () => {
       await expect(getPlaylistItems("server-a", playlistId)).rejects.toThrow("无效的 Plex 歌单标识");
     }
     await expect(getPlaylistItems("../server", "playlist-42")).rejects.toThrow("无效的 Plex 歌单标识");
-    await expect(deletePlaylist("server-a", "../playlist")).rejects.toThrow("无效的 Plex 歌单标识");
-    await expect(deletePlaylist("../server", "playlist-42")).rejects.toThrow("无效的 Plex 歌单标识");
+    await expect(removeTracksFromPlaylist("server-a", "../playlist", ["item-1"])).rejects.toThrow("无效的 Plex 歌单标识");
+    await expect(removeTracksFromPlaylist("../server", "playlist-42", ["item-1"])).rejects.toThrow("无效的 Plex 歌单标识");
+    await expect(removeTracksFromPlaylist("server-a", "playlist-42", [])).rejects.toThrow("请至少选择一首歌曲");
+    await expect(removeTracksFromPlaylist("server-a", "playlist-42", ["../item"])).rejects.toThrow("请至少选择一首歌曲");
     expect(invokeMock).not.toHaveBeenCalled();
   });
 

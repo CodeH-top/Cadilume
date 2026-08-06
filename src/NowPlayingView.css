@@ -588,20 +588,9 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 34% 12px;
+  padding: 20px 12px 32px;
   overscroll-behavior: contain;
-  scrollbar-color: color-mix(in srgb, var(--now-playing-faint) 45%, transparent) transparent;
-  scrollbar-width: thin;
   scroll-behavior: smooth;
-}
-
-.now-playing-lyrics-list::-webkit-scrollbar {
-  width: 6px;
-}
-
-.now-playing-lyrics-list::-webkit-scrollbar-thumb {
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--now-playing-faint) 45%, transparent);
 }
 
 .now-playing-lyric-line {

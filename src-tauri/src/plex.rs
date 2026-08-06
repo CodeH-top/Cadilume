@@ -50,6 +50,14 @@ pub struct PlaylistBatchAddResult {
     failed_rating_keys: Vec<String>,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistBatchRemoveResult {
+    requested: usize,
+    removed: usize,
+    failed_item_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedConfig {
@@ -1001,12 +1009,7 @@ pub async fn create_playlist(
         {
             let rollback_path = playlist_path(&playlist_id).map_err(display_error)?;
             let _ = state
-                .server_request_response(
-                    &server_id,
-                    Method::DELETE,
-                    &rollback_path,
-                    &empty_query,
-                )
+                .server_request_response(&server_id, Method::DELETE, &rollback_path, &empty_query)
                 .await;
             return Err(format!("创建空歌单失败：{}", display_error(error)));
         }
@@ -1029,18 +1032,40 @@ pub async fn create_playlist(
 }
 
 #[tauri::command]
-pub async fn delete_playlist(
+pub async fn remove_playlist_items(
     server_id: String,
     playlist_id: String,
+    playlist_item_ids: Vec<String>,
     state: State<'_, PlexState>,
-) -> Result<(), String> {
-    let path = playlist_path(&playlist_id).map_err(display_error)?;
-    let empty_query = HashMap::new();
-    state
-        .server_request_response(&server_id, Method::DELETE, &path, &empty_query)
-        .await
-        .map_err(display_error)?;
-    Ok(())
+) -> Result<PlaylistBatchRemoveResult, String> {
+    if !valid_plex_identifier(&server_id) {
+        return Err("无效的 Plex 服务器标识".to_string());
+    }
+    let playlist_item_ids =
+        normalize_playlist_batch_item_ids(playlist_item_ids).map_err(display_error)?;
+    let requested = playlist_item_ids.len();
+    let mut removed = 0;
+    let mut failed_item_ids = Vec::new();
+
+    // PMS accepts one playlist item per DELETE on the compatible endpoint.
+    // Keep it serial so the returned counts describe the real write order.
+    for playlist_item_id in playlist_item_ids {
+        let path = playlist_item_path(&playlist_id, &playlist_item_id).map_err(display_error)?;
+        let empty_query = HashMap::new();
+        match state
+            .server_request_response(&server_id, Method::DELETE, &path, &empty_query)
+            .await
+        {
+            Ok(_) => removed += 1,
+            Err(_) => failed_item_ids.push(playlist_item_id),
+        }
+    }
+
+    Ok(PlaylistBatchRemoveResult {
+        requested,
+        removed,
+        failed_item_ids,
+    })
 }
 
 #[tauri::command]
@@ -2262,10 +2287,7 @@ fn create_audio_playlist_query(
         ("smart".to_string(), "0".to_string()),
     ]);
     if let Some(rating_key) = seed_rating_key {
-        query.insert(
-            "uri".to_string(),
-            playlist_item_uri(server_id, rating_key)?,
-        );
+        query.insert("uri".to_string(), playlist_item_uri(server_id, rating_key)?);
         query.insert("includeExternalMedia".to_string(), "1".to_string());
     }
     Ok(query)
@@ -2356,6 +2378,17 @@ fn playlist_items_path(playlist_id: &str) -> Result<String> {
     Ok(format!("{}/items", playlist_path(playlist_id)?))
 }
 
+fn playlist_item_path(playlist_id: &str, playlist_item_id: &str) -> Result<String> {
+    if !valid_plex_identifier(playlist_item_id) {
+        return Err(anyhow!("无效的 Plex 歌单项标识"));
+    }
+    Ok(format!(
+        "{}/{}",
+        playlist_items_path(playlist_id)?,
+        playlist_item_id
+    ))
+}
+
 fn playlist_item_uri(server_id: &str, rating_key: &str) -> Result<String> {
     if !valid_plex_identifier(server_id) || !valid_plex_identifier(rating_key) {
         return Err(anyhow!("无效的 Plex 歌单项目标识"));
@@ -2383,6 +2416,30 @@ fn normalize_playlist_batch_rating_keys(rating_keys: Vec<String>) -> Result<Vec<
         }
         if seen.insert(rating_key.clone()) {
             normalized.push(rating_key);
+        }
+    }
+    if normalized.is_empty() {
+        return Err(anyhow!("请至少选择一首歌曲"));
+    }
+    Ok(normalized)
+}
+
+fn normalize_playlist_batch_item_ids(playlist_item_ids: Vec<String>) -> Result<Vec<String>> {
+    if playlist_item_ids.is_empty() {
+        return Err(anyhow!("请至少选择一首歌曲"));
+    }
+    if playlist_item_ids.len() > MAX_PLAYLIST_BATCH_TRACKS {
+        return Err(anyhow!("一次最多可移除 {MAX_PLAYLIST_BATCH_TRACKS} 首歌曲"));
+    }
+
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(playlist_item_ids.len());
+    for playlist_item_id in playlist_item_ids {
+        if !valid_plex_identifier(&playlist_item_id) {
+            return Err(anyhow!("无效的 Plex 歌单项标识"));
+        }
+        if seen.insert(playlist_item_id.clone()) {
+            normalized.push(playlist_item_id);
         }
     }
     if normalized.is_empty() {
@@ -2547,12 +2604,8 @@ mod tests {
 
     #[test]
     fn create_playlist_query_supports_a_seed_track_and_validates_input() {
-        let query = create_audio_playlist_query(
-            "server_A-1",
-            "  通勤音乐  ",
-            Some("track-42"),
-        )
-        .unwrap();
+        let query =
+            create_audio_playlist_query("server_A-1", "  通勤音乐  ", Some("track-42")).unwrap();
 
         assert_eq!(query.len(), 5);
         assert_eq!(query.get("type").map(String::as_str), Some("audio"));
@@ -2574,7 +2627,9 @@ mod tests {
         for invalid in ["", "   ", "含\n换行"] {
             assert!(create_audio_playlist_query("server_A-1", invalid, None).is_err());
         }
-        assert!(create_audio_playlist_query("server_A-1", "歌".repeat(256).as_str(), None).is_err());
+        assert!(
+            create_audio_playlist_query("server_A-1", "歌".repeat(256).as_str(), None).is_err()
+        );
         assert!(create_audio_playlist_query("server_A-1", "歌".repeat(255).as_str(), None).is_ok());
         assert!(create_audio_playlist_query("../server", "通勤音乐", None).is_err());
         assert!(create_audio_playlist_query("server_A-1", "通勤音乐", Some("../track")).is_err());
@@ -2618,6 +2673,13 @@ mod tests {
             playlist_items_path("playlist_A-42").unwrap(),
             "/playlists/playlist_A-42/items"
         );
+        assert_eq!(
+            playlist_item_path("playlist_A-42", "item-7").unwrap(),
+            "/playlists/playlist_A-42/items/item-7"
+        );
+        for invalid in ["", "../7", "7/items", "7?x=1", "7#items", "7 items"] {
+            assert!(playlist_item_path("playlist_A-42", invalid).is_err());
+        }
         for invalid in ["", "../42", "42/items", "42?x=1", "42#items", "42 items"] {
             assert!(playlist_items_path(invalid).is_err());
         }
@@ -2656,6 +2718,18 @@ mod tests {
             vec!["track-1", "track-2"]
         );
         assert!(normalize_playlist_batch_rating_keys(Vec::new()).is_err());
+        assert_eq!(
+            normalize_playlist_batch_item_ids(vec![
+                "item-1".to_string(),
+                "item-2".to_string(),
+                "item-1".to_string(),
+            ])
+            .unwrap(),
+            vec!["item-1", "item-2"]
+        );
+        assert!(normalize_playlist_batch_item_ids(Vec::new()).is_err());
+        assert!(normalize_playlist_batch_item_ids(vec!["../item".to_string()]).is_err());
+        assert!(normalize_playlist_batch_item_ids(vec!["a".repeat(257)]).is_err());
         assert!(normalize_playlist_batch_rating_keys(vec!["../track".to_string()]).is_err());
         assert!(normalize_playlist_batch_rating_keys(vec!["track".repeat(100)]).is_err());
     }
