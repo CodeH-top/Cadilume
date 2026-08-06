@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
+import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -35,6 +35,8 @@ describe("music metadata helpers", () => {
   it("formats Plex millisecond durations", () => {
     expect(formatDuration(185_000)).toBe("3:05");
     expect(formatDuration()).toBe("0:00");
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe("0:00");
+    expect(formatDuration(Number.NaN)).toBe("0:00");
   });
 
   it("uses Plex parent hierarchy for labels", () => {
@@ -524,6 +526,38 @@ describe("Plex audio playlists", () => {
       serverId: "server-a",
       title: "通勤音乐",
       summary: "城市移动时听\n保持清醒",
+      seedRatingKey: undefined,
+      clearItems: false,
+    });
+  });
+
+  it("passes a compatibility seed and empty-playlist cleanup request to the Rust command", async () => {
+    invokeMock.mockResolvedValueOnce({
+      MediaContainer: {
+        Metadata: [{
+          ratingKey: "playlist-100",
+          key: "/playlists/playlist-100/items",
+          type: "playlist",
+          title: "空白歌单",
+          playlistType: "audio",
+          smart: false,
+          readOnly: false,
+          leafCount: 0,
+        }],
+      },
+    });
+
+    await createPlaylist("server-a", "空白歌单", "", {
+      seedRatingKey: "track-1",
+      clearItemsAfterCreate: true,
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("create_playlist", {
+      serverId: "server-a",
+      title: "空白歌单",
+      summary: "",
+      seedRatingKey: "track-1",
+      clearItems: true,
     });
   });
 
@@ -534,6 +568,8 @@ describe("Plex audio playlists", () => {
     await expect(createPlaylist("server-a", "有效名称", "\u0000")).rejects.toThrow("歌单描述最多为 1000 个有效字符");
     await expect(createPlaylist("server-a", "有效名称", "描述".repeat(501))).rejects.toThrow("歌单描述最多为 1000 个有效字符");
     await expect(createPlaylist("../server", "有效名称")).rejects.toThrow("无效的 Plex 服务器标识");
+    await expect(createPlaylist("server-a", "有效名称", "", { seedRatingKey: "../track" })).rejects.toThrow("无效的 Plex 歌曲标识");
+    await expect(createPlaylist("server-a", "有效名称", "", { clearItemsAfterCreate: true })).rejects.toThrow("创建空歌单缺少兼容用的歌曲");
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
@@ -558,11 +594,51 @@ describe("Plex audio playlists", () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
+  it("creates seeded demo playlists, clears compatibility seeds, and deletes writable playlists", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {},
+    });
+    const seedTrack = (await getTracksPage("demo-server", "demo-section", 0, 1)).items[0];
+    expect(seedTrack).toBeDefined();
+
+    const seeded = await createPlaylist("demo-server", "含一首歌曲", "", { seedRatingKey: seedTrack!.ratingKey });
+    expect(seeded.leafCount).toBe(1);
+    await expect(getPlaylistItems("demo-server", seeded.ratingKey)).resolves.toMatchObject([
+      { ratingKey: seedTrack!.ratingKey },
+    ]);
+
+    const empty = await createPlaylist("demo-server", "兼容空歌单", "", {
+      seedRatingKey: seedTrack!.ratingKey,
+      clearItemsAfterCreate: true,
+    });
+    expect(empty.leafCount).toBe(0);
+    await expect(getPlaylistItems("demo-server", empty.ratingKey)).resolves.toEqual([]);
+
+    await deletePlaylist("demo-server", seeded.ratingKey);
+    expect((await getPlaylists("demo-server")).some((playlist) => playlist.ratingKey === seeded.ratingKey)).toBe(false);
+    await expect(getPlaylistItems("demo-server", seeded.ratingKey)).rejects.toThrow("演示资料库中找不到这个歌单");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("deletes a regular playlist through the scoped Rust command", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await deletePlaylist("server-a", "playlist-99");
+
+    expect(invokeMock).toHaveBeenCalledWith("delete_playlist", {
+      serverId: "server-a",
+      playlistId: "playlist-99",
+    });
+  });
+
   it("rejects malformed identifiers before invoking Tauri", async () => {
     for (const playlistId of ["", "../42", "42/items", "42?x=1", "42#items", "42 items", "a".repeat(257)]) {
       await expect(getPlaylistItems("server-a", playlistId)).rejects.toThrow("无效的 Plex 歌单标识");
     }
     await expect(getPlaylistItems("../server", "playlist-42")).rejects.toThrow("无效的 Plex 歌单标识");
+    await expect(deletePlaylist("server-a", "../playlist")).rejects.toThrow("无效的 Plex 歌单标识");
+    await expect(deletePlaylist("../server", "playlist-42")).rejects.toThrow("无效的 Plex 歌单标识");
     expect(invokeMock).not.toHaveBeenCalled();
   });
 

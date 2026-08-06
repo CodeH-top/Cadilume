@@ -38,7 +38,10 @@ const MAX_AUDIO_TICKETS: usize = 128;
 const MAX_ARTWORK_TICKETS: usize = 512;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(15);
-const TRANSCODE_PROFILE: &str = "add-transcode-target(replace=true&type=musicProfile&context=streaming&protocol=http&container=mp3&audioCodec=mp3)";
+// Matches the music profile Plex Web itself advertises for an HTTP single
+// MP3 stream. `replace=true` is only used for video `add-limitation` entries
+// and is not part of the official music transcode target syntax.
+const TRANSCODE_PROFILE: &str = "add-transcode-target(type=musicProfile&context=streaming&protocol=http&container=mp3&audioCodec=mp3)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StreamClientTimeoutPolicy {
@@ -453,6 +456,43 @@ async fn artwork_request(
     artwork_response(artwork.mime, artwork.bytes, &method)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UpstreamAttempt {
+    quality: String,
+    connection_kind: &'static str,
+    endpoint_kind: &'static str,
+    status: Option<u16>,
+    content_type: Option<String>,
+}
+
+impl UpstreamAttempt {
+    fn summary(&self) -> String {
+        let connection_label = match self.connection_kind {
+            "local" => "本地直连",
+            "relay" => "Plex Relay",
+            _ => "远程直连",
+        };
+        let endpoint_label = if self.endpoint_kind == "direct" {
+            "原始直放"
+        } else {
+            "PMS 转码"
+        };
+        let status_label = self
+            .status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "连接失败".to_string());
+        let content_label = self
+            .content_type
+            .as_deref()
+            .map(|value| format!("（{value}）"))
+            .unwrap_or_default();
+        format!(
+            "{connection_label}/{}/{} HTTP {status_label}{content_label}",
+            self.quality, endpoint_label
+        )
+    }
+}
+
 async fn forward_to_plex(
     runtime: &ProxyRuntime,
     target: &StreamTarget,
@@ -469,11 +509,24 @@ async fn forward_to_plex(
         Err(_) => return error_response(StatusCode::NOT_FOUND, "Plex 服务器连接已失效"),
     };
 
-    let mut last_status = None;
+    let mut attempts: Vec<UpstreamAttempt> = Vec::new();
     for connection in &server.connections {
         let endpoints = match build_upstream_urls(target, connection, plex.client_identifier()) {
             Ok(endpoints) => endpoints,
             Err(_) => continue,
+        };
+        let connection_kind = if connection.local {
+            "local"
+        } else if connection.relay {
+            "relay"
+        } else {
+            "remote"
+        };
+        let effective_quality = effective_quality(&target.quality, connection);
+        let endpoint_kind = if effective_quality == "original" {
+            "direct"
+        } else {
+            "transcode"
         };
         for endpoint in endpoints {
             let mut request = plex
@@ -496,22 +549,78 @@ async fn forward_to_plex(
                     if response.status().is_success()
                         || response.status() == StatusCode::RANGE_NOT_SATISFIABLE =>
                 {
+                    if !is_supported_audio_content_type(response.headers()) {
+                        attempts.push(UpstreamAttempt {
+                            quality: effective_quality.clone(),
+                            connection_kind,
+                            endpoint_kind,
+                            status: Some(response.status().as_u16()),
+                            content_type: response
+                                .headers()
+                                .get(CONTENT_TYPE)
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_owned),
+                        });
+                        continue;
+                    }
                     plex.promote_connection(&target.server_id, &connection.uri);
                     return downstream_response(response, &method);
                 }
-                Ok(Ok(response)) => last_status = Some(response.status()),
-                Ok(Err(_)) | Err(_) => {}
+                Ok(Ok(response)) => {
+                    attempts.push(UpstreamAttempt {
+                        quality: effective_quality.clone(),
+                        connection_kind,
+                        endpoint_kind,
+                        status: Some(response.status().as_u16()),
+                        content_type: response
+                            .headers()
+                            .get(CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned),
+                    });
+                }
+                Ok(Err(_)) | Err(_) => {
+                    attempts.push(UpstreamAttempt {
+                        quality: effective_quality.clone(),
+                        connection_kind,
+                        endpoint_kind,
+                        status: None,
+                        content_type: None,
+                    });
+                }
             }
         }
     }
 
-    match last_status {
-        Some(status) => error_response(
+    if let Some(last) = attempts.last() {
+        let summary = last.summary();
+        let attempts_label = if attempts.len() == 1 {
+            "1 个端点".to_string()
+        } else {
+            format!("{} 个端点", attempts.len())
+        };
+        error_response(
             StatusCode::BAD_GATEWAY,
-            format!("Plex 音频接口返回 HTTP {status}"),
-        ),
-        None => error_response(StatusCode::BAD_GATEWAY, "无法连接 Plex 音频服务器"),
+            format!("Plex 音频代理失败：已尝试 {attempts_label}，最后一次为 {summary}"),
+        )
+    } else {
+        error_response(StatusCode::BAD_GATEWAY, "无法连接 Plex 音频服务器")
     }
+}
+
+fn is_supported_audio_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .is_some_and(|mime| mime.starts_with("audio/"))
 }
 
 fn downstream_response(upstream: reqwest::Response, method: &Method) -> Response {
@@ -650,6 +759,9 @@ fn build_upstream_urls(
         .clamp(64, 320)
         .to_string();
     [
+        // Plex Web's own music transcoder uses `/music/:/transcode/universal/start`
+        // for `protocol=http` (no extension is appended for http). Keep it first
+        // and retain the explicit `.mp3` form as a compatibility fallback.
         "/music/:/transcode/universal/start",
         "/music/:/transcode/universal/start.mp3",
     ]
@@ -666,9 +778,13 @@ fn build_upstream_urls(
             .append_pair("mediaIndex", "0")
             .append_pair("partIndex", "0")
             .append_pair("protocol", "http")
+            .append_pair("fastSeek", "1")
             .append_pair("directPlay", "0")
             .append_pair("directStream", "0")
             .append_pair("directStreamAudio", "1")
+            .append_pair("container", "mp3")
+            .append_pair("audioCodec", "mp3")
+            .append_pair("audioChannels", "2")
             .append_pair("location", if connection.local { "lan" } else { "wan" })
             .append_pair("musicBitrate", &bitrate)
             .append_pair("maxAudioBitrate", &bitrate)
@@ -1130,6 +1246,10 @@ mod tests {
         let query = urls[0].query().unwrap();
         assert!(query.contains("musicBitrate=320"));
         assert!(query.contains("directStreamAudio=1"));
+        assert!(query.contains("fastSeek=1"));
+        assert!(query.contains("container=mp3"));
+        assert!(query.contains("audioCodec=mp3"));
+        assert!(query.contains("audioChannels=2"));
         assert!(query.contains("X-Plex-Chunked=1"));
         assert!(!query.contains("X-Plex-Token"));
         assert_eq!(
@@ -1139,6 +1259,70 @@ mod tests {
                 .map(|(_, value)| value.into_owned())
                 .as_deref(),
             Some(TRANSCODE_PROFILE)
+        );
+        assert!(!TRANSCODE_PROFILE.contains("replace=true"));
+    }
+
+    #[test]
+    fn only_audio_content_types_are_forwarded_to_the_webview() {
+        let mut headers = HeaderMap::new();
+        assert!(!is_supported_audio_content_type(&headers));
+
+        for mime in [
+            "audio/mpeg",
+            "audio/mp4",
+            "audio/flac",
+            "audio/ogg; codecs=opus",
+            "AUDIO/MPEG",
+        ] {
+            headers.insert(CONTENT_TYPE, HeaderValue::from_str(mime).unwrap());
+            assert!(
+                is_supported_audio_content_type(&headers),
+                "expected {mime} to be accepted"
+            );
+        }
+
+        for mime in [
+            "text/html; charset=utf-8",
+            "application/xml",
+            "application/json",
+            "application/octet-stream",
+            "image/png",
+        ] {
+            headers.insert(CONTENT_TYPE, HeaderValue::from_str(mime).unwrap());
+            assert!(
+                !is_supported_audio_content_type(&headers),
+                "expected {mime} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_attempt_summaries_never_expose_server_identifiers() {
+        let attempt = UpstreamAttempt {
+            quality: "320".to_string(),
+            connection_kind: "remote",
+            endpoint_kind: "transcode",
+            status: Some(200),
+            content_type: Some("text/html".to_string()),
+        };
+        let summary = attempt.summary();
+        assert!(summary.contains("远程直连/320/PMS 转码 HTTP 200（text/html）"));
+        assert!(!summary.contains("http"));
+        assert!(!summary.contains("token"));
+        assert!(!summary.contains("library"));
+        assert!(!summary.contains("127.0.0.1"));
+
+        let transport = UpstreamAttempt {
+            quality: "original".to_string(),
+            connection_kind: "local",
+            endpoint_kind: "direct",
+            status: None,
+            content_type: None,
+        };
+        assert_eq!(
+            transport.summary(),
+            "本地直连/original/原始直放 HTTP 连接失败"
         );
     }
 

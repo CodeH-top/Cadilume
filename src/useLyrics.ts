@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { plexMusicGateway } from "./musicGateway";
 import { findActiveLyricIndex, normalizeMusicLyrics, type LyricsDocument } from "./lyrics";
 import type { PlexItem } from "./types";
@@ -14,6 +14,12 @@ export function useLyrics(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [resolvedSourceKey, setResolvedSourceKey] = useState<string>();
+  // The media duration stabilizes after metadata loads and can be Infinity for
+  // non-seekable streams. It is only a fallback for the final line boundary;
+  // reading the latest value through a ref avoids re-fetching and resetting the
+  // document (and its active line) every time the progress duration changes.
+  const durationSecondsRef = useRef(durationSeconds);
+  durationSecondsRef.current = durationSeconds;
 
   useEffect(() => {
     let cancelled = false;
@@ -25,11 +31,13 @@ export function useLyrics(
       return () => { cancelled = true; };
     }
 
-    setLoading(true);
+      setLoading(true);
     void plexMusicGateway.lyrics.getLyrics(serverId, track)
       .then((payload) => {
         if (cancelled) return;
-        setDocument(payload ? normalizeMusicLyrics(payload, track.duration || durationSeconds * 1000) : undefined);
+        setDocument(payload
+          ? normalizeMusicLyrics(payload, track.duration || durationSecondsRef.current * 1000)
+          : undefined);
       })
       .catch((reason) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
@@ -39,7 +47,7 @@ export function useLyrics(
       });
 
     return () => { cancelled = true; };
-  }, [durationSeconds, serverId, sourceKey, track?.duration, track?.ratingKey]);
+  }, [serverId, sourceKey, track?.duration, track?.ratingKey]);
 
   const isCurrentSource = resolvedSourceKey === sourceKey;
   const currentDocument = isCurrentSource ? document : undefined;

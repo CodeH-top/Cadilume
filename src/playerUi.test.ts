@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { playbackControlLabel, rangeFillPercent } from "./playerUi";
+import { playbackControlLabel, rangeFillPercent, usableDurationSeconds } from "./playerUi";
 
 describe("rangeFillPercent", () => {
   it("maps the beginning, midpoint, and end of a range", () => {
@@ -18,6 +18,20 @@ describe("rangeFillPercent", () => {
     expect(rangeFillPercent(20, Number.POSITIVE_INFINITY)).toBe(0);
     expect(rangeFillPercent(20, 0)).toBe(0);
     expect(rangeFillPercent(20, -1)).toBe(0);
+  });
+});
+
+describe("usableDurationSeconds", () => {
+  it("prefers a finite media duration over the track fallback", () => {
+    expect(usableDurationSeconds(184.2, 180)).toBe(184.2);
+    expect(usableDurationSeconds(0, 180)).toBe(180);
+    expect(usableDurationSeconds(Number.NaN, 180)).toBe(180);
+  });
+
+  it("replaces WebKit Infinity streams with the track metadata duration", () => {
+    expect(usableDurationSeconds(Number.POSITIVE_INFINITY, 180)).toBe(180);
+    expect(usableDurationSeconds(Number.POSITIVE_INFINITY, 0)).toBe(0);
+    expect(usableDurationSeconds(undefined, undefined)).toBe(0);
   });
 });
 

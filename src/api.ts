@@ -9,6 +9,8 @@ let activeArtworkRequests = 0;
 let demoArtistTrackFailureKey: string | undefined;
 let demoPlaylistSequence = 0;
 const demoCreatedPlaylists: PlexPlaylist[] = [];
+const demoCreatedPlaylistItems = new Map<string, PlexItem[]>();
+const demoDeletedPlaylistIds = new Set<string>();
 const MAX_ARTWORK_REQUESTS = 6;
 const MAX_PLAYLIST_TITLE_LENGTH = 255;
 const MAX_PLAYLIST_SUMMARY_LENGTH = 1000;
@@ -196,6 +198,19 @@ function normalizePlaylistSummary(summary: string): string {
   return normalized;
 }
 
+function normalizePlaylistRatingKeys(ratingKeys: readonly string[]): string[] {
+  const uniqueRatingKeys: string[] = [];
+  const seen = new Set<string>();
+  for (const ratingKey of ratingKeys) {
+    if (!isCleanPlexIdentifier(ratingKey)) throw new Error("无效的 Plex 歌曲标识");
+    if (!seen.has(ratingKey)) {
+      seen.add(ratingKey);
+      uniqueRatingKeys.push(ratingKey);
+    }
+  }
+  return uniqueRatingKeys;
+}
+
 export function normalizeDeviceName(deviceName: string): string {
   const trimmed = deviceName.trim();
   const normalized = trimmed.replace(/\s+/gu, " ");
@@ -359,7 +374,10 @@ export async function getRecentAlbums(serverId: string, sectionKey: string): Pro
 
 /** Return all readable audio playlists visible to the selected server token. */
 export async function getPlaylists(serverId: string): Promise<PlexPlaylist[]> {
-  if (!isDesktopRuntime()) return [...demoCreatedPlaylists, ...demoPlaylists];
+  if (!isDesktopRuntime()) {
+    return [...demoCreatedPlaylists, ...demoPlaylists]
+      .filter((playlist) => !demoDeletedPlaylistIds.has(playlist.ratingKey));
+  }
   const response = await invoke<unknown>("get_playlists", { serverId });
   return playlistRecords(response)
     .map(normalizePlaylist)
@@ -369,13 +387,31 @@ export async function getPlaylists(serverId: string): Promise<PlexPlaylist[]> {
     ));
 }
 
-/** Create an empty regular audio playlist through the selected server's scoped PMS token. */
-export async function createPlaylist(serverId: string, title: string, summary = ""): Promise<PlexPlaylist> {
+export interface PlaylistCreationOptions {
+  seedRatingKey?: string;
+  clearItemsAfterCreate?: boolean;
+}
+
+/** Create a regular audio playlist through the selected server's scoped PMS token. */
+export async function createPlaylist(
+  serverId: string,
+  title: string,
+  summary = "",
+  options: PlaylistCreationOptions = {},
+): Promise<PlexPlaylist> {
   if (!isCleanPlexIdentifier(serverId)) throw new Error("无效的 Plex 服务器标识");
   const normalizedTitle = normalizePlaylistTitle(title);
   const normalizedSummary = normalizePlaylistSummary(summary);
+  const seedRatingKey = options.seedRatingKey?.trim() || undefined;
+  if (seedRatingKey && !isCleanPlexIdentifier(seedRatingKey)) throw new Error("无效的 Plex 歌曲标识");
+  const clearItems = Boolean(options.clearItemsAfterCreate);
+  if (clearItems && !seedRatingKey) throw new Error("创建空歌单缺少兼容用的歌曲");
   if (!isDesktopRuntime()) {
     const ratingKey = `playlist-created-${++demoPlaylistSequence}`;
+    const seedTrack = seedRatingKey
+      ? demoLibraryTracks().find((track) => track.ratingKey === seedRatingKey)
+      : undefined;
+    const initialItems = clearItems || !seedTrack ? [] : [seedTrack];
     const playlist: PlexPlaylist = {
       ratingKey,
       key: `/playlists/${ratingKey}/items`,
@@ -385,19 +421,46 @@ export async function createPlaylist(serverId: string, title: string, summary = 
       playlistType: "audio",
       smart: false,
       readOnly: false,
-      leafCount: 0,
-      duration: 0,
+      leafCount: initialItems.length,
+      duration: initialItems.reduce((total, track) => total + (track.duration ?? 0), 0),
       addedAt: Date.now() / 1000,
     };
+    demoDeletedPlaylistIds.delete(ratingKey);
     demoCreatedPlaylists.unshift(playlist);
+    demoCreatedPlaylistItems.set(ratingKey, initialItems);
     return { ...playlist };
   }
-  const response = await invoke<unknown>("create_playlist", { serverId, title: normalizedTitle, summary: normalizedSummary });
+  const response = await invoke<unknown>("create_playlist", {
+    serverId,
+    title: normalizedTitle,
+    summary: normalizedSummary,
+    seedRatingKey,
+    clearItems,
+  });
   const playlist = playlistRecords(response)
     .map(normalizePlaylist)
     .find((candidate) => candidate?.playlistType === "audio");
   if (!playlist) throw new Error("Plex 没有返回新建的音乐歌单");
   return normalizedSummary ? { ...playlist, summary: normalizedSummary } : playlist;
+}
+
+/** Delete a writable regular playlist through the selected server's scoped PMS token. */
+export async function deletePlaylist(serverId: string, playlistId: string): Promise<void> {
+  if (!isCleanPlexIdentifier(serverId) || !isCleanPlexIdentifier(playlistId)) {
+    throw new Error("无效的 Plex 歌单标识");
+  }
+  if (!isDesktopRuntime()) {
+    const playlist = [...demoCreatedPlaylists, ...demoPlaylists]
+      .find((candidate) => candidate.ratingKey === playlistId);
+    if (!playlist) throw new Error("演示资料库中找不到这个歌单");
+    if (!canWritePlaylist(playlist)) throw new Error("这个歌单不可删除");
+    demoDeletedPlaylistIds.add(playlistId);
+    const createdIndex = demoCreatedPlaylists.findIndex((candidate) => candidate.ratingKey === playlistId);
+    if (createdIndex >= 0) demoCreatedPlaylists.splice(createdIndex, 1);
+    demoCreatedPlaylistItems.delete(playlistId);
+    return;
+  }
+  await invoke("delete_playlist", { serverId, playlistId });
 }
 
 /** PMS remains authoritative, but smart and read-only playlists are never write targets. */
@@ -413,7 +476,10 @@ export async function getPlaylistItems(serverId: string, playlistId: string): Pr
   if (!isCleanPlexIdentifier(serverId) || !isCleanPlexIdentifier(playlistId)) {
     throw new Error("无效的 Plex 歌单标识");
   }
-  if (!isDesktopRuntime()) return [...(demoPlaylistItems[playlistId] ?? [])];
+  if (!isDesktopRuntime()) {
+    if (demoDeletedPlaylistIds.has(playlistId)) throw new Error("演示资料库中找不到这个歌单");
+    return [...(demoCreatedPlaylistItems.get(playlistId) ?? demoPlaylistItems[playlistId] ?? [])];
+  }
   const response = await invoke<unknown>("get_playlist_items", { serverId, playlistId });
   return metadata(response).filter((item) => item?.type === "track");
 }
@@ -635,17 +701,25 @@ export async function addTracksToPlaylist(
   if (!isCleanPlexIdentifier(serverId) || !isCleanPlexIdentifier(playlistId)) {
     throw new Error("无效的 Plex 歌单标识");
   }
-  const uniqueRatingKeys: string[] = [];
-  const seen = new Set<string>();
-  for (const ratingKey of ratingKeys) {
-    if (!isCleanPlexIdentifier(ratingKey)) throw new Error("无效的 Plex 歌曲标识");
-    if (!seen.has(ratingKey)) {
-      seen.add(ratingKey);
-      uniqueRatingKeys.push(ratingKey);
-    }
-  }
+  const uniqueRatingKeys = normalizePlaylistRatingKeys(ratingKeys);
   if (!uniqueRatingKeys.length) throw new Error("请至少选择一首歌曲");
   if (!isDesktopRuntime()) {
+    const createdPlaylist = demoCreatedPlaylists.find((playlist) => playlist.ratingKey === playlistId);
+    if (createdPlaylist) {
+      const current = demoCreatedPlaylistItems.get(playlistId) ?? [];
+      const knownTracks = demoLibraryTracks().filter((track) => uniqueRatingKeys.includes(track.ratingKey));
+      const nextItems = [...current];
+      const existing = new Set(current.map((track) => track.ratingKey));
+      for (const track of knownTracks) {
+        if (!existing.has(track.ratingKey)) {
+          existing.add(track.ratingKey);
+          nextItems.push(track);
+        }
+      }
+      demoCreatedPlaylistItems.set(playlistId, nextItems);
+      createdPlaylist.leafCount = nextItems.length;
+      createdPlaylist.duration = nextItems.reduce((total, track) => total + (track.duration ?? 0), 0);
+    }
     return { requested: uniqueRatingKeys.length, added: uniqueRatingKeys.length, failedRatingKeys: [] };
   }
   return invoke("add_tracks_to_playlist", { serverId, playlistId, ratingKeys: uniqueRatingKeys });

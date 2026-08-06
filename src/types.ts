@@ -203,7 +203,7 @@ export function trackPartKey(track: PlexItem): string | undefined {
 }
 
 export function formatDuration(milliseconds?: number): string {
-  if (!milliseconds || milliseconds < 0) return "0:00";
+  if (typeof milliseconds !== "number" || !Number.isFinite(milliseconds) || milliseconds < 0) return "0:00";
   const totalSeconds = Math.floor(milliseconds / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   return `${minutes}:${String(totalSeconds % 60).padStart(2, "0")}`;

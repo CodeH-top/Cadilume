@@ -15,6 +15,7 @@ import {
   Headphones,
   History,
   Laptop,
+  ListEnd,
   ListPlus,
   ListMusic,
   LockKeyhole,
@@ -59,6 +60,7 @@ import {
   canWritePlaylist,
   clearArtworkCache,
   createPlaylist,
+  deletePlaylist,
   discoverServers,
   getArtistTracksPage,
   getCacheStatus,
@@ -92,7 +94,7 @@ import { routeScrollBehavior, shouldShowRouteBackToTop } from "./routeScroll";
 import { hasDisplayableLyrics } from "./lyrics";
 import { getPlexLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
 import { getLyricsActionPresentation } from "./playerActions";
-import { playbackControlLabel, rangeFillPercent } from "./playerUi";
+import { playbackControlLabel, rangeFillPercent, usableDurationSeconds } from "./playerUi";
 import { homeRecommendationHubs, isRecentlyAddedHub, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
 import { createArtistLookup, resolveTrackArtists, type ArtistLookup } from "./trackArtists";
 import { nextTrackSort, sortTracks, type TrackSortKey, type TrackSortState } from "./trackSort";
@@ -210,6 +212,7 @@ interface MusicShellRuntime {
   refreshCacheStatus: () => Promise<void>;
   openDeviceNameDialog: () => void;
   openPlaylistCreation: () => void;
+  openPlaylistDeletion: (playlist: PlexPlaylist) => void;
   openPlaylistPicker: (tracks: readonly PlexItem[], label?: string) => void;
   setSidePanel: (value: "queue" | "lyrics" | "devices" | null) => void;
   setNowPlayingOpen: (open: boolean) => void;
@@ -464,6 +467,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [nowPlayingMode, setNowPlayingMode] = useState<NowPlayingMode>(readNowPlayingMode);
   const [playlistSelection, setPlaylistSelection] = useState<PlaylistSelection>();
   const [playlistCreationOpen, setPlaylistCreationOpen] = useState(false);
+  const [playlistDeletion, setPlaylistDeletion] = useState<PlexPlaylist>();
   const [deviceNameDialogOpen, setDeviceNameDialogOpen] = useState(false);
   const [playlists, setPlaylists] = useState<PlexPlaylist[]>([]);
   const [playlistListLoading, setPlaylistListLoading] = useState(false);
@@ -1049,7 +1053,15 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       }
       setSidePanel(null);
       setPlaylistSelection(undefined);
+      setPlaylistDeletion(undefined);
       setPlaylistCreationOpen(true);
+    },
+    openPlaylistDeletion: (playlist) => {
+      if (!canWritePlaylist(playlist)) return;
+      setSidePanel(null);
+      setPlaylistSelection(undefined);
+      setPlaylistCreationOpen(false);
+      setPlaylistDeletion(playlist);
     },
     openPlaylistPicker,
     setSidePanel,
@@ -1115,8 +1127,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         theme={themeMode}
         headerActions={(
           <div className="now-playing-header-status-actions" role="group" aria-label="外观与连接状态">
-            <ThemeCycleButton mode={themeMode} resolvedTheme={resolvedTheme} onChange={onThemeMode} />
             <ConnectionIndicator server={selectedServer} connected={connectionAvailable} />
+            <ThemeCycleButton resolvedTheme={resolvedTheme} onChange={onThemeMode} />
           </div>
         )}
         onSeek={player.seek}
@@ -1173,12 +1185,36 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       {playlistCreationOpen && serverId && (
         <CreatePlaylistDialog
           serverId={serverId}
+          sectionKey={sectionKey}
           onClose={() => setPlaylistCreationOpen(false)}
           onCreated={(playlist) => {
             setPlaylistCreationOpen(false);
             setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
             notify(`已创建歌单“${playlist.title}”。`);
             void loadPlaylistList();
+          }}
+          onError={notify}
+        />
+      )}
+
+      {playlistDeletion && serverId && (
+        <DeletePlaylistDialog
+          serverId={serverId}
+          playlist={playlistDeletion}
+          onClose={() => setPlaylistDeletion(undefined)}
+          onDeleted={() => {
+            const deletedPlaylist = playlistDeletion;
+            setPlaylistDeletion(undefined);
+            setPlaylists((current) => current.filter((playlist) => playlist.ratingKey !== deletedPlaylist.ratingKey));
+            const location = router.state.location;
+            const currentRoute = parseLibraryRoute(`${location.pathname}${location.search}`);
+            if (currentRoute.detail?.type === "playlist" && currentRoute.detail.ratingKey === deletedPlaylist.ratingKey) {
+              void router.navigate("/home", {
+                replace: true,
+                state: createCadilumeEntryState(location.state, { route: { view: "home" } }),
+              });
+            }
+            notify(`已删除歌单“${deletedPlaylist.title}”。`);
           }}
           onError={notify}
         />
@@ -1200,7 +1236,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         onOpenNowPlaying={() => {
           if (!player.current) return;
           cancelDeferredQueueOpen();
-          setSidePanel((value) => value === "devices" ? null : value);
+          setSidePanel((value) => value === "lyrics" || value === "devices" ? null : value);
           setPlaylistSelection(undefined);
           setNowPlayingOpen(true);
         }}
@@ -1290,12 +1326,13 @@ function MusicRouterLayout() {
     navigateRoute({ view: "search", query });
   };
 
-  const openPlaylist = (playlist: PlexPlaylist) => {
-    navigateRoute(libraryDetailRoute("playlist", playlist.ratingKey));
-  };
-
   const selectedPlaylistId = route.detail?.type === "playlist" ? route.detail.ratingKey : undefined;
   const activeView = selectedPlaylistId ? undefined : route.view;
+
+  const openPlaylist = (playlist: PlexPlaylist) => {
+    if (selectedPlaylistId === playlist.ratingKey) return;
+    navigateRoute(libraryDetailRoute("playlist", playlist.ratingKey));
+  };
 
   return (
     <>
@@ -1305,14 +1342,14 @@ function MusicRouterLayout() {
           <input value={runtime.searchText} onChange={(event) => runtime.setSearchText(event.target.value)} placeholder="搜索歌曲、专辑或歌手" aria-label="搜索资料库" />
         </form>
         <div className="topbar-actions">
-          <button className="topbar-account" type="button" aria-label={`打开 ${runtime.account.title || runtime.account.username} 的 Plex 账号设置`} onClick={() => navigateRoute({ view: "settings" })}>
+          <div className="topbar-account" aria-label={`${runtime.account.title || runtime.account.username} 的 Plex 用户信息`}>
             <Avatar account={runtime.account} />
             <span><strong>{runtime.account.title || runtime.account.username}</strong></span>
-          </button>
-          <ThemeCycleButton mode={runtime.themeMode} resolvedTheme={runtime.resolvedTheme} onChange={runtime.onThemeMode} />
+          </div>
+          <ConnectionIndicator server={runtime.selectedServer} connected={runtime.connectionAvailable} kindOverride={connectionPreview} />
           <IconButton label="设置" active={activeView === "settings"} onClick={() => navigateRoute({ view: "settings" })}><Settings size={18} /></IconButton>
           <IconButton label={runtime.sourcesSyncing ? "正在同步资料" : "刷新资料"} disabled={runtime.sourcesSyncing} onClick={() => void runtime.syncSources()}><RefreshCw className={runtime.sourcesSyncing ? "spin" : ""} size={17} /></IconButton>
-          <ConnectionIndicator server={runtime.selectedServer} connected={runtime.connectionAvailable} kindOverride={connectionPreview} />
+          <ThemeCycleButton resolvedTheme={runtime.resolvedTheme} onChange={runtime.onThemeMode} />
         </div>
       </AppTitlebar>
       <a className="skip-link" href="#main-content" aria-hidden={runtime.expandedPlayerOpen || undefined} tabIndex={runtime.expandedPlayerOpen ? -1 : undefined}>跳到主要内容</a>
@@ -1327,6 +1364,7 @@ function MusicRouterLayout() {
               aria-current={activeView === id ? "page" : undefined}
               onClick={(event) => {
                 event.preventDefault();
+                if (activeView === id) return;
                 navigateRoute({ view: id });
               }}
             >
@@ -1342,6 +1380,7 @@ function MusicRouterLayout() {
           onOpen={openPlaylist}
           onRetry={() => void runtime.loadPlaylistList(true)}
           onCreate={runtime.openPlaylistCreation}
+          onDelete={runtime.openPlaylistDeletion}
         />
       </aside>
       <section className="workspace" aria-hidden={runtime.expandedPlayerOpen || undefined} inert={runtime.expandedPlayerOpen || undefined}>
@@ -1699,7 +1738,6 @@ function RoutePage() {
       artists={runtime.libraryArtists}
       loading={playlistLoading}
       error={playlistError}
-      onBack={closeDetail}
       onRetry={() => setPlaylistRetryRequest((request) => request + 1)}
       onPlay={playPlaylist}
       onShuffle={() => shuffleContext(playlistItems)}
@@ -1830,7 +1868,7 @@ function PlaylistKindIcons({ playlist, className = "" }: { playlist: PlexPlaylis
   );
 }
 
-function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetry, onCreate }: {
+function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetry, onCreate, onDelete }: {
   playlists: PlexPlaylist[];
   selectedId?: string;
   loading: boolean;
@@ -1838,6 +1876,7 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
   onOpen: (playlist: PlexPlaylist) => void;
   onRetry: () => void;
   onCreate: () => void;
+  onDelete: (playlist: PlexPlaylist) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
@@ -1861,23 +1900,37 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
         ) : playlists.map((playlist) => {
           const capability = [playlist.smart ? "智能" : "普通", playlist.readOnly ? "只读" : undefined].filter(Boolean).join(" · ");
           const active = selectedId === playlist.ratingKey;
+          const deletable = canWritePlaylist(playlist);
           return (
-            <button
-              type="button"
-              className={`sidebar-playlist-item ${active ? "active" : ""}`}
-              key={playlist.ratingKey}
-              aria-current={active ? "page" : undefined}
-              aria-label={`${playlist.title}，${capability}歌单`}
-              title={playlist.title}
-              onClick={() => onOpen(playlist)}
-            >
-              <Artwork item={playlist} size="small" className="sidebar-playlist-artwork" />
-              <span>
-                <strong>{playlist.title}</strong>
-                <small className="sidebar-playlist-meta"><PlaylistKindIcons playlist={playlist} /><span>{playlist.leafCount ?? 0} 首</span></small>
-              </span>
-              <span className="sidebar-playlist-selected-dot" aria-hidden="true" />
-            </button>
+            <div className={`sidebar-playlist-row ${deletable ? "is-deletable" : ""}`.trim()} key={playlist.ratingKey}>
+              <button
+                type="button"
+                className={`sidebar-playlist-item ${active ? "active" : ""}`}
+                aria-current={active ? "page" : undefined}
+                aria-label={`${playlist.title}，${capability}歌单`}
+                title={playlist.title}
+                onClick={() => onOpen(playlist)}
+              >
+                <Artwork item={playlist} size="small" className="sidebar-playlist-artwork" />
+                <span>
+                  <strong>{playlist.title}</strong>
+                  <small className="sidebar-playlist-meta"><PlaylistKindIcons playlist={playlist} /><span>{playlist.leafCount ?? 0} 首</span></small>
+                </span>
+                <span className="sidebar-playlist-selected-dot" aria-hidden="true" />
+              </button>
+              {deletable && (
+                <button
+                  className="sidebar-playlist-delete"
+                  type="button"
+                  aria-label={`删除歌单“${playlist.title}”`}
+                  data-tooltip="删除歌单"
+                  title="删除歌单"
+                  onClick={() => onDelete(playlist)}
+                >
+                  <Trash2 size={15} strokeWidth={1.9} aria-hidden="true" />
+                </button>
+              )}
+            </div>
           );
         })}
       </div>
@@ -2014,13 +2067,12 @@ function RecommendationsView({
   );
 }
 
-function PlaylistDetailView({ playlist, tracks, artists, loading, error, onBack, onRetry, onPlay, onShuffle, onPlayTrack, onOpenArtist, onOpenAlbum }: {
+function PlaylistDetailView({ playlist, tracks, artists, loading, error, onRetry, onPlay, onShuffle, onPlayTrack, onOpenArtist, onOpenAlbum }: {
   playlist: PlexPlaylist;
   tracks: PlexItem[];
   artists: PlexItem[];
   loading: boolean;
   error?: string;
-  onBack: () => void;
   onRetry: () => void;
   onPlay: () => void;
   onShuffle: () => void;
@@ -2030,17 +2082,16 @@ function PlaylistDetailView({ playlist, tracks, artists, loading, error, onBack,
 }) {
   const trackCount = loading ? playlist.leafCount ?? 0 : tracks.length;
   return (
-    <>
-      <button className="back-button" onClick={onBack}><ArrowLeft size={17} />返回</button>
+    <section className="detail-page playlist-detail-page">
       <header className="detail-hero playlist-detail-hero">
         <Artwork item={playlist} size="hero" />
-        <div>
+        <div className="playlist-detail-copy">
           <h1>{playlist.title}</h1>
           <p className="playlist-detail-meta"><PlaylistKindIcons playlist={playlist} /><span>歌单 · {trackCount} 首歌曲</span></p>
           {playlist.summary && <p className="playlist-detail-summary">{playlist.summary}</p>}
           <div className="detail-actions">
             <button className="primary-button" type="button" disabled={loading || Boolean(error) || !tracks.length} onClick={onPlay}><Play size={17} fill="currentColor" />播放全部</button>
-            <button className="secondary-button" type="button" disabled={loading || Boolean(error) || !tracks.length} onClick={onShuffle}><Shuffle size={16} />随机播放</button>
+            <IconButton className="playlist-action-button" label="随机播放" disabled={loading || Boolean(error) || !tracks.length} onClick={onShuffle}><Shuffle size={18} aria-hidden="true" /></IconButton>
           </div>
         </div>
       </header>
@@ -2051,7 +2102,7 @@ function PlaylistDetailView({ playlist, tracks, artists, loading, error, onBack,
       ) : tracks.length ? (
         <TrackTable title="曲目" tracks={tracks} artists={artists} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} />
       ) : <EmptyState title="这个歌单还没有歌曲" description={playlist.smart ? "Plex 当前没有返回符合条件的曲目。" : "可以稍后从歌曲菜单向可写歌单添加内容。"} icon={<ListMusic size={28} />} />}
-    </>
+    </section>
   );
 }
 
@@ -2456,9 +2507,9 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
               {bulkAction === "play" ? <LoaderCircle className="spin" size={17} aria-hidden="true" /> : <Play size={17} fill="currentColor" aria-hidden="true" />}
               {bulkAction === "play" ? "正在准备…" : "播放"}
             </button>
-            <IconButton className="artist-action-button" label="添加到队列" disabled={!serverId || artistActionBusy} onClick={() => void runArtistAction("append")}><ListPlus size={18} /></IconButton>
+            <IconButton className="artist-action-button" label="添加到播放队列" disabled={!serverId || artistActionBusy} onClick={() => void runArtistAction("append")}><ListEnd size={18} /></IconButton>
             <IconButton className="artist-action-button" label="播放下一个" disabled={!serverId || artistActionBusy} onClick={() => void runArtistAction("next")}><SkipForward size={18} /></IconButton>
-            <IconButton className="artist-action-button" label="添加到歌单" disabled={!serverId || artistActionBusy} onClick={() => void runArtistAction("playlist")}><ListMusic size={18} /></IconButton>
+            <IconButton className="artist-action-button" label="添加到歌单" disabled={!serverId || artistActionBusy} onClick={() => void runArtistAction("playlist")}><ListPlus size={18} /></IconButton>
           </div>
           <ArtistBiography id={`${tabIdBase}-biography`} summary={artistBiography} />
         </div>
@@ -2650,19 +2701,15 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
         <div
           className="track-row track-data-row"
           role="row"
-          tabIndex={0}
-          aria-label={`播放《${track.title}》`}
           aria-rowindex={index + 2}
           key={`${track.ratingKey}-${index}`}
-          onClick={() => onPlay(track, tracks)}
-          onKeyDown={(event) => {
-            if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
-            event.preventDefault();
-            onPlay(track, tracks);
-          }}
         >
           {selection && <span className="track-selection-cell" role="cell"><SelectionCheckbox checked={selection.selectedRatingKeys.has(track.ratingKey)} label={`选择《${track.title}》`} onChange={(checked) => selection.onToggleTrack(track.ratingKey, checked)} /></span>}
-          <span className="track-index" role="cell"><span>{startIndex + index + 1}</span><Play size={13} fill="currentColor" aria-hidden="true" /></span>
+          <span className="track-index" role="cell">
+            <button className="track-play-button" type="button" aria-label={`播放《${track.title}》`} onClick={() => onPlay(track, tracks)}>
+              <span>{startIndex + index + 1}</span><Play size={13} fill="currentColor" aria-hidden="true" />
+            </button>
+          </span>
           <span className="track-artwork-cell" role="cell"><Artwork item={track} size="small" /></span>
           <span className="track-title" role="cell" title={track.title}><strong>{track.title}</strong></span>
           <TrackArtistsCell track={track} artistLookup={artistLookup} onOpenArtist={onOpenArtist} />
@@ -2818,17 +2865,13 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
           <LibraryPageTitle>歌曲</LibraryPageTitle>
           <span className="track-page-count" aria-live="polite">{totalSize ? `共 ${totalSize} 首歌曲` : loading ? "正在读取歌曲…" : "当前资料库没有歌曲"}</span>
         </div>
-        {selectedTracks.length > 0 && (
-          <div className="track-selection-actions" role="group" aria-label="已选歌曲操作">
-            <span className="track-selection-summary">已选择 {selectedTracks.length} 首</span>
-            <button className="primary-button track-selection-action" type="button" onClick={playSelectedTracks}>
-              <Play size={15} fill="currentColor" aria-hidden="true" />播放
-            </button>
-            <button className="secondary-button track-selection-action" type="button" onClick={appendSelectedTracks}>
-              <ListPlus size={16} aria-hidden="true" />添加到播放队列
-            </button>
-          </div>
-        )}
+        <div className="track-selection-actions" role="group" aria-label="已选歌曲操作">
+          {selectedTracks.length > 0 && <span className="track-selection-summary" aria-live="polite">已选择 {selectedTracks.length} 首</span>}
+          <button className="primary-button track-selection-action" type="button" disabled={!selectedTracks.length} onClick={playSelectedTracks}>
+            <Play size={15} fill="currentColor" aria-hidden="true" />播放
+          </button>
+          <IconButton className="track-selection-queue-action" label="添加到播放队列" disabled={!selectedTracks.length} onClick={appendSelectedTracks}><ListEnd size={17} aria-hidden="true" /></IconButton>
+        </div>
       </div>
       {loading && !tracks.length ? <LoadingState /> : tracks.length ? (
         <div className="paginated-track-workspace">
@@ -2913,7 +2956,7 @@ function SettingsView(props: ContentViewProps) {
       )}
       <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放">
         <div className="settings-stack">
-          <div className="field-row"><span><strong>音频质量</strong><small>选择 PMS 返回原始流或兼容质量。</small></span><SettingsSelect label="音频质量" value={props.quality} placeholder="选择音频质量" disabled={false} options={[{ value: "auto", label: "自动（优先直放 / PMS 兼容转码）" }, { value: "original", label: "始终原始质量" }, { value: "320", label: "320 kbps" }, { value: "256", label: "256 kbps" }, { value: "192", label: "192 kbps" }]} onValueChange={(value) => props.onQuality(value as StreamQuality)} /></div>
+          <div className="field-row"><span><strong>音频质量</strong><small>选择 PMS 返回原始流或兼容质量。</small></span><SettingsSelect label="音频质量" value={props.quality} placeholder="选择音频质量" disabled={false} options={[{ value: "auto", label: "自动" }, { value: "original", label: "始终原始质量" }, { value: "320", label: "320 kbps" }, { value: "256", label: "256 kbps" }, { value: "192", label: "192 kbps" }]} onValueChange={(value) => props.onQuality(value as StreamQuality)} /></div>
           <div className="toggle-row">
             <span><strong>预缓冲下一首</strong><small>提前加载队列中的下一首。</small></span>
             <label className="toggle-switch" aria-label="预缓冲下一首"><input type="checkbox" checked={props.prebufferNext} onChange={(event) => props.onPrebufferNext(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /></label>
@@ -3148,18 +3191,16 @@ function ChoiceCard({ active, title, icon, onClick, radio = false }: { active: b
   return <button type="button" className={`choice-card ${active ? "active" : ""}`} role={radio ? "radio" : undefined} aria-checked={radio ? active : undefined} onClick={onClick}>{icon}<strong>{title}</strong>{active && <Check className="choice-check" size={16} />}</button>;
 }
 
-function ThemeCycleButton({ mode, resolvedTheme, onChange }: { mode: ThemeMode; resolvedTheme: ResolvedTheme; onChange: ThemeModeChange }) {
+function ThemeCycleButton({ resolvedTheme, onChange }: { resolvedTheme: ResolvedTheme; onChange: ThemeModeChange }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const nextMode = mode === "light" ? "dark" : "light";
-  const nextLabel = nextMode === "light" ? "浅色" : "深色";
-  const currentLabel = `主题：${resolvedTheme === "light" ? "浅色" : "深色"}`;
-  const CurrentIcon = mode === "light" ? Sun : Moon;
+  const nextMode = resolvedTheme === "light" ? "dark" : "light";
+  const nextLabel = nextMode === "light" ? "浅色模式" : "深色模式";
+  const CurrentIcon = resolvedTheme === "light" ? Sun : Moon;
   const cycle = () => {
     const bounds = triggerRef.current?.getBoundingClientRect();
     onChange(nextMode, bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : undefined);
   };
-  const tooltip = `${currentLabel}；点击切换为${nextLabel}`;
-  return <button ref={triggerRef} className="icon-button theme-cycle-button" type="button" aria-label={tooltip} data-tooltip={tooltip} title={tooltip} onClick={cycle}><CurrentIcon size={18} strokeWidth={1.9} aria-hidden="true" /></button>;
+  return <button ref={triggerRef} className="icon-button theme-cycle-button" type="button" aria-label={`切换为${nextLabel}`} data-tooltip={nextLabel} title={nextLabel} onClick={cycle}><CurrentIcon size={18} strokeWidth={1.9} aria-hidden="true" /></button>;
 }
 
 const QueueItem = memo(function QueueItem({ track, index, active, onSelect, onRemove }: {
@@ -3250,11 +3291,6 @@ function LyricsPanel({ open, track, lyrics, onSeek }: {
 
   return (
     <aside className="lyrics-panel" data-panel-state={open ? "open" : "closing"} aria-hidden={!open || undefined} inert={!open || undefined} aria-label="歌词">
-      <header><h2>歌词</h2></header>
-      <div className="lyrics-context">
-        <strong>{track?.title || "尚未播放"}</strong>
-        <small>{track ? `${trackArtist(track)} · ${trackAlbum(track)}` : "从资料库选择一首音乐"}</small>
-      </div>
       <div
         ref={listRef}
         className="lyrics-list"
@@ -3348,8 +3384,9 @@ function DevicesPanel({ output, onClose }: {
   );
 }
 
-function CreatePlaylistDialog({ serverId, onClose, onCreated, onError }: {
+function CreatePlaylistDialog({ serverId, sectionKey, onClose, onCreated, onError }: {
   serverId: string;
+  sectionKey?: string;
   onClose: () => void;
   onCreated: (playlist: PlexPlaylist) => void;
   onError: (message: string) => void;
@@ -3362,6 +3399,12 @@ function CreatePlaylistDialog({ serverId, onClose, onCreated, onError }: {
   const restoreFocusTargetRef = useRef<HTMLElement | null>(null);
   const restoreFocusFrameRef = useRef<number | undefined>(undefined);
   const validTitle = Boolean(title.trim()) && Array.from(title.trim()).length <= 255;
+  const cancel = useCallback(() => {
+    if (busy) return;
+    setTitle("");
+    setError(undefined);
+    onClose();
+  }, [busy, onClose]);
 
   useEffect(() => {
     if (restoreFocusFrameRef.current !== undefined) {
@@ -3391,7 +3434,7 @@ function CreatePlaylistDialog({ serverId, onClose, onCreated, onError }: {
       if (event.key === "Escape" && !busy) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        onClose();
+        cancel();
         return;
       }
       if (event.key !== "Tab") return;
@@ -3421,7 +3464,7 @@ function CreatePlaylistDialog({ serverId, onClose, onCreated, onError }: {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, onClose]);
+  }, [busy, cancel]);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -3429,7 +3472,15 @@ function CreatePlaylistDialog({ serverId, onClose, onCreated, onError }: {
     setBusy(true);
     setError(undefined);
     try {
-      onCreated(await createPlaylist(serverId, title));
+      const seedTrack = sectionKey
+        ? await getTracksPage(serverId, sectionKey, 0, 1).then((page) => page.items[0]).catch(() => undefined)
+        : undefined;
+      const playlist = await createPlaylist(serverId, title, "", seedTrack ? {
+        seedRatingKey: seedTrack.ratingKey,
+        clearItemsAfterCreate: true,
+      } : undefined);
+      setTitle("");
+      onCreated(playlist);
     } catch (reason) {
       const message = playlistCreateErrorMessage(reason);
       setError(message);
@@ -3439,14 +3490,14 @@ function CreatePlaylistDialog({ serverId, onClose, onCreated, onError }: {
   };
 
   return (
-    <div className="playlist-picker-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
+    <div className="playlist-picker-backdrop" onMouseDown={(event) => event.target === event.currentTarget && cancel()}>
       <section ref={dialogRef} className="playlist-create-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-create-title" tabIndex={-1}>
         <header>
           <div>
             <h2 id="playlist-create-title">新建歌单</h2>
             <small>在当前 Plex 账号中创建</small>
           </div>
-          <IconButton label="关闭新建歌单" disabled={busy} onClick={onClose}><X size={18} /></IconButton>
+          <IconButton label="关闭新建歌单" disabled={busy} onClick={cancel}><X size={18} /></IconButton>
         </header>
         <form onSubmit={(event) => void submit(event)}>
           <div className="playlist-create-content">
@@ -3469,12 +3520,104 @@ function CreatePlaylistDialog({ serverId, onClose, onCreated, onError }: {
             {error && <p id="playlist-create-error" className="playlist-create-error" role="alert">{error}</p>}
           </div>
           <footer>
-            <button className="secondary-button" type="button" disabled={busy} onClick={onClose}>取消</button>
+            <button className="secondary-button" type="button" disabled={busy} onClick={cancel}>取消</button>
             <button className="primary-button" type="submit" disabled={!validTitle || busy} aria-busy={busy || undefined}>
               {busy ? <><LoaderCircle className="spin" size={15} />正在创建…</> : "创建"}
             </button>
           </footer>
         </form>
+      </section>
+    </div>
+  );
+}
+
+function DeletePlaylistDialog({ serverId, playlist, onClose, onDeleted, onError }: {
+  serverId: string;
+  playlist: PlexPlaylist;
+  onClose: () => void;
+  onDeleted: () => void;
+  onError: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const dialogRef = useRef<HTMLElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const busyRef = useRef(busy);
+
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    const restoreTarget = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement
+      : null;
+    cancelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busyRef.current) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.requestAnimationFrame(() => {
+        if (restoreTarget?.isConnected && !restoreTarget.closest("[inert]")) restoreTarget.focus();
+      });
+    };
+  }, [onClose]);
+
+  const confirmDelete = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await deletePlaylist(serverId, playlist.ratingKey);
+      onDeleted();
+    } catch (reason) {
+      const message = playlistDeleteErrorMessage(reason);
+      setError(message);
+      setBusy(false);
+      onError(message);
+    }
+  };
+
+  return (
+    <div className="playlist-picker-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
+      <section ref={dialogRef} className="playlist-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="playlist-delete-title" aria-describedby="playlist-delete-description">
+        <header>
+          <div>
+            <h2 id="playlist-delete-title">删除歌单</h2>
+            <small>只会删除歌单，不会删除其中的歌曲</small>
+          </div>
+          <IconButton label="关闭删除歌单确认" disabled={busy} onClick={onClose}><X size={18} /></IconButton>
+        </header>
+        <div className="playlist-delete-content">
+          <span className="playlist-delete-icon" aria-hidden="true"><Trash2 size={20} /></span>
+          <p id="playlist-delete-description">确认删除普通歌单“{playlist.title}”？此操作无法撤销。</p>
+          {error && <p className="playlist-delete-error" role="alert">{error}</p>}
+        </div>
+        <footer>
+          <button ref={cancelRef} className="secondary-button" type="button" disabled={busy} onClick={onClose}>取消</button>
+          <button className="danger-button" type="button" disabled={busy} aria-busy={busy || undefined} onClick={() => void confirmDelete()}>
+            {busy ? <><LoaderCircle className="spin" size={15} />正在删除…</> : <><Trash2 size={15} />删除</>}
+          </button>
+        </footer>
       </section>
     </div>
   );
@@ -3502,6 +3645,12 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
   const newPlaylistInputRef = useRef<HTMLInputElement>(null);
   const busy = Boolean(busyId) || creating;
   const validNewPlaylistTitle = Boolean(newPlaylistTitle.trim()) && Array.from(newPlaylistTitle.trim()).length <= 255;
+  const closeInlineCreate = useCallback(() => {
+    if (busy) return;
+    setCreateOpen(false);
+    setNewPlaylistTitle("");
+    setCreateError(undefined);
+  }, [busy]);
 
   useEffect(() => {
     setRemainingTracks(appendUniqueArtistTracks([], tracks));
@@ -3545,7 +3694,7 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
       if (event.key === "Escape" && !busy) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (createOpen) setCreateOpen(false);
+        if (createOpen) closeInlineCreate();
         else onClose();
         return;
       }
@@ -3576,7 +3725,7 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, createOpen, onClose]);
+  }, [busy, closeInlineCreate, createOpen, onClose]);
 
   const add = async (playlist: PlexPlaylist) => {
     if (!remainingTracks.length) return;
@@ -3605,6 +3754,7 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
 
   const openCreate = () => {
     if (busy) return;
+    setNewPlaylistTitle("");
     setCreateError(undefined);
     setCreateOpen(true);
   };
@@ -3614,16 +3764,50 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
     if (!validNewPlaylistTitle || busy) return;
     setCreating(true);
     setCreateError(undefined);
+    const creationTracks = appendUniqueArtistTracks([], remainingTracks);
+    const seedTrack = creationTracks[0];
+    if (!seedTrack) {
+      setCreating(false);
+      setCreateError("当前没有可添加到歌单的歌曲。");
+      return;
+    }
+    let playlist: PlexPlaylist;
     try {
-      const playlist = await createPlaylist(serverId, newPlaylistTitle);
+      playlist = await createPlaylist(serverId, newPlaylistTitle, "", { seedRatingKey: seedTrack.ratingKey });
       setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
       onPlaylistCreated(playlist);
       setNewPlaylistTitle("");
       setCreateOpen(false);
-      setCreating(false);
-      void add(playlist);
     } catch (reason) {
       setCreateError(playlistCreateErrorMessage(reason));
+      setCreating(false);
+      return;
+    }
+
+    const tracksToAppend = creationTracks.slice(1);
+    try {
+      const appended = tracksToAppend.length
+        ? await addTracksToPlaylist(serverId, playlist.ratingKey, tracksToAppend.map((track) => track.ratingKey))
+        : { requested: 0, added: 0, failedRatingKeys: [] };
+      const result = {
+        requested: creationTracks.length,
+        added: appended.added + 1,
+        failedRatingKeys: appended.failedRatingKeys,
+      };
+      const failedRatingKeys = new Set(result.failedRatingKeys);
+      if (result.added === result.requested && failedRatingKeys.size === 0) {
+        setCreating(false);
+        onAdded(playlist, result);
+        return;
+      }
+      const failedTracks = tracksToAppend.filter((track) => failedRatingKeys.has(track.ratingKey));
+      setRemainingTracks(failedTracks.length ? failedTracks : tracksToAppend);
+      const failedCount = Math.max(result.requested - result.added, failedTracks.length);
+      setError(`歌单已创建并写入 ${result.added} 首；${failedCount} 首未能添加，可选择新歌单重试。`);
+      setCreating(false);
+    } catch (reason) {
+      setRemainingTracks(tracksToAppend);
+      setError(`歌单已创建并写入 1 首；其余歌曲添加失败：${playlistErrorMessage(reason)}`);
       setCreating(false);
     }
   };
@@ -3665,7 +3849,7 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
               </div>
               <div className="playlist-picker-create-footer">
                 {createError ? <p id="playlist-picker-create-error" role="alert">{createError}</p> : <span>创建后会立即添加当前歌曲。</span>}
-                <button className="text-button" type="button" disabled={busy} onClick={() => setCreateOpen(false)}>取消</button>
+                <button className="text-button" type="button" disabled={busy} onClick={closeInlineCreate}>取消</button>
               </div>
             </form>
           )}
@@ -3720,7 +3904,8 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
   onAddToPlaylist: () => void;
   onOutputAction: () => void;
 }) {
-  const progressFill = rangeFillPercent(player.progress, player.duration);
+  const displayDuration = usableDurationSeconds(player.duration, (player.current?.duration || 0) / 1000);
+  const progressFill = rangeFillPercent(player.progress, displayDuration);
   const playbackBusy = loading || buffering;
   const playbackLabel = playbackControlLabel({ playing: player.playing, loading, buffering });
   const cycleRepeat = () => player.setRepeat(player.repeat === "off" ? "all" : player.repeat === "all" ? "one" : "off");
@@ -3734,13 +3919,11 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
       </button>
       <div className="player-center">
         <div className="transport-controls">
-          <IconButton label={player.shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"} active={player.shuffle} onClick={() => player.setShuffle(!player.shuffle)}><Shuffle size={16} /></IconButton>
-          <IconButton label="上一首" onClick={player.previous}><SkipBack size={19} fill="currentColor" /></IconButton>
+          <IconButton label={player.shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"} tooltip={null} active={player.shuffle} onClick={() => player.setShuffle(!player.shuffle)}><Shuffle size={16} /></IconButton>
+          <IconButton label="上一首" tooltip={null} onClick={player.previous}><SkipBack size={19} fill="currentColor" /></IconButton>
           <button
             className={`play-button ${playbackBusy ? "is-loading" : ""}`}
             aria-label={playbackLabel}
-            data-tooltip={playbackLabel}
-            title={playbackLabel}
             aria-busy={playbackBusy || undefined}
             aria-disabled={loading || undefined}
             onClick={player.toggle}
@@ -3752,10 +3935,10 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
                 ? <Pause className="pause-icon" size={19} fill="currentColor" aria-hidden="true" />
                 : <Play className="play-icon" size={19} fill="currentColor" aria-hidden="true" />}
           </button>
-          <IconButton label="下一首" onClick={player.next}><SkipForward size={19} fill="currentColor" /></IconButton>
-          <IconButton label={player.repeat === "one" ? "单曲循环" : player.repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止"} active={player.repeat !== "off"} onClick={cycleRepeat}>{player.repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}</IconButton>
+          <IconButton label="下一首" tooltip={null} onClick={player.next}><SkipForward size={19} fill="currentColor" /></IconButton>
+          <IconButton label={player.repeat === "one" ? "单曲循环" : player.repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止"} tooltip={null} active={player.repeat !== "off"} onClick={cycleRepeat}>{player.repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}</IconButton>
         </div>
-        <div className="progress-row"><span>{formatDuration(player.progress * 1000)}</span><input aria-label="播放进度" type="range" min="0" max={Math.max(1, player.duration)} step="1" value={Math.min(player.progress, player.duration || 0)} style={{ "--range-progress": `${progressFill}%` } as CSSProperties} onChange={(event) => player.seek(Number(event.target.value))} /><span>{formatDuration(player.duration * 1000)}</span></div>
+        <div className="progress-row"><span>{formatDuration(player.progress * 1000)}</span><input aria-label="播放进度" type="range" min="0" max={Math.max(1, displayDuration)} step="1" value={Math.min(player.progress, displayDuration || 0)} style={{ "--range-progress": `${progressFill}%` } as CSSProperties} onChange={(event) => player.seek(Number(event.target.value))} /><span>{formatDuration(displayDuration * 1000)}</span></div>
       </div>
       <div className="player-extras">
         <PlayerLyricsAction
@@ -3989,8 +4172,8 @@ function PlaybackErrorAlert({ failure, trackTitle, onRetry, onOpenSettings, onCl
         <strong>{trackTitle ? `《${trackTitle}》暂时无法播放` : "这首歌曲暂时无法播放"}</strong>
         <p>Cadilume 已尝试兼容的播放方式。你可以重新尝试，或检查播放质量与服务器连接。</p>
         <div className="playback-alert-actions">
-          <button ref={retryRef} className="primary-button" type="button" onClick={onRetry}><RefreshCw size={16} />重试播放</button>
-          <button className="secondary-button" type="button" onClick={onOpenSettings}><SlidersHorizontal size={16} />前往播放设置</button>
+          <button ref={retryRef} className="primary-button" type="button" onClick={onRetry}><RefreshCw size={15} />重试播放</button>
+          <button className="secondary-button" type="button" onClick={onOpenSettings}><SlidersHorizontal size={15} />播放设置</button>
         </div>
         <details className="playback-alert-details">
           <summary>诊断信息</summary>
@@ -4069,6 +4252,17 @@ function playlistCreateErrorMessage(reason: unknown): string {
   const message = reason instanceof Error ? reason.message : String(reason || "未知错误");
   if (/\b(?:401|403)\b|forbidden|permission|unauthori[sz]ed|无权|权限/iu.test(message)) {
     return "当前账号没有在这台 Plex 服务器创建歌单的权限。";
+  }
+  return message;
+}
+
+function playlistDeleteErrorMessage(reason: unknown): string {
+  const message = reason instanceof Error ? reason.message : String(reason || "未知错误");
+  if (/\b(?:401|403)\b|forbidden|permission|unauthori[sz]ed|无权|权限/iu.test(message)) {
+    return "当前账号没有删除这个歌单的权限。";
+  }
+  if (/\b404\b|not found|不存在/iu.test(message)) {
+    return "这个歌单已不存在，刷新歌单列表后即可同步。";
   }
   return message;
 }

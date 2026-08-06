@@ -1,5 +1,36 @@
 # LEARNINGS
 
+## 2026-08-06 — MediaError code 4 的代理根因与 Plex 音乐转码参数
+
+- WKWebView 的 `MediaError code 4` 不一定是原文件不支持：PMS 在转码/直放失败时可能返回
+  “HTTP 200 + 非音频 Content-Type”（典型 `text/html` 错误页），本机流代理若只按状态码
+  成功就把响应原样转发，WebView 会以 code 4 拒绝。代理必须校验上游 `Content-Type`
+  为 `audio/*` 才转发，否则记录该次尝试并继续尝试下一个端点/连接；全失败时返回脱敏诊断
+  （已尝试端点数、请求/实际质量、连接类型、端点类型、HTTP 状态、Content-Type），
+  不输出 PMS URI、路径、token、票据或曲目标识。
+- Plex Web 自己的音乐 HTTP 转码使用 `/music/:/transcode/universal/start`（`protocol=http`
+  不追加扩展名），`start.mp3` 只是兼容形态；musicProfile 的
+  `add-transcode-target(type=musicProfile&context=streaming&protocol=http&container=mp3&audioCodec=mp3)`
+  不带 `replace=true`（`replace=true` 只出现在视频 `add-limitation`）。补充
+  `fastSeek=1&container=mp3&audioCodec=mp3&audioChannels=2` 与既有
+  `directPlay=0&directStream=0&directStreamAudio=1&copyts=1&X-Plex-Chunked=1` 组合可覆盖
+  常见服务端版本。
+- WebKit 对无 Content-Length 的 chunked 转码流常报 `audio.duration = Infinity`。播放器 UI
+  必须用“有限媒体时长 > 曲目元数据时长”的归一函数（`usableDurationSeconds`）显示进度与总
+  时长，否则底栏出现 `Infinity:NaN`、进度条停在 0、展开播放器时间轴失效，并破坏歌词末行
+  边界。
+- `useLyrics` 等按“播放时长”参与归一化的 hook，不要把会随媒体元数据变化的 `durationSeconds`
+  放进 effect 依赖；应通过 ref 读取最新值，只以歌曲/歌词源变化触发重新获取，否则每次
+  时长稳定都会重取歌词并把活动行短暂重置。
+
+## 2026-08-05 — 局部 flex 操作区必须清除通用按钮外边距
+
+- 播放失败提示中的主按钮继承了通用 `.primary-button { margin-top: 16px; }`，使 flex 行的交叉轴
+  尺寸增大；同排的次按钮又按默认 `align-items: stretch` 被拉到整行高度，因此只有右侧按钮
+  看起来异常巨大。
+- 在弹窗、提示条等紧凑操作区复用通用按钮时，应同时局部重置 margin、明确统一高度，并为
+  容器设置 `align-items: center`；只改次按钮尺寸无法消除由兄弟元素撑高产生的拉伸。
+
 ## 2026-08-05 — 纯图标控制必须有应用内 tooltip，不能只依赖 `title`
 
 - 用户连续指出多个纯图标按钮缺少可见提示。`aria-label` 只解决读屏，浏览器原生 `title` 既不

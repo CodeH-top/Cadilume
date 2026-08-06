@@ -79,11 +79,42 @@ describe("expanded player controller layout", () => {
     expect(markup).toContain('data-testid="tonearm-cartridge"');
   });
 
-  it("exposes centered tooltip content for every icon-only expanded-player control", () => {
+  it("keeps transport controls tooltip-free while auxiliary icon actions remain described", () => {
     const markup = renderExpandedPlayer();
+    const transportStart = markup.indexOf("now-playing-transport");
+    const actionsStart = markup.indexOf("now-playing-panel-actions");
+    const transportMarkup = markup.slice(transportStart, actionsStart);
 
-    for (const label of ["关闭正在播放", "随机播放当前列表", "上一首", "播放", "下一首", "顺序播放，列表结束后停止", "添加到歌单", "显示播放队列"]) {
+    expect(transportStart).toBeGreaterThan(0);
+    expect(actionsStart).toBeGreaterThan(transportStart);
+    expect(transportMarkup).not.toContain("data-tooltip");
+    for (const label of ["随机播放当前列表", "上一首", "播放", "下一首", "顺序播放，列表结束后停止"]) {
+      expect(transportMarkup).toContain(`aria-label="${label}"`);
+    }
+    for (const label of ["关闭正在播放", "添加到歌单", "显示播放队列"]) {
       expect(markup).toContain(`data-tooltip="${label}"`);
     }
+  });
+
+  it("falls back to track metadata when a stream reports an infinite duration", () => {
+    const markup = renderToStaticMarkup(
+      <NowPlayingView
+        open
+        track={{ title: "无限时长流", artist: "流式歌手", duration: 210_000 }}
+        durationSeconds={Number.POSITIVE_INFINITY}
+        playing={false}
+        queueAvailable
+        onSeek={() => undefined}
+        onClose={() => undefined}
+        onToggleQueue={() => undefined}
+        onAddToPlaylist={() => undefined}
+      />,
+    );
+    const timelineStart = markup.indexOf('aria-label="播放进度"');
+    const timeline = markup.slice(timelineStart);
+
+    expect(timeline).toContain("3:30");
+    expect(timeline).not.toContain("Infinity");
+    expect(timeline).not.toContain("NaN");
   });
 });

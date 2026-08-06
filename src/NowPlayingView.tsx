@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { hasDisplayableLyrics, type LyricLine, type LyricsDocument } from "./lyrics";
-import { playbackControlLabel } from "./playerUi";
+import { playbackControlLabel, usableDurationSeconds } from "./playerUi";
 import { trackArtistContributors, type PlexContributor, type PlexMedia, type ThemeMode } from "./types";
 import { SharedVolumeControl } from "./VolumeControl";
 import "./NowPlayingView.css";
@@ -211,7 +211,7 @@ export function NowPlayingView({
   const visible = Boolean(open && track);
   const displayMode = onModeChange ? mode : internalMode;
   const artist = trackArtist(track);
-  const normalizedDuration = durationSeconds ?? durationFromTrack(track);
+  const normalizedDuration = usableDurationSeconds(durationSeconds, durationFromTrack(track));
   const hasTimeline = Number.isFinite(normalizedDuration) && (normalizedDuration || 0) > 0;
   const timelineValue = hasTimeline ? clampUnit((progressSeconds || 0) / (normalizedDuration || 1)) : 0;
   const playbackBusy = loading || buffering;
@@ -415,9 +415,7 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onShuffleChange}
                 aria-label={shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"}
-                data-tooltip={shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"}
                 aria-pressed={shuffle}
-                title={shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"}
                 onClick={() => onShuffleChange?.(!shuffle)}
               >
                 <Shuffle size={18} strokeWidth={1.8} aria-hidden="true" />
@@ -427,8 +425,6 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onPrevious}
                 aria-label="上一首"
-                data-tooltip="上一首"
-                title="上一首"
                 onClick={onPrevious}
               >
                 <SkipBack size={21} fill="currentColor" strokeWidth={1.7} aria-hidden="true" />
@@ -438,8 +434,6 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onTogglePlayback || loading}
                 aria-label={playbackLabel}
-                data-tooltip={playbackLabel}
-                title={playbackLabel}
                 aria-busy={playbackBusy || undefined}
                 aria-disabled={loading || undefined}
                 onClick={onTogglePlayback}
@@ -455,8 +449,6 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onNext}
                 aria-label="下一首"
-                data-tooltip="下一首"
-                title="下一首"
                 onClick={onNext}
               >
                 <SkipForward size={21} fill="currentColor" strokeWidth={1.7} aria-hidden="true" />
@@ -466,9 +458,7 @@ export function NowPlayingView({
                 type="button"
                 disabled={!track || !onRepeatChange}
                 aria-label={repeatLabel}
-                data-tooltip={repeatLabel}
                 aria-pressed={repeat !== "off"}
-                title={repeatLabel}
                 onClick={cycleRepeat}
               >
                 {repeat === "one"

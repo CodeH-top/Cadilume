@@ -972,9 +972,15 @@ pub async fn create_playlist(
     server_id: String,
     title: String,
     summary: String,
+    seed_rating_key: Option<String>,
+    clear_items: bool,
     state: State<'_, PlexState>,
 ) -> Result<Value, String> {
-    let query = create_audio_playlist_query(&title).map_err(display_error)?;
+    if clear_items && seed_rating_key.is_none() {
+        return Err("创建空歌单缺少兼容用的歌曲".to_string());
+    }
+    let query = create_audio_playlist_query(&server_id, &title, seed_rating_key.as_deref())
+        .map_err(display_error)?;
     let normalized_summary = normalize_playlist_summary(&summary).map_err(display_error)?;
     let mut created = state
         .server_request_response(&server_id, Method::POST, "/playlists", &query)
@@ -983,6 +989,29 @@ pub async fn create_playlist(
         .json::<Value>()
         .await
         .map_err(display_error)?;
+
+    if clear_items {
+        let playlist_id = created_playlist_rating_key(&created)
+            .ok_or_else(|| "Plex 未返回可清空的歌单标识".to_string())?;
+        let path = playlist_items_path(&playlist_id).map_err(display_error)?;
+        let empty_query = HashMap::new();
+        if let Err(error) = state
+            .server_request_response(&server_id, Method::DELETE, &path, &empty_query)
+            .await
+        {
+            let rollback_path = playlist_path(&playlist_id).map_err(display_error)?;
+            let _ = state
+                .server_request_response(
+                    &server_id,
+                    Method::DELETE,
+                    &rollback_path,
+                    &empty_query,
+                )
+                .await;
+            return Err(format!("创建空歌单失败：{}", display_error(error)));
+        }
+        reset_created_playlist_counts(&mut created);
+    }
 
     if !normalized_summary.is_empty() {
         let playlist_id = created_playlist_rating_key(&created)
@@ -997,6 +1026,21 @@ pub async fn create_playlist(
     }
 
     Ok(created)
+}
+
+#[tauri::command]
+pub async fn delete_playlist(
+    server_id: String,
+    playlist_id: String,
+    state: State<'_, PlexState>,
+) -> Result<(), String> {
+    let path = playlist_path(&playlist_id).map_err(display_error)?;
+    let empty_query = HashMap::new();
+    state
+        .server_request_response(&server_id, Method::DELETE, &path, &empty_query)
+        .await
+        .map_err(display_error)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2200,16 +2244,31 @@ fn audio_playlist_query() -> HashMap<String, String> {
     ])
 }
 
-fn create_audio_playlist_query(title: &str) -> Result<HashMap<String, String>> {
+fn create_audio_playlist_query(
+    server_id: &str,
+    title: &str,
+    seed_rating_key: Option<&str>,
+) -> Result<HashMap<String, String>> {
+    if !valid_plex_identifier(server_id) {
+        return Err(anyhow!("无效的 Plex 服务器标识"));
+    }
     let title = title.trim();
     if title.is_empty() || title.chars().count() > 255 || title.chars().any(char::is_control) {
         return Err(anyhow!("歌单名称必须为 1–255 个有效字符"));
     }
-    Ok(HashMap::from([
+    let mut query = HashMap::from([
         ("type".to_string(), "audio".to_string()),
         ("title".to_string(), title.to_string()),
         ("smart".to_string(), "0".to_string()),
-    ]))
+    ]);
+    if let Some(rating_key) = seed_rating_key {
+        query.insert(
+            "uri".to_string(),
+            playlist_item_uri(server_id, rating_key)?,
+        );
+        query.insert("includeExternalMedia".to_string(), "1".to_string());
+    }
+    Ok(query)
 }
 
 fn normalize_playlist_summary(summary: &str) -> Result<String> {
@@ -2279,11 +2338,22 @@ fn set_created_playlist_summary(value: &mut Value, summary: &str) {
     }
 }
 
-fn playlist_items_path(playlist_id: &str) -> Result<String> {
+fn reset_created_playlist_counts(value: &mut Value) {
+    if let Some(record) = created_playlist_record_mut(value) {
+        record.insert("leafCount".to_string(), Value::Number(0.into()));
+        record.insert("duration".to_string(), Value::Number(0.into()));
+    }
+}
+
+fn playlist_path(playlist_id: &str) -> Result<String> {
     if !valid_plex_identifier(playlist_id) {
         return Err(anyhow!("无效的 Plex 歌单标识"));
     }
-    Ok(format!("/playlists/{playlist_id}/items"))
+    Ok(format!("/playlists/{playlist_id}"))
+}
+
+fn playlist_items_path(playlist_id: &str) -> Result<String> {
+    Ok(format!("{}/items", playlist_path(playlist_id)?))
 }
 
 fn playlist_item_uri(server_id: &str, rating_key: &str) -> Result<String> {
@@ -2476,19 +2546,38 @@ mod tests {
     }
 
     #[test]
-    fn create_playlist_query_builds_a_blank_audio_playlist_and_validates_title() {
-        let query = create_audio_playlist_query("  通勤音乐  ").unwrap();
+    fn create_playlist_query_supports_a_seed_track_and_validates_input() {
+        let query = create_audio_playlist_query(
+            "server_A-1",
+            "  通勤音乐  ",
+            Some("track-42"),
+        )
+        .unwrap();
 
-        assert_eq!(query.len(), 3);
+        assert_eq!(query.len(), 5);
         assert_eq!(query.get("type").map(String::as_str), Some("audio"));
         assert_eq!(query.get("title").map(String::as_str), Some("通勤音乐"));
         assert_eq!(query.get("smart").map(String::as_str), Some("0"));
+        assert_eq!(
+            query.get("uri").map(String::as_str),
+            Some("server://server_A-1/com.plexapp.plugins.library/library/metadata/track-42")
+        );
+        assert_eq!(
+            query.get("includeExternalMedia").map(String::as_str),
+            Some("1")
+        );
+
+        let blank = create_audio_playlist_query("server_A-1", "空歌单", None).unwrap();
+        assert_eq!(blank.len(), 3);
+        assert!(!blank.contains_key("uri"));
 
         for invalid in ["", "   ", "含\n换行"] {
-            assert!(create_audio_playlist_query(invalid).is_err());
+            assert!(create_audio_playlist_query("server_A-1", invalid, None).is_err());
         }
-        assert!(create_audio_playlist_query("歌".repeat(256).as_str()).is_err());
-        assert!(create_audio_playlist_query("歌".repeat(255).as_str()).is_ok());
+        assert!(create_audio_playlist_query("server_A-1", "歌".repeat(256).as_str(), None).is_err());
+        assert!(create_audio_playlist_query("server_A-1", "歌".repeat(255).as_str(), None).is_ok());
+        assert!(create_audio_playlist_query("../server", "通勤音乐", None).is_err());
+        assert!(create_audio_playlist_query("server_A-1", "通勤音乐", Some("../track")).is_err());
     }
 
     #[test]
@@ -2514,10 +2603,17 @@ mod tests {
             response["MediaContainer"]["Metadata"][0]["summary"].as_str(),
             Some("城市移动时听")
         );
+        reset_created_playlist_counts(&mut response);
+        assert_eq!(response["MediaContainer"]["Metadata"][0]["leafCount"], 0);
+        assert_eq!(response["MediaContainer"]["Metadata"][0]["duration"], 0);
     }
 
     #[test]
     fn playlist_items_path_accepts_only_clean_identifiers() {
+        assert_eq!(
+            playlist_path("playlist_A-42").unwrap(),
+            "/playlists/playlist_A-42"
+        );
         assert_eq!(
             playlist_items_path("playlist_A-42").unwrap(),
             "/playlists/playlist_A-42/items"

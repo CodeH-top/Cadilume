@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { acknowledgeQuit, isDesktopRuntime } from "./api";
 import { plexMusicGateway } from "./musicGateway";
+import { usableDurationSeconds } from "./playerUi";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
 
 export type RepeatMode = "off" | "all" | "one";
@@ -1448,14 +1449,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     shuffleRef.current = normalized;
     setShuffleState(normalized);
     shuffleNavigationRef.current = createShuffleNavigationState(queueRef.current.length, indexRef.current);
-    schedulePersistedSession(true);
+    schedulePersistedSession(false);
   }, [schedulePersistedSession]);
 
   const setRepeat = useCallback((mode: RepeatMode) => {
     const normalized: RepeatMode = mode === "one" || mode === "all" ? mode : "off";
     repeatRef.current = normalized;
     setRepeatState(normalized);
-    schedulePersistedSession(true);
+    schedulePersistedSession(false);
   }, [schedulePersistedSession]);
 
   const setOutputSinkId = useCallback((sinkId: string): Promise<boolean> => {
@@ -1708,7 +1709,10 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         if (!isCurrent()) return;
         progressRef.current = audio.currentTime || 0;
         setProgress(audio.currentTime || 0);
-        setDuration(audio.duration || (queueRef.current[indexRef.current]?.duration || 0) / 1000);
+        setDuration(usableDurationSeconds(
+          audio.duration,
+          (queueRef.current[indexRef.current]?.duration || 0) / 1000,
+        ));
         schedulePersistedSession(false);
         const track = queueRef.current[indexRef.current];
         const activeServerId = queueServerIdRef.current;
