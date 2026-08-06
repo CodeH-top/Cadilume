@@ -56,8 +56,8 @@
 ## 4. 已落地借鉴（本轮）
 
 1. `prioritize_reachable_connections`：并行测试所有连接（5s 超时），校验
-   `/identity` 的 machineIdentifier 与客户端标识一致；可达非 relay > 可达 relay >
-   不可达，relay 仅兜底。
+   `/identity` 返回的 machineIdentifier 与服务器资源标识（`resource.clientIdentifier`）
+   一致；可达非 relay > 可达 relay > 不可达，relay 仅兜底。
 2. `server_request_response`：读请求全部失败且含 HTTP 500 时，先重新测试连接顺序再
    重试一轮，避免瞬时服务端抖动卡在坏连接上。
 3. 流代理：连接失败 `demote_connection`（移到末尾）；PMS 503/429 退避 300ms 再尝试

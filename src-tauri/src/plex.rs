@@ -472,7 +472,7 @@ impl PlexState {
                     .map(|cached| (cached.token.clone(), cached.connections.clone()));
                 if let Some((token, connections)) = reorder_input {
                     let reordered = self
-                        .prioritize_reachable_connections(&token, connections)
+                        .prioritize_reachable_connections(server_id, &token, connections)
                         .await;
                     if let Ok(mut servers) = self.servers.write() {
                         if let Some(cached) = servers.get_mut(server_id) {
@@ -497,6 +497,7 @@ impl PlexState {
 
     async fn prioritize_reachable_connections(
         &self,
+        expected_machine_identifier: &str,
         token: &str,
         connections: Vec<CachedConnection>,
     ) -> Vec<CachedConnection> {
@@ -508,6 +509,7 @@ impl PlexState {
         let client = self.protected_client.clone();
         let client_identifier = self.client_identifier.clone();
         let device_name = self.device_name();
+        let expected_identifier = expected_machine_identifier.to_string();
         let mut pending = Vec::new();
         let mut unparsable = Vec::new();
         for connection in connections {
@@ -523,7 +525,7 @@ impl PlexState {
                 apply_plex_identity_headers(client.get(endpoint), &client_identifier, &device_name)
                     .header("X-Plex-Token", token)
                     .timeout(Duration::from_secs(5));
-            let expected_identifier = client_identifier.clone();
+            let expected = expected_identifier.clone();
             tasks.spawn(async move {
                 let reachable = match request.send().await {
                     Ok(response) if response.status().is_success() => {
@@ -531,7 +533,7 @@ impl PlexState {
                             Ok(value) => value
                                 .pointer("/MediaContainer/machineIdentifier")
                                 .and_then(|identifier| identifier.as_str())
-                                .is_some_and(|identifier| identifier == expected_identifier),
+                                .is_some_and(|identifier| identifier == expected),
                             Err(_) => false,
                         }
                     }
@@ -1028,7 +1030,7 @@ pub async fn discover_servers(state: State<'_, PlexState>) -> Result<Vec<ServerS
             score
         });
         let connections = state
-            .prioritize_reachable_connections(&token, connections)
+            .prioritize_reachable_connections(&resource.client_identifier, &token, connections)
             .await;
         let Some(preferred) = connections.first() else {
             continue;

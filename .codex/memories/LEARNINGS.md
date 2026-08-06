@@ -15,9 +15,11 @@
   完整复刻应落在既有“原生播放内核”路线（Rust AudioEngine + Range/磁盘缓存）上，不作为
   本轮 WebView 修补范围。
 - Plexamp 连接层可借鉴且已落地：并行测试全部连接（非 relay 优先、relay 最后兜底），
-  用 `/identity` 的 machineIdentifier 校验连接归属（防错连）；读请求遇 HTTP 500 时
-  重新测试连接并重试一轮。对应 Cadilume 改动：`prioritize_reachable_connections`
-  （并行 + 身份校验 + relay 兜底）与 `server_request_response`（500 重测一轮）。
+  用 `/identity` 的 machineIdentifier 校验连接归属（防错连；期望值必须是 PMS 服务器
+  标识 `resource.clientIdentifier`，不是客户端自身标识，否则所有连接都会被判不可达）；
+  读请求遇 HTTP 500 时重新测试连接并重试一轮。对应 Cadilume 改动：
+  `prioritize_reachable_connections`（并行 + 身份校验 + relay 兜底）与
+  `server_request_response`（500 重测一轮）。
   对比分析文档：`docs/PLEXAMP_CACHE_CONNECTION_COMPARISON_2026-08-06.md`。
 
 ## 2026-08-06 — 高频切歌容错与日志证据
