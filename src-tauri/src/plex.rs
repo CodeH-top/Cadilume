@@ -396,7 +396,7 @@ impl PlexState {
         path: &str,
         query: &HashMap<String, String>,
     ) -> Result<Response> {
-        let server = self
+        let mut server = self
             .servers
             .read()
             .map_err(|_| anyhow!("服务器缓存读取失败"))?
@@ -404,85 +404,167 @@ impl PlexState {
             .cloned()
             .ok_or_else(|| anyhow!("找不到服务器，请重新刷新服务器列表"))?;
 
-        let mut last_error = None;
-        for (index, connection) in server.connections.iter().enumerate() {
-            let endpoint = match server_endpoint(&connection.uri, path) {
-                Ok(endpoint) => endpoint,
-                Err(error) => {
-                    last_error = Some(error.to_string());
-                    continue;
-                }
-            };
-            match self
-                .plex_headers(self.protected_client.request(method.clone(), endpoint))
-                .header("X-Plex-Token", &server.token)
-                .query(query)
-                .send()
-                .await
-            {
-                Ok(response) if response.status().is_success() => {
-                    if index > 0 {
-                        self.promote_connection(server_id, &connection.uri);
+        let mut reprioritized_after_500 = false;
+        loop {
+            let mut last_error = None;
+            let mut saw_http_500 = false;
+            for (index, connection) in server.connections.iter().enumerate() {
+                let endpoint = match server_endpoint(&connection.uri, path) {
+                    Ok(endpoint) => endpoint,
+                    Err(error) => {
+                        last_error = Some(error.to_string());
+                        continue;
                     }
-                    return Ok(response);
-                }
-                Ok(response)
-                    if !should_retry_server_connection(
-                        &method,
-                        ServerAttemptFailure::HttpResponse,
-                    ) =>
+                };
+                match self
+                    .plex_headers(self.protected_client.request(method.clone(), endpoint))
+                    .header("X-Plex-Token", &server.token)
+                    .query(query)
+                    .send()
+                    .await
                 {
-                    return ensure_success(response, "Plex 服务器写入失败").await;
+                    Ok(response) if response.status().is_success() => {
+                        if index > 0 {
+                            self.promote_connection(server_id, &connection.uri);
+                        }
+                        return Ok(response);
+                    }
+                    Ok(response)
+                        if !should_retry_server_connection(
+                            &method,
+                            ServerAttemptFailure::HttpResponse,
+                        ) =>
+                    {
+                        return ensure_success(response, "Plex 服务器写入失败").await;
+                    }
+                    Ok(response) => {
+                        if response.status() == StatusCode::INTERNAL_SERVER_ERROR {
+                            saw_http_500 = true;
+                        }
+                        last_error = Some(format!("HTTP {}", response.status()));
+                    }
+                    Err(error)
+                        if !should_retry_server_connection(
+                            &method,
+                            if error.is_connect() {
+                                ServerAttemptFailure::Connect
+                            } else {
+                                ServerAttemptFailure::OtherTransport
+                            },
+                        ) =>
+                    {
+                        return Err(error.into());
+                    }
+                    Err(error) => last_error = Some(error.to_string()),
                 }
-                Ok(response) => {
-                    last_error = Some(format!("HTTP {}", response.status()));
-                }
-                Err(error)
-                    if !should_retry_server_connection(
-                        &method,
-                        if error.is_connect() {
-                            ServerAttemptFailure::Connect
-                        } else {
-                            ServerAttemptFailure::OtherTransport
-                        },
-                    ) =>
-                {
-                    return Err(error.into());
-                }
-                Err(error) => last_error = Some(error.to_string()),
             }
-        }
 
-        Err(anyhow!(
-            "无法连接 Plex 服务器：{}",
-            last_error.unwrap_or_else(|| "没有可用连接".to_string())
-        ))
+            // Plexamp re-runs connection testing after a server 500 and retries
+            // once; do the same here so a transient server-side hiccup does not
+            // permanently stick to a stale preferred connection.
+            if saw_http_500 && !reprioritized_after_500 {
+                reprioritized_after_500 = true;
+                let reorder_input = self
+                    .servers
+                    .read()
+                    .map_err(|_| anyhow!("服务器缓存读取失败"))?
+                    .get(server_id)
+                    .map(|cached| (cached.token.clone(), cached.connections.clone()));
+                if let Some((token, connections)) = reorder_input {
+                    let reordered = self
+                        .prioritize_reachable_connections(&token, connections)
+                        .await;
+                    if let Ok(mut servers) = self.servers.write() {
+                        if let Some(cached) = servers.get_mut(server_id) {
+                            cached.connections = reordered;
+                        }
+                    }
+                    if let Ok(updated) = self.servers.read() {
+                        if let Some(refreshed) = updated.get(server_id) {
+                            server = refreshed.clone();
+                        }
+                    }
+                }
+                continue;
+            }
+
+            return Err(anyhow!(
+                "无法连接 Plex 服务器：{}",
+                last_error.unwrap_or_else(|| "没有可用连接".to_string())
+            ));
+        }
     }
 
     async fn prioritize_reachable_connections(
         &self,
         token: &str,
-        mut connections: Vec<CachedConnection>,
+        connections: Vec<CachedConnection>,
     ) -> Vec<CachedConnection> {
-        for index in 0..connections.len() {
-            let Ok(endpoint) = server_endpoint(&connections[index].uri, "/identity") else {
-                continue;
-            };
-            let reachable = self
-                .plex_headers(self.protected_client.get(endpoint))
-                .header("X-Plex-Token", token)
-                .timeout(Duration::from_secs(3))
-                .send()
-                .await
-                .map(|response| response.status().is_success())
-                .unwrap_or(false);
-            if reachable {
-                connections.rotate_left(index);
-                break;
+        // Plexamp-style connection ranking: test every non-relay candidate in
+        // parallel, verify the server identity (`machineIdentifier` must match
+        // this client's server identifier), keep relay as the last-ditch
+        // option, and keep unreachable connections at the end so a later
+        // request can still retry them after a transient outage.
+        let client = self.protected_client.clone();
+        let client_identifier = self.client_identifier.clone();
+        let device_name = self.device_name();
+        let mut pending = Vec::new();
+        let mut unparsable = Vec::new();
+        for connection in connections {
+            match server_endpoint(&connection.uri, "/identity") {
+                Ok(endpoint) => pending.push((connection, endpoint)),
+                Err(_) => unparsable.push(connection),
             }
         }
 
-        connections
+        let mut tasks = tokio::task::JoinSet::new();
+        for (index, (connection, endpoint)) in pending.into_iter().enumerate() {
+            let request =
+                apply_plex_identity_headers(client.get(endpoint), &client_identifier, &device_name)
+                    .header("X-Plex-Token", token)
+                    .timeout(Duration::from_secs(5));
+            let expected_identifier = client_identifier.clone();
+            tasks.spawn(async move {
+                let reachable = match request.send().await {
+                    Ok(response) if response.status().is_success() => {
+                        match response.json::<Value>().await {
+                            Ok(value) => value
+                                .pointer("/MediaContainer/machineIdentifier")
+                                .and_then(|identifier| identifier.as_str())
+                                .is_some_and(|identifier| identifier == expected_identifier),
+                            Err(_) => false,
+                        }
+                    }
+                    Ok(_) | Err(_) => false,
+                };
+                (index, connection, reachable)
+            });
+        }
+
+        let mut results = Vec::with_capacity(tasks.len());
+        while let Some(result) = tasks.join_next().await {
+            if let Ok(item) = result {
+                results.push(item);
+            }
+        }
+        results.sort_by_key(|(index, _, _)| *index);
+
+        let mut reachable = Vec::new();
+        let mut reachable_relays = Vec::new();
+        let mut unreachable = Vec::new();
+        for (_, connection, ok) in results {
+            if ok && connection.relay {
+                reachable_relays.push(connection);
+            } else if ok {
+                reachable.push(connection);
+            } else {
+                unreachable.push(connection);
+            }
+        }
+        reachable.extend(reachable_relays);
+        reachable.extend(unreachable);
+        reachable.extend(unparsable);
+        reachable
     }
 
     pub(crate) fn promote_connection(&self, server_id: &str, uri: &str) {
@@ -496,6 +578,21 @@ impl PlexState {
             return;
         };
         server.connections.rotate_left(index);
+    }
+
+    /// Move an unreachable connection to the end so later stream requests try
+    /// the reachable connection first instead of failing against this one.
+    pub(crate) fn demote_connection(&self, server_id: &str, uri: &str) {
+        let Ok(mut servers) = self.servers.write() else {
+            return;
+        };
+        let Some(server) = servers.get_mut(server_id) else {
+            return;
+        };
+        let Some(index) = server.connections.iter().position(|item| item.uri == uri) else {
+            return;
+        };
+        demote_cached_connection(&mut server.connections, index);
     }
 
     pub(crate) fn stream_server(&self, server_id: &str) -> Result<StreamServerSnapshot> {
@@ -525,6 +622,10 @@ impl PlexState {
             .map_err(|_| anyhow!("图片缓存读取锁定失败"))?;
         read_artwork_cache(&self.cache_dir, cache_key)?.ok_or_else(|| anyhow!("封面缓存已失效"))
     }
+}
+
+fn demote_cached_connection(connections: &mut Vec<CachedConnection>, index: usize) {
+    connections.rotate_left(index + 1);
 }
 
 fn apply_plex_identity_headers(
@@ -2600,6 +2701,40 @@ mod tests {
         assert_eq!(query.get("type").map(String::as_str), Some("15"));
         assert_eq!(query.get("playlistType").map(String::as_str), Some("audio"));
         assert!(!query.contains_key("smart"));
+    }
+
+    #[test]
+    fn demote_cached_connection_moves_failed_connection_to_the_end() {
+        let mut connections = vec![
+            CachedConnection {
+                uri: "https://local.test".into(),
+                local: true,
+                relay: false,
+                secure: true,
+            },
+            CachedConnection {
+                uri: "https://remote-a.test".into(),
+                local: false,
+                relay: false,
+                secure: true,
+            },
+            CachedConnection {
+                uri: "https://remote-b.test".into(),
+                local: false,
+                relay: false,
+                secure: true,
+            },
+        ];
+
+        demote_cached_connection(&mut connections, 0);
+        assert_eq!(connections[0].uri, "https://remote-a.test");
+        assert_eq!(connections[1].uri, "https://remote-b.test");
+        assert_eq!(connections[2].uri, "https://local.test");
+
+        demote_cached_connection(&mut connections, 1);
+        assert_eq!(connections[0].uri, "https://local.test");
+        assert_eq!(connections[1].uri, "https://remote-a.test");
+        assert_eq!(connections[2].uri, "https://remote-b.test");
     }
 
     #[test]

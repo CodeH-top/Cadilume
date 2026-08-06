@@ -617,31 +617,42 @@ async fn forward_to_plex(
                         .and_then(|value| value.to_str().ok())
                         .unwrap_or("(无 Content-Type)")
                         .to_string();
+                    let status = response.status();
                     eprintln!(
                         "[播放] 上游失败：质量={} 连接={} 端点={} HTTP={} Content-Type={}",
                         effective_quality,
                         connection_kind,
                         endpoint_kind,
-                        response.status().as_u16(),
+                        status.as_u16(),
                         content_type,
                     );
                     attempts.push(UpstreamAttempt {
                         quality: effective_quality.clone(),
                         connection_kind,
                         endpoint_kind,
-                        status: Some(response.status().as_u16()),
+                        status: Some(status.as_u16()),
                         content_type: response
                             .headers()
                             .get(CONTENT_TYPE)
                             .and_then(|value| value.to_str().ok())
                             .map(str::to_owned),
                     });
+                    // PMS rate-limits bursty probing (typically `bytes=0-1`
+                    // followed by a full-range request) with 503/429. A short
+                    // backoff before the next connection/endpoint lets the
+                    // server recover instead of failing the whole WebView load.
+                    if status == StatusCode::SERVICE_UNAVAILABLE
+                        || status == StatusCode::TOO_MANY_REQUESTS
+                    {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
                 }
                 Ok(Err(_)) | Err(_) => {
                     eprintln!(
                         "[播放] 上游连接失败：质量={} 连接={} 端点={}",
                         effective_quality, connection_kind, endpoint_kind,
                     );
+                    plex.demote_connection(&target.server_id, &connection.uri);
                     attempts.push(UpstreamAttempt {
                         quality: effective_quality.clone(),
                         connection_kind,

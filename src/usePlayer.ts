@@ -18,6 +18,11 @@ export const PLAYBACK_SESSION_MAX_QUEUE = 500;
 const PLAYBACK_SESSION_WRITE_THROTTLE_MS = 5_000;
 const PLAYBACK_CLOCK_PUBLISH_INTERVAL_MS = 50;
 export const PLAYBACK_START_TIMEOUT_MS = 12_000;
+/** Keep the transport button visibly busy during quick prebuffered switches. */
+const MIN_LOADING_VISIBLE_MS = 250;
+/** Reuse an in-flight stream ticket briefly so bursty track switching does not
+ *  issue a second PMS connection for the same track/quality. */
+const STREAM_URL_INFLIGHT_CACHE_MS = 5_000;
 
 const STREAM_QUALITY_VALUES: readonly StreamQuality[] = ["auto", "original", "320", "256", "192"];
 
@@ -1041,6 +1046,10 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const playbackFailureHandlerRef = useRef<(diagnostic: string, source: string) => boolean>(() => false);
   const activePlaybackSourceRef = useRef<{ audio: RoutableAudioElement; requestId: number; source: string } | undefined>(undefined);
   const playbackLoadingRef = useRef(false);
+  const playbackLoadingStartedAtRef = useRef(0);
+  const playbackLoadingClearTimerRef = useRef<number | undefined>(undefined);
+  const streamUrlInflightRef = useRef(new Map<string, Promise<string>>());
+  const streamUrlInflightAtRef = useRef(new Map<string, number>());
   const loadRequestRef = useRef(0);
   const prebufferRequestRef = useRef(0);
   const outputSinkRequestRef = useRef(0);
@@ -1086,8 +1095,51 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   outputSinkIdRef.current = outputSinkId;
 
   const setPlaybackLoading = useCallback((value: boolean) => {
-    playbackLoadingRef.current = value;
-    setLoadingState(value);
+    const pending = playbackLoadingClearTimerRef.current;
+    if (pending !== undefined) {
+      window.clearTimeout(pending);
+      playbackLoadingClearTimerRef.current = undefined;
+    }
+    if (value) {
+      playbackLoadingStartedAtRef.current = Date.now();
+      playbackLoadingRef.current = true;
+      setLoadingState(true);
+      return;
+    }
+    const elapsed = Date.now() - playbackLoadingStartedAtRef.current;
+    const remaining = MIN_LOADING_VISIBLE_MS - elapsed;
+    if (remaining > 0) {
+      playbackLoadingClearTimerRef.current = window.setTimeout(() => {
+        playbackLoadingClearTimerRef.current = undefined;
+        if (!playbackLoadingRef.current) return;
+        playbackLoadingRef.current = false;
+        setLoadingState(false);
+      }, remaining);
+      return;
+    }
+    playbackLoadingRef.current = false;
+    setLoadingState(false);
+  }, []);
+
+  const requestStreamUrl = useCallback(async (serverId: string, track: PlexItem, quality: StreamQuality): Promise<string> => {
+    const key = `${serverId}:${track.ratingKey}:${quality}`;
+    const now = Date.now();
+    const cachedAt = streamUrlInflightAtRef.current.get(key);
+    const cached = streamUrlInflightRef.current.get(key);
+    if (cached && cachedAt !== undefined && now - cachedAt < STREAM_URL_INFLIGHT_CACHE_MS) {
+      return cached;
+    }
+    const promise = plexMusicGateway.playback.streamUrl(serverId, track, quality);
+    streamUrlInflightRef.current.set(key, promise);
+    streamUrlInflightAtRef.current.set(key, now);
+    promise.then(
+      () => undefined,
+      () => {
+        streamUrlInflightRef.current.delete(key);
+        streamUrlInflightAtRef.current.delete(key);
+      },
+    );
+    return promise;
   }, []);
 
   const current = currentIndex >= 0 ? queue[currentIndex] : undefined;
@@ -1214,7 +1266,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       audio.pause();
       if (!autoplay) setPlaying(false);
 
-      const url = await plexMusicGateway.playback.streamUrl(serverId, track, quality);
+      const url = await requestStreamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       playbackLog("info", `流地址已取得：index=${index} 质量=${quality}（仅本机回环票据）`);
       activePlaybackSourceRef.current = { audio, requestId, source: url };
@@ -1242,7 +1294,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         setPlaybackFailure({ message, technicalDetails: diagnostic, attemptedQualities: [quality] });
       }
     }
-  }, [quality, schedulePersistedSession, serverId, setPlaybackLoading]);
+  }, [quality, requestStreamUrl, schedulePersistedSession, serverId, setPlaybackLoading]);
 
   const retryCurrent = useCallback(() => {
     const retry = createPlaybackRetryRequest(
@@ -1670,7 +1722,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           && fallbackState.activeQuality === fallbackQuality
           && fallbackState.pendingQuality === undefined;
       };
-      void plexMusicGateway.playback.streamUrl(activeServerId, track, fallbackQuality)
+      void requestStreamUrl(activeServerId, track, fallbackQuality)
         .then(async (url) => {
           if (!isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)) return;
           if (playbackFallbackRef.current.pendingQuality !== fallbackQuality) return;
@@ -1822,6 +1874,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
     return () => {
       disposed = true;
+      const pendingLoadingClear = playbackLoadingClearTimerRef.current;
+      if (pendingLoadingClear !== undefined) {
+        window.clearTimeout(pendingLoadingClear);
+        playbackLoadingClearTimerRef.current = undefined;
+      }
       loadRequestRef.current += 1;
       prebufferRequestRef.current += 1;
       outputSinkRequestRef.current += 1;
@@ -1837,7 +1894,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       if (audioPoolRef.current === pool) audioPoolRef.current = null;
       if (audioRef.current && pool.elements.includes(audioRef.current as RoutableAudioElement)) audioRef.current = null;
     };
-  }, [flushPlaybackSession, schedulePersistedSession, setPlaybackLoading]);
+  }, [flushPlaybackSession, requestStreamUrl, schedulePersistedSession, setPlaybackLoading]);
 
   useEffect(() => {
     endedRef.current = () => { void advance(true); };
@@ -1910,7 +1967,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     if (pool.hasPrepared(preparation)) return;
     pool.cancelPrepared();
 
-    void plexMusicGateway.playback.streamUrl(playbackServerId, nextTrack, quality)
+    void requestStreamUrl(playbackServerId, nextTrack, quality)
       .then((url) => {
         if (
           prebufferRequestRef.current !== requestId
@@ -1927,7 +1984,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     return () => {
       if (prebufferRequestRef.current === requestId) prebufferRequestRef.current += 1;
     };
-  }, [currentIndex, prebufferNext, quality, queue, repeat, serverId, shuffle]);
+  }, [currentIndex, prebufferNext, quality, queue, repeat, requestStreamUrl, serverId, shuffle]);
 
   useEffect(() => {
     if (isDesktopRuntime() || !playing || !current) return;

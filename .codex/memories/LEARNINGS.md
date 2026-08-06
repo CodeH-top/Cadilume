@@ -1,5 +1,37 @@
 # LEARNINGS
 
+## 2026-08-06 — Plexamp 缓存与高频切歌参考（clean-room 结论）
+
+- Plexamp（Electron + React Native Web + 私有 BASS 原生音频引擎）有明确的多级缓存策略：
+  - 播放队列 ahead 预缓存：Wi-Fi 默认预缓存接下来 15 首、蜂窝 5 首，按 `source-key`
+    去重，逐首 `PrecacheTrack`，失败只记录不阻塞播放；预缓存同时加载 loudness/palette
+    元数据。
+  - 磁盘缓存上限（Node 默认 256MB）与预缓存限速（Node 默认 5 Mbps），设置页可调并可
+    “Delete Caches”；还有 `preferDownloadedMedia`（优先已下载媒体）。
+  - 音频实际由原生引擎（electron-media-service）输出并落盘，因此“切到已缓存歌曲”不依赖
+    网络往返；`Journey.load(track,next)` 是 Sonic 跨曲预加载，不是通用 next 缓存。
+- Cadilume 的 WebView/HTMLAudio 架构无法直接复刻该磁盘缓存（音频由 WebKit 拉取、不经
+  Rust 代理落盘）；当前等价物是双 `HTMLAudioElement` 预缓冲下一首 + streamUrl 在途去重。
+  完整复刻应落在既有“原生播放内核”路线（Rust AudioEngine + Range/磁盘缓存）上，不作为
+  本轮 WebView 修补范围。
+- Plexamp 连接层可借鉴且已落地：并行测试全部连接（非 relay 优先、relay 最后兜底），
+  用 `/identity` 的 machineIdentifier 校验连接归属（防错连）；读请求遇 HTTP 500 时
+  重新测试连接并重试一轮。对应 Cadilume 改动：`prioritize_reachable_connections`
+  （并行 + 身份校验 + relay 兜底）与 `server_request_response`（500 重测一轮）。
+  对比分析文档：`docs/PLEXAMP_CACHE_CONNECTION_COMPARISON_2026-08-06.md`。
+
+## 2026-08-06 — 高频切歌容错与日志证据
+
+- 开发态日志证实：PMS 在快速切歌时会对 `Range: bytes=0-1` 探测返回
+  `HTTP 503 text/html`（完整 range 请求随后成功），同一首歌会成对发行流票据，且 local
+  连接每次先失败再切 remote。这些都是切歌 error4/卡住的候选根因，已做三层容错：
+  - 前端 `setPlaybackLoading` 保证切歌 loading 至少可见 250ms（播放按钮转圈不再一闪而过）；
+  - `requestStreamUrl` 对同一 server/track/quality 的 streamUrl 在途 promise 去重缓存
+    5 秒，失败即删除，避免 prebuffer 与 loadAt 重复发行票据；
+  - 代理对 503/429 退避 300ms 再尝试下一连接/端点；连接失败时 `demote_connection` 把
+    该连接移到末尾，后续请求优先可达连接。
+- 待真实复测：高频随机切歌连续 20+ 次不再出现 error4/卡住，且切歌时按钮有转圈反馈。
+
 ## 2026-08-06 — “歌单可删除”指删除歌单内的歌曲；用 Popconfirm 二次确认
 
 - 用户澄清：普通歌单“可以删除”指的是从歌单中移除歌曲，不是删除整个歌单；右侧栏不应出现
