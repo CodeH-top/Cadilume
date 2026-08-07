@@ -1253,6 +1253,25 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const nextTrack = nextIndex == null ? undefined : tracks[nextIndex];
     if (!nextTrack || !serverId) return;
     const requestId = ++precacheRequestRef.current;
+    if (!shuffle && nextIndex != null) {
+      // 顺序模式额外预热第二首 ahead（后台限速，不参与 gapless 预排），
+      // 让切歌缓存再往深一层，Plexamp 风格的 2–3 首 ahead 预取。
+      const secondIndex = getSequentialNextIndex(
+        nextIndex,
+        tracks.length,
+        repeat === "one" ? "all" : repeat,
+      );
+      const secondTrack =
+        secondIndex == null || secondIndex === nextIndex ? undefined : tracks[secondIndex];
+      if (secondTrack) {
+        void requestStreamUrl(serverId, secondTrack, quality)
+          .then((url) => {
+            if (precacheRequestRef.current !== requestId) return undefined;
+            return nativeAudioPrecache(url, secondTrack.ratingKey, true);
+          })
+          .catch(() => undefined);
+      }
+    }
     void requestStreamUrl(serverId, nextTrack, quality)
       .then((url) => {
         if (precacheRequestRef.current !== requestId) return undefined;

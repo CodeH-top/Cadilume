@@ -22,6 +22,10 @@ const MIN_PROGRESSIVE_PRELOAD_BYTES: u64 = 256 * 1024;
 /// Disk cache cap for native audio files (Plexamp desktop default 256MB;
 /// Cadilume keeps 512MB to cover FLAC originals).
 const AUDIO_CACHE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
+/// Background prefetch bandwidth cap (Plexamp desktop default ~5 Mbps).
+/// Only applies to far-ahead cache warming, never to the immediate next
+/// track (gapless handoff must not be delayed by throttling).
+const PRECACHE_RATE_LIMIT_BYTES_PER_SEC: u64 = 5 * 1024 * 1024 / 8;
 
 fn audio_cache_dir(cache_root: &Path) -> PathBuf {
     cache_root.join("downloads")
@@ -228,6 +232,7 @@ async fn download_progressive(
     part_path: &Path,
     final_path: &Path,
     progress: &DownloadProgress,
+    rate_limit_bytes_per_sec: Option<u64>,
 ) -> Result<u64, String> {
     let response = client
         .get(url)
@@ -240,6 +245,7 @@ async fn download_progressive(
     let expected_total = response.content_length();
     let mut file = std::fs::File::create(part_path).map_err(|e| format!("创建缓存文件失败: {e}"))?;
     let mut stream = response.bytes_stream();
+    let started_at = std::time::Instant::now();
     let mut total = 0u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("下载读取失败: {e}"))?;
@@ -247,6 +253,13 @@ async fn download_progressive(
         total += chunk.len() as u64;
         progress.downloaded.store(total, Ordering::SeqCst);
         progress.wake();
+        if let Some(limit) = rate_limit_bytes_per_sec {
+            let expected_seconds = total as f64 / limit as f64;
+            let elapsed = started_at.elapsed().as_secs_f64();
+            if expected_seconds > elapsed {
+                tokio::time::sleep(Duration::from_secs_f64(expected_seconds - elapsed)).await;
+            }
+        }
     }
     if let Some(expected) = expected_total {
         if total != expected {
@@ -729,6 +742,7 @@ impl NativeAudioEngine {
                 &part_for_task,
                 &final_for_task,
                 &progress_task,
+                None,
             )
             .await
             {
@@ -791,7 +805,12 @@ impl NativeAudioEngine {
     /// next switch can start from the local file (reduces cross-track gap).
     /// Completes only when the download is fully committed, so callers can
     /// follow it with `queue_next_source` for a gapless handoff.
-    pub async fn precache(&self, source: &str, cache_key: Option<String>) -> Result<(), String> {
+    pub async fn precache(
+        &self,
+        source: &str,
+        cache_key: Option<String>,
+        rate_limit_bytes_per_sec: Option<u64>,
+    ) -> Result<(), String> {
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return Ok(());
         }
@@ -816,6 +835,7 @@ impl NativeAudioEngine {
                 &part_for_task,
                 &final_for_task,
                 &progress_task,
+                rate_limit_bytes_per_sec,
             )
             .await;
             if let Err(error) = &outcome {
@@ -1353,9 +1373,15 @@ pub async fn native_audio_precache(
     state: tauri::State<'_, NativeAudioEngineSlot>,
     source: String,
     cache_key: Option<String>,
+    rate_limit: Option<bool>,
 ) -> Result<(), String> {
     let engine = state.ensure(&app)?;
-    engine.precache(&source, cache_key).await
+    let limit = if rate_limit.unwrap_or(false) {
+        Some(PRECACHE_RATE_LIMIT_BYTES_PER_SEC)
+    } else {
+        None
+    };
+    engine.precache(&source, cache_key, limit).await
 }
 
 #[tauri::command]
@@ -1567,6 +1593,34 @@ mod tests {
         std::fs::write(path, wav).unwrap();
     }
 
+    fn write_test_wav_of_seconds(path: &PathBuf, seconds: u32) {
+        let sample_rate = 22_050u32;
+        let samples = (sample_rate * seconds) as usize;
+        let mut pcm = Vec::with_capacity(samples * 2);
+        for i in 0..samples {
+            let t = i as f32 / sample_rate as f32;
+            let v = (t * std::f32::consts::TAU * 440.0).sin() * 0.2;
+            let sample = (v * i16::MAX as f32) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+        let data_len = pcm.len() as u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        std::fs::write(path, wav).unwrap();
+    }
+
     #[tokio::test]
     async fn play_seek_pause_local_wav() {
         let wav = std::env::temp_dir().join("cadilume-rodio-test.wav");
@@ -1652,6 +1706,52 @@ mod tests {
         let cached = cache_root.join("downloads/sample-cache-test.audio");
         assert!(cached.exists(), "缓存文件应落盘");
         engine.player().clear();
+    }
+
+    #[tokio::test]
+    async fn precache_honors_rate_limit_and_commits_complete_file() {
+        let wav = std::env::temp_dir().join("cadilume-rate-limit.wav");
+        write_test_wav_of_seconds(&wav, 1);
+        let data = std::fs::read(&wav).unwrap();
+        let data_for_server = data.clone();
+        let app = axum::Router::new().route(
+            "/rate.wav",
+            axum::routing::get(|| async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "audio/wav")],
+                    data_for_server,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let url = format!("http://127.0.0.1:{}/rate.wav", addr.port());
+        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-rate");
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        engine.player().set_volume(0.0);
+
+        // 约 44KB 文件、限制 22KB/s：理想耗时约 2 秒，容忍 1.2 秒以上。
+        let started = std::time::Instant::now();
+        engine
+            .precache(&url, Some("rate-limit-test".into()), Some(22 * 1024))
+            .await
+            .expect("限速预取应完整完成");
+        let elapsed = started.elapsed().as_secs_f64();
+        assert!(
+            elapsed >= 1.2,
+            "限速预取应至少耗时 1.2 秒，实际 {elapsed}"
+        );
+        let cached = cache_root.join("downloads/rate-limit-test.audio");
+        assert_eq!(
+            std::fs::metadata(&cached).map(|metadata| metadata.len()).unwrap_or(0),
+            data.len() as u64,
+            "限速预取文件应完整落盘"
+        );
+        let _ = std::fs::remove_file(&wav);
+        let _ = std::fs::remove_dir_all(&cache_root);
     }
 
     fn queue_track(key: &str) -> QueueTrack {
@@ -2085,7 +2185,7 @@ mod tests {
         // 先串行预缓存 B（引擎每次新建下载客户端、单条活跃流），
         // 避免真实服务器（尤其免费/共享账号）的单流限制打断并发下载。
         engine
-            .precache(&stream_url(&track_b.4), Some(track_b.2.clone()))
+            .precache(&stream_url(&track_b.4), Some(track_b.2.clone()), None)
             .await
             .expect("真实 PMS 曲目 B 应完整预缓存");
         engine
@@ -2230,7 +2330,7 @@ mod tests {
         // 串行预缓存全部选中曲目（单条活跃流，避免服务器单流限制）。
         for (_, _, rating_key, _title, part_key) in &selected {
             engine
-                .precache(&stream_url(part_key), Some(rating_key.clone()))
+                .precache(&stream_url(part_key), Some(rating_key.clone()), None)
                 .await
                 .expect("高频切换预缓存应完整");
         }

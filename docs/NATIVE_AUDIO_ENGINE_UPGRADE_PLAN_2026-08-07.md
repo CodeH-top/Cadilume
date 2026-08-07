@@ -22,6 +22,9 @@
 - Phase 2 ✅ 完成：磁盘缓存 512MB LRU（按 mtime 淘汰、`.part` 优先清理、命中刷新），
   设置页展示并清理封面+音频缓存。
 - Phase 3 ✅ 完成：边下边播（渐进 Reader + 后台下载，头部 256KB 就绪即开播）。
+- Phase 3 增强 ✅：顺序模式下 prebuffer 额外预热第二首 ahead（2 首 ahead，
+  符合 Plexamp“建议 2–3 首”）；远前置缓存限速 5 Mbps（`PRECACHE_RATE_LIMIT_`
+  `BYTES_PER_SEC`），即时下一首保持全速下载以保障 gapless 预排不被拖慢。
 - Phase 4 ✅ 完成：ahead 预取下一首到缓存；严格 gapless 已实现——预取完成后把
   下一首解码器直接挂入 rodio 顺序队列（`HandoffMarker` 在样本级交接时翻转），
   当前曲目结束即无间隙 PCM 衔接；MP3 编码延迟由 rodio 队列的帧对齐处理，
