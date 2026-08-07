@@ -132,6 +132,7 @@ fn enforce_audio_cache_limit(cache_root: &Path) {
 /// progressive reader (pull-driven, kithara-stream style).
 struct DownloadProgress {
     downloaded: AtomicU64,
+    expected_len: AtomicU64,
     failed: AtomicBool,
     finished: AtomicBool,
     lock: Mutex<()>,
@@ -142,6 +143,7 @@ impl DownloadProgress {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             downloaded: AtomicU64::new(0),
+            expected_len: AtomicU64::new(0),
             failed: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             lock: Mutex::new(()),
@@ -224,9 +226,9 @@ impl Seek for ProgressiveFile {
     }
 }
 
-/// Stream the loopback media URL into `part_path`, publishing progress, then
-/// atomically promote the completed file to `final_path`.
-async fn download_progressive(
+/// One download attempt: stream the loopback media URL into `part_path`,
+/// publishing progress, then atomically promote the completed file.
+async fn download_progressive_once(
     client: &reqwest::Client,
     url: &str,
     part_path: &Path,
@@ -243,6 +245,9 @@ async fn download_progressive(
         return Err(format!("下载返回 HTTP {}", response.status()));
     }
     let expected_total = response.content_length();
+    progress
+        .expected_len
+        .store(expected_total.unwrap_or(0), Ordering::SeqCst);
     let mut file = std::fs::File::create(part_path).map_err(|e| format!("创建缓存文件失败: {e}"))?;
     let mut stream = response.bytes_stream();
     let started_at = std::time::Instant::now();
@@ -263,8 +268,6 @@ async fn download_progressive(
     }
     if let Some(expected) = expected_total {
         if total != expected {
-            progress.failed.store(true, Ordering::SeqCst);
-            progress.wake();
             let _ = std::fs::remove_file(part_path);
             return Err(format!(
                 "下载不完整：期望 {expected} 字节，实际 {total} 字节"
@@ -277,6 +280,50 @@ async fn download_progressive(
     progress.finished.store(true, Ordering::SeqCst);
     progress.wake();
     Ok(total)
+}
+
+/// Download with bounded retries for transient network/stream failures.
+/// `progress` state is reset before each attempt so a partial failure can
+/// never be mistaken for a usable head by the progressive reader.
+async fn download_progressive(
+    client: &reqwest::Client,
+    url: &str,
+    part_path: &Path,
+    final_path: &Path,
+    progress: &DownloadProgress,
+    rate_limit_bytes_per_sec: Option<u64>,
+    max_attempts: u32,
+) -> Result<u64, String> {
+    let attempts = max_attempts.max(1);
+    let mut last_error = None::<String>;
+    for attempt in 1..=attempts {
+        progress.downloaded.store(0, Ordering::SeqCst);
+        progress.finished.store(false, Ordering::SeqCst);
+        progress.failed.store(false, Ordering::SeqCst);
+        progress.wake();
+        match download_progressive_once(
+            client,
+            url,
+            part_path,
+            final_path,
+            progress,
+            rate_limit_bytes_per_sec,
+        )
+        .await
+        {
+            Ok(total) => return Ok(total),
+            Err(error) => {
+                last_error = Some(error.clone());
+                if attempt < attempts {
+                    eprintln!("[原生] 下载失败，第 {attempt} 次重试：{error}");
+                    tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
+                }
+            }
+        }
+    }
+    progress.failed.store(true, Ordering::SeqCst);
+    progress.wake();
+    Err(last_error.unwrap_or_else(|| "下载失败".to_string()))
 }
 
 /// Native playback engine (rodio + cpal) owned by the Tauri app.
@@ -670,7 +717,14 @@ impl NativeAudioEngine {
     /// Load a local media file and start playing it.
     pub fn load_and_play(&self, path: &str) -> Result<usize, String> {
         let file = std::fs::File::open(path).map_err(|e| format!("打开媒体文件失败: {e}"))?;
-        let decoder = Decoder::new(file).map_err(|e| format!("媒体解码失败: {e}"))?;
+        let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        // 必须提供 byte_len（同时开启 seekable）：rodio 默认解码器不能向后
+        // seek，且 MP3/FLAC 的时长计算依赖流长度。
+        let decoder = Decoder::builder()
+            .with_data(file)
+            .with_byte_len(len)
+            .build()
+            .map_err(|e| format!("媒体解码失败: {e}"))?;
         let total = decoder.total_duration().map(|d| d.as_secs_f64());
         let metadata = self
             .metadata
@@ -753,6 +807,7 @@ impl NativeAudioEngine {
                 &final_for_task,
                 &progress_task,
                 None,
+                3,
             )
             .await
             {
@@ -784,7 +839,12 @@ impl NativeAudioEngine {
             file,
             progress: Arc::clone(&progress),
         };
-        let decoder = Decoder::new(reader).map_err(|e| format!("媒体解码失败: {e}"))?;
+        let expected_len = progress.expected_len.load(Ordering::SeqCst);
+        let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
+        if expected_len > 0 {
+            builder = builder.with_byte_len(expected_len);
+        }
+        let decoder = builder.build().map_err(|e| format!("媒体解码失败: {e}"))?;
         let total = decoder.total_duration().map(|d| d.as_secs_f64());
         if let Ok(mut current_source) = self.current_source.lock() {
             *current_source = Some(CurrentSource {
@@ -850,6 +910,7 @@ impl NativeAudioEngine {
                 &final_for_task,
                 &progress_task,
                 rate_limit_bytes_per_sec,
+                3,
             )
             .await;
             if let Err(error) = &outcome {
@@ -910,7 +971,12 @@ impl NativeAudioEngine {
         }
         let file =
             std::fs::File::open(&final_path).map_err(|e| format!("打开预排缓存失败: {e}"))?;
-        let decoder = Decoder::new(file).map_err(|e| format!("预排解码失败: {e}"))?;
+        let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        let decoder = Decoder::builder()
+            .with_data(file)
+            .with_byte_len(len)
+            .build()
+            .map_err(|e| format!("预排解码失败: {e}"))?;
         let total = decoder.total_duration().map(|d| d.as_secs_f64());
         let started = Arc::new(AtomicBool::new(false));
         let marker = HandoffMarker {
@@ -1656,6 +1722,15 @@ mod tests {
         let position = player.get_pos().as_secs_f64();
         assert!(position >= 1.0, "seek 后进度应跳到约 1.5 秒，实际 {position}");
 
+        // 向后 seek：rodio 默认解码器（无 byte_len）不支持，必须验证回跳生效。
+        player.try_seek(Duration::from_secs_f64(0.5)).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let position = player.get_pos().as_secs_f64();
+        assert!(
+            position < 0.9,
+            "向后 seek 后进度应回到约 0.5 秒，实际 {position}"
+        );
+
         player.pause();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(player.is_paused(), "暂停后应处于暂停");
@@ -1681,6 +1756,14 @@ mod tests {
         assert!(position > 0.5, "FLAC 播放进度应前进，实际 {position}");
         let duration = *engine.duration_seconds.lock().unwrap();
         assert!(duration.unwrap_or(0.0) > 60.0, "FLAC 时长应约为 122 秒");
+        // 向后 seek 真实 FLAC。
+        player.try_seek(Duration::from_secs_f64(1.0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let position = player.get_pos().as_secs_f64();
+        assert!(
+            position < 1.8,
+            "FLAC 向后 seek 后进度应接近 1 秒，实际 {position}"
+        );
         player.clear();
     }
 
@@ -1720,6 +1803,78 @@ mod tests {
         let cached = cache_root.join("downloads/sample-cache-test.audio");
         assert!(cached.exists(), "缓存文件应落盘");
         engine.player().clear();
+    }
+
+    #[tokio::test]
+    async fn download_retries_after_transient_truncation() {
+        use axum::response::IntoResponse;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        let wav = std::env::temp_dir().join("cadilume-download-retry.wav");
+        write_test_wav_of_seconds(&wav, 1);
+        let data = std::fs::read(&wav).unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_server = Arc::clone(&attempts);
+        let data_for_server = data.clone();
+        let app = axum::Router::new().route(
+            "/retry.wav",
+            axum::routing::get(move || {
+                let attempts = Arc::clone(&attempts_for_server);
+                let data = data_for_server.clone();
+                async move {
+                    let count = attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                    if count == 0 {
+                        // 第一次：声明完整长度但只发送一半，触发完整性校验失败。
+                        let partial = data[..data.len() / 2].to_vec();
+                        let mut response = axum::response::Response::new(
+                            axum::body::Body::from(partial),
+                        );
+                        response.headers_mut().insert(
+                            axum::http::header::CONTENT_LENGTH,
+                            axum::http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
+                        );
+                        return response;
+                    }
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "audio/wav")],
+                        data,
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let url = format!("http://127.0.0.1:{}/retry.wav", addr.port());
+        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-retry");
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        engine.player().set_volume(0.0);
+        engine
+            .load_cached_and_play(&url, Some("retry-test".into()), None)
+            .await
+            .expect("首次截断后重试应成功并开始播放");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !engine.player().empty() && !engine.player().is_paused(),
+            "重试成功后应处于播放中"
+        );
+        assert!(
+            attempts.load(AtomicOrdering::SeqCst) >= 2,
+            "应至少请求两次"
+        );
+        let cached = cache_root.join("downloads/retry-test.audio");
+        assert_eq!(
+            std::fs::metadata(&cached)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            data.len() as u64,
+            "重试成功后缓存应完整"
+        );
+        engine.player().clear();
+        let _ = std::fs::remove_file(&wav);
+        let _ = std::fs::remove_dir_all(&cache_root);
     }
 
     #[tokio::test]
