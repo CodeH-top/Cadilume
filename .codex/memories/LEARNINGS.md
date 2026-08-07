@@ -11,7 +11,17 @@
 - WebView 播放退役完成：usePlayer native-only，删除 DualAudioPool/预缓冲/
   MediaError 回退约 1400 行及对应单测（163 项全绿）。开发态不再创建 HTMLAudio。
 - 缓存：512MB LRU（mtime 淘汰、.part 优先清理）；ahead 预取下一首（预缓冲开关
-  开启时 native_audio_precache 后台下载，切歌命中本地缓存减少间隙）。
+  开启时 native_audio_precache 完整下载后挂入 rodio 队列）。
+- 严格 gapless（29dc62b）：预排下一首解码器进 rodio 顺序队列，
+  `HandoffMarker` 在样本级交接（上一首耗尽、下一首首个样本被拉取）时翻转，
+  事件线程据此发 `track` 事件；前端只镜像 UI 不重载流。重复一首/队列不一致时
+  自动降级为 ended + queue-item 的普通顺序播放。MP3 padding 由 rodio 队列帧对齐
+  处理，FLAC 天然无缝。
+- 缓存完整性（290b93a）：`download_progressive` 按 Content-Length 校验，
+  静默截断不再提交为完整缓存。
+- 真实 PMS 自动化回归（290b93a，`cargo test -- --ignored
+  real_pms_engine_regression`）：真实资料库两首 FLAC 串行下载→缓存→渐进播放→
+  预排→自然结束无缝交接→seek→暂停/恢复，本机已通过。
 - 系统集成：macOS MPNowPlayingInfoCenter + MPRemoteCommandCenter；Windows
   SystemMediaTransportControls（windows crate 0.58，已跨 target 类型检查，
   完整构建待 Windows 环境）。前端处理 remote 命令事件（play/pause/toggle/next/
@@ -19,8 +29,21 @@
 - 凭证隔离：debug 构建只读写 ~/.cadilume-dev-token（600），release 只用
   Keychain；.gitignore 忽略密钥文件；开发态窗口启动隐藏（visible:false +
   不 reveal），用户点 Dock/托盘显示，避免热重载抢焦点。
-- 遗留验证项：严格 gapless（当前为预取减间隙 MVP）、Windows 实机 SMTC、
-  真实 PMS 高频切歌 20+ 次/歌词对时/seek/后台播放验收。
+- 遗留验证项：真实 PMS 听感回归（用户实听高频切歌 20+ 次、歌词对时）、
+  Windows 实机 SMTC 与隐藏窗口后台播放验收。
+
+## 2026-08-07 — 真实 PMS 回归测试要点（290b93a）
+
+- Plex `/api/v2/resources` 现在强制要求 `X-Plex-Client-Identifier` 头，
+  否则 400；JSON 响应还要 `Accept: application/json`（默认返回 XML）。
+- 直接连 PMS 时优先逐个探测 connections 的可达性（本地/公网直连），
+  不要只取数组第一个（可能是不解析的 plex.direct 域名）。
+- reqwest 连接池复用的长连接下载大文件会偶发 IncompleteBody，而 curl 新连接
+  正常；回归测试用引擎每次新建 client 的 `precache` 串行下载更稳，且真实
+  服务器（尤其免费/共享账号）并发多流可能被单流限制打断，测试应串行。
+- 回归测试里构造带 token 的 URL 传给 reqwest 时，错误信息会原样带出 token；
+  断言/日志避免打印 URL，或把 token 放请求头。开发 token 只存在于
+  `~/.cadilume-dev-token`，测试也只用它做只读拉取。
 
 ## 2026-08-07 — 开发态“来回弹窗抢焦点”根因与修复（dev 0cf767a）
 
