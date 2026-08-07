@@ -26,6 +26,7 @@ import {
   Music2,
   PanelTop,
   Pause,
+  Pencil,
   Palette,
   Play,
   Plus,
@@ -61,6 +62,7 @@ import {
   canWritePlaylist,
   clearArtworkCache,
   createPlaylist,
+  deletePlaylist,
   discoverServers,
   getArtistTracksPage,
   getCacheStatus,
@@ -83,6 +85,8 @@ import {
   setBrandPreset as saveBrandPreset,
   setDeviceName as saveDeviceName,
   showMainWindow,
+  updatePlaylist,
+  type PlaylistChanges,
 } from "./api";
 import "./App.css";
 import { ARTIST_BIOGRAPHY_COLLAPSE_LINES, normalizeArtistBiography, previewArtistBiography, shouldCollapseArtistBiography } from "./artistBiography";
@@ -184,6 +188,8 @@ interface MusicShellRuntime {
   playlistListLoading: boolean;
   playlistListError?: string;
   loadPlaylistList: (announce?: boolean) => Promise<void>;
+  updatePlaylist: (playlist: PlexPlaylist, changes: PlaylistChanges) => Promise<void>;
+  deletePlaylist: (playlist: PlexPlaylist) => Promise<void>;
   sourceRevision: number;
   playlistMutationRevision: number;
   bumpPlaylistMutation: () => void;
@@ -722,6 +728,36 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     }
   }, [notify, serverId]);
 
+  const updatePlaylistCallback = useCallback(async (playlist: PlexPlaylist, changes: PlaylistChanges) => {
+    if (!serverId) {
+      notify("请先在设置中选择音乐服务器。", "warning");
+      return;
+    }
+    try {
+      await updatePlaylist(serverId, playlist.ratingKey, changes);
+      notify(`歌单“${playlist.title}”已更新。`, "success");
+      void loadPlaylistList();
+      bumpPlaylistMutation();
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : String(reason), "error");
+    }
+  }, [bumpPlaylistMutation, loadPlaylistList, notify, serverId]);
+
+  const deletePlaylistCallback = useCallback(async (playlist: PlexPlaylist) => {
+    if (!serverId) {
+      notify("请先在设置中选择音乐服务器。", "warning");
+      return;
+    }
+    try {
+      await deletePlaylist(serverId, playlist.ratingKey);
+      notify(`已删除歌单“${playlist.title}”。`, "success");
+      void loadPlaylistList();
+      bumpPlaylistMutation();
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : String(reason), "error");
+    }
+  }, [bumpPlaylistMutation, loadPlaylistList, notify, serverId]);
+
   useEffect(() => {
     void loadPlaylistList();
   }, [loadPlaylistList, sourceRevision]);
@@ -1029,6 +1065,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     playlistListLoading,
     playlistListError,
     loadPlaylistList,
+    updatePlaylist: updatePlaylistCallback,
+    deletePlaylist: deletePlaylistCallback,
     sourceRevision,
     playlistMutationRevision,
     bumpPlaylistMutation,
@@ -1371,6 +1409,8 @@ function MusicRouterLayout() {
           onOpen={openPlaylist}
           onRetry={() => void runtime.loadPlaylistList(true)}
           onCreate={runtime.openPlaylistCreation}
+          onUpdatePlaylist={runtime.updatePlaylist}
+          onDeletePlaylist={runtime.deletePlaylist}
         />
       </aside>
       <section className="workspace" aria-hidden={runtime.expandedPlayerOpen || undefined} inert={runtime.expandedPlayerOpen || undefined}>
@@ -1885,7 +1925,7 @@ function PlaylistKindIcons({ playlist, className = "" }: { playlist: PlexPlaylis
   );
 }
 
-function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetry, onCreate }: {
+function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetry, onCreate, onUpdatePlaylist, onDeletePlaylist }: {
   playlists: PlexPlaylist[];
   selectedId?: string;
   loading: boolean;
@@ -1893,8 +1933,39 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
   onOpen: (playlist: PlexPlaylist) => void;
   onRetry: () => void;
   onCreate: () => void;
+  onUpdatePlaylist: (playlist: PlexPlaylist, changes: PlaylistChanges) => Promise<void>;
+  onDeletePlaylist: (playlist: PlexPlaylist) => Promise<void>;
 }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ playlist: PlexPlaylist; x: number; y: number } | null>(null);
+  const [editing, setEditing] = useState<PlexPlaylist | null>(null);
+  const [deleting, setDeleting] = useState<PlexPlaylist | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("scroll", close, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("scroll", close, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [contextMenu]);
+
+  const openContextMenu = (event: ReactMouseEvent, playlist: PlexPlaylist) => {
+    event.preventDefault();
+    setContextMenu({ playlist, x: event.clientX, y: event.clientY });
+  };
+  const menuLeft = contextMenu ? Math.max(8, Math.min(window.innerWidth - 176, contextMenu.x)) : 0;
+  const menuTop = contextMenu ? Math.max(8, Math.min(window.innerHeight - 132, contextMenu.y)) : 0;
+
   return (
     <nav className={`sidebar-playlists ${collapsed ? "is-collapsed" : ""}`} aria-label="歌单">
       <div className="sidebar-playlists-toolbar">
@@ -1923,6 +1994,7 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
               title={playlist.title}
               key={playlist.ratingKey}
               onClick={() => onOpen(playlist)}
+              onContextMenu={(event) => openContextMenu(event, playlist)}
             >
               <Artwork item={playlist} size="small" className="sidebar-playlist-artwork" />
               <span>
@@ -1940,7 +2012,124 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
           </div>
         )}
       </div>
+      {contextMenu && createPortal(
+        <div
+          className="playlist-context-menu"
+          style={{ left: menuLeft, top: menuTop }}
+          role="menu"
+          aria-label={`${contextMenu.playlist.title} 歌单操作`}
+        >
+          <button type="button" role="menuitem" onClick={() => { onOpen(contextMenu.playlist); setContextMenu(null); }}>
+            <Play size={15} />显示歌单
+          </button>
+          <button type="button" role="menuitem" disabled={contextMenu.playlist.readOnly} onClick={() => { setEditing(contextMenu.playlist); setContextMenu(null); }}>
+            <Pencil size={15} />编辑
+          </button>
+          <button type="button" role="menuitem" className="is-danger" disabled={contextMenu.playlist.readOnly} onClick={() => { setDeleting(contextMenu.playlist); setContextMenu(null); }}>
+            <Trash2 size={15} />删除
+          </button>
+        </div>,
+        document.body,
+      )}
+      {editing && (
+        <PlaylistEditDialog
+          playlist={editing}
+          busy={editBusy}
+          onClose={() => setEditing(null)}
+          onSave={async (changes) => {
+            setEditBusy(true);
+            await onUpdatePlaylist(editing, changes);
+            setEditBusy(false);
+            setEditing(null);
+          }}
+        />
+      )}
+      {deleting && (
+        <PlaylistDeleteDialog
+          playlist={deleting}
+          busy={deleteBusy}
+          onClose={() => setDeleting(null)}
+          onConfirm={async () => {
+            setDeleteBusy(true);
+            await onDeletePlaylist(deleting);
+            setDeleteBusy(false);
+            setDeleting(null);
+          }}
+        />
+      )}
     </nav>
+  );
+}
+
+function PlaylistEditDialog({ playlist, busy, onSave, onClose }: {
+  playlist: PlexPlaylist;
+  busy: boolean;
+  onSave: (changes: PlaylistChanges) => void;
+  onClose: () => void;
+}) {
+  const [title, setTitle] = useState(playlist.title);
+  const [summary, setSummary] = useState(playlist.summary ?? "");
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => titleInputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+  const valid = Boolean(title.trim());
+  return (
+    <div className="playlist-dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
+      <section className="playlist-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-edit-title">
+        <header>
+          <div><h2 id="playlist-edit-title">编辑歌单</h2><small>修改歌单名称与描述</small></div>
+          <IconButton label="关闭编辑歌单" tooltip={null} disabled={busy} onClick={onClose}><X size={18} /></IconButton>
+        </header>
+        <form onSubmit={(event) => {
+          event.preventDefault();
+          if (valid && !busy) onSave({ title: title.trim(), summary: summary.trim() });
+        }}>
+          <label className="playlist-dialog-field">
+            <span>歌单名称</span>
+            <input ref={titleInputRef} value={title} maxLength={255} required disabled={busy} onChange={(event) => setTitle(event.target.value)} />
+          </label>
+          <label className="playlist-dialog-field">
+            <span>描述</span>
+            <textarea value={summary} maxLength={1000} rows={4} disabled={busy} placeholder="选填，介绍这个歌单" onChange={(event) => setSummary(event.target.value)} />
+          </label>
+          <footer>
+            <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>取消</button>
+            <button type="submit" className="primary-button" disabled={!valid || busy} aria-busy={busy || undefined}>
+              {busy ? <><LoaderCircle className="spin" size={15} />正在保存…</> : "保存"}
+            </button>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function PlaylistDeleteDialog({ playlist, busy, onConfirm, onClose }: {
+  playlist: PlexPlaylist;
+  busy: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="playlist-dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
+      <section className="playlist-dialog playlist-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="playlist-delete-title">
+        <header>
+          <div><h2 id="playlist-delete-title">删除歌单</h2></div>
+          <IconButton label="关闭删除确认" tooltip={null} disabled={busy} onClick={onClose}><X size={18} /></IconButton>
+        </header>
+        <div className="playlist-delete-copy">
+          将删除歌单“{playlist.title}”及其中的 {playlist.leafCount ?? 0} 首歌曲，此操作无法撤销。
+        </div>
+        <footer>
+          <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>取消</button>
+          <button type="button" className="danger-button" disabled={busy} aria-busy={busy || undefined} onClick={() => { if (!busy) onConfirm(); }}>
+            {busy ? <><LoaderCircle className="spin" size={15} />正在删除…</> : <><Trash2 size={15} />删除</>}
+          </button>
+        </footer>
+      </section>
+    </div>
   );
 }
 

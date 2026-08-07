@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setBrandPreset, setDeviceName, setStatusIconEnabled } from "./api";
+import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setBrandPreset, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -658,6 +658,36 @@ describe("Plex audio playlists", () => {
       playlistId: "playlist-99",
       playlistItemIds: ["123"],
     });
+  });
+
+  it("updates playlist title and summary through the scoped Rust command", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await updatePlaylist("server-a", "playlist-99", { title: "新标题", summary: "新描述" });
+
+    expect(invokeMock).toHaveBeenCalledWith("update_playlist", {
+      serverId: "server-a",
+      playlistId: "playlist-99",
+      title: "新标题",
+      summary: "新描述",
+    });
+  });
+
+  it("deletes a playlist through the scoped Rust command", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await deletePlaylist("server-a", "playlist-99");
+
+    expect(invokeMock).toHaveBeenCalledWith("delete_playlist", {
+      serverId: "server-a",
+      playlistId: "playlist-99",
+    });
+  });
+
+  it("rejects malformed playlist ids for update and delete", async () => {
+    await expect(updatePlaylist("server-a", "../bad", { title: "x" })).rejects.toThrow("无效的 Plex 歌单标识");
+    await expect(deletePlaylist("server-a", "../bad")).rejects.toThrow("无效的 Plex 歌单标识");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it("provides scroll-sized regular, smart, and read-only demo playlists without invoking Tauri", async () => {

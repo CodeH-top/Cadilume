@@ -758,6 +758,52 @@ export async function removeTracksFromPlaylist(
   return invoke("remove_playlist_items", { serverId, playlistId, playlistItemIds: uniqueItemIds });
 }
 
+export interface PlaylistChanges {
+  title?: string;
+  summary?: string;
+}
+
+/** Update a regular playlist's title/summary through the scoped Rust command. */
+export async function updatePlaylist(
+  serverId: string,
+  playlistId: string,
+  changes: PlaylistChanges,
+): Promise<void> {
+  if (!isCleanPlexIdentifier(serverId) || !isCleanPlexIdentifier(playlistId)) {
+    throw new Error("无效的 Plex 歌单标识");
+  }
+  const title = changes.title === undefined ? undefined : normalizePlaylistTitle(changes.title);
+  const summary = changes.summary === undefined ? undefined : normalizePlaylistSummary(changes.summary);
+  if (title === undefined && summary === undefined) return;
+  if (!isDesktopRuntime()) {
+    const target = [...demoCreatedPlaylists, ...demoPlaylists].find((playlist) => playlist.ratingKey === playlistId);
+    if (target) {
+      if (title !== undefined) target.title = title;
+      if (summary !== undefined) target.summary = summary;
+    }
+    return;
+  }
+  await invoke("update_playlist", { serverId, playlistId, title, summary });
+}
+
+/** Delete a playlist through the scoped Rust command. */
+export async function deletePlaylist(serverId: string, playlistId: string): Promise<void> {
+  if (!isCleanPlexIdentifier(serverId) || !isCleanPlexIdentifier(playlistId)) {
+    throw new Error("无效的 Plex 歌单标识");
+  }
+  if (!isDesktopRuntime()) {
+    const createdIndex = demoCreatedPlaylists.findIndex((playlist) => playlist.ratingKey === playlistId);
+    if (createdIndex >= 0) {
+      demoCreatedPlaylists.splice(createdIndex, 1);
+      return;
+    }
+    const demoIndex = demoPlaylists.findIndex((playlist) => playlist.ratingKey === playlistId);
+    if (demoIndex >= 0) demoPlaylists.splice(demoIndex, 1);
+    return;
+  }
+  await invoke("delete_playlist", { serverId, playlistId });
+}
+
 export async function getLyrics(serverId: string, ratingKey: string): Promise<PlexLyricsPayload | null> {
   if (!isDesktopRuntime()) {
     return {

@@ -51,6 +51,8 @@ pub fn run() {
             plex::get_playlist_items,
             plex::add_to_playlist,
             plex::add_tracks_to_playlist,
+            plex::update_playlist,
+            plex::delete_playlist,
             plex::artwork_url,
             stream_proxy::stream_url,
             plex::lyrics,

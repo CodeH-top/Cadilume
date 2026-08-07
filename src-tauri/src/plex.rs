@@ -1172,6 +1172,60 @@ pub async fn remove_playlist_items(
 }
 
 #[tauri::command]
+pub async fn update_playlist(
+    server_id: String,
+    playlist_id: String,
+    title: Option<String>,
+    summary: Option<String>,
+    state: State<'_, PlexState>,
+) -> Result<(), String> {
+    if !valid_plex_identifier(&server_id) {
+        return Err("无效的 Plex 服务器标识".to_string());
+    }
+    let path = playlist_path(&playlist_id).map_err(display_error)?;
+    let mut query = HashMap::new();
+    if let Some(title) = title {
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > 255 || title.chars().any(char::is_control) {
+            return Err("歌单名称必须为 1–255 个有效字符".to_string());
+        }
+        query.insert("title".to_string(), title.to_string());
+    }
+    if let Some(summary) = summary {
+        query.insert(
+            "summary".to_string(),
+            normalize_playlist_summary(&summary).map_err(display_error)?,
+        );
+    }
+    if query.is_empty() {
+        return Ok(());
+    }
+    state
+        .server_request_response(&server_id, Method::PUT, &path, &query)
+        .await
+        .map_err(display_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_playlist(
+    server_id: String,
+    playlist_id: String,
+    state: State<'_, PlexState>,
+) -> Result<(), String> {
+    if !valid_plex_identifier(&server_id) {
+        return Err("无效的 Plex 服务器标识".to_string());
+    }
+    let path = playlist_path(&playlist_id).map_err(display_error)?;
+    let empty_query = HashMap::new();
+    state
+        .server_request_response(&server_id, Method::DELETE, &path, &empty_query)
+        .await
+        .map_err(display_error)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_playlists(
     server_id: String,
     state: State<'_, PlexState>,
