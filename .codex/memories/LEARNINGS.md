@@ -488,3 +488,9 @@
 - Plex 官方支持矩阵把 macOS/Windows 桌面应用列为 controller-only；官方 `plex-media-player` 仓库的 Remote control API wiki 已归档，且页面最后编辑于 2015 年。协议字段可作为 clean-room 实现参考，但不能据此宣称现代 Plex 客户端一定支持第三方桌面 receiver。
 - 后续应把 L1 拆为：L1a 控制端（优先用 `/clients`/已授权资源和 `timeline/poll`，避免首版开放入站端口），L1b 远端播放交接与 server playQueue，L1c 可选、默认关闭的实验性 receiver。所有网络与 token 处理留在 Rust；接收 `playMedia` 只允许已发现且用户确认的服务器/设备，不能信任局域网请求携带的任意地址或 token。
 - R14、R15、R13 及其验收完成前不开始 L1 UI；实施时 Companion 应作为独立 `CompanionManager/Gateway`，不要把远端播放器协议直接塞进现有 `MusicProviderGateway` 或 `usePlayer` 的本地 HTMLAudio 状态机。
+
+## 2026-08-07 — 切歌必须“点击瞬间”停旧歌并归零进度
+
+- Rust 侧 `native_queue_next` / `native_queue_previous` 只更新引擎队列索引，不停止当前音频；如果前端先 `await` 队列 IPC 再停歌，往返期间旧歌会继续出声、进度条残留旧值。
+- 正确做法是在 `next()` / `previous()` 被调用的同一同步帧里：fire-and-forget `nativeAudioStop()`、清空 `resumeProgressRef`、`progressRef` 与 `setProgress(0)`，然后再发队列 IPC；`loadNativeTrack` 内的 stop 只作为兜底。
+- `previous()` 在“进度 ≤4s”且没有上一首的失败回退里，应回落到当前曲目开头重新播放，不能停在“已停止且进度 0”的死状态；`previous()` 的“重启当前曲目”（进度 >4s）分支不要调用 stop，否则 `nativeAudioSeek(0)` 会打在已清空的引擎上。
