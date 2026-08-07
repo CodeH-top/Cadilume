@@ -237,7 +237,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .playlist-context-menu button:hover:not(:disabled), .playlist-context-menu button:focus-visible { background: var(--hover-fill); }
 .playlist-context-menu button:disabled { opacity: 0.45; cursor: not-allowed; }
 .playlist-context-menu button.is-danger { color: var(--danger); }
-.playlist-dialog-backdrop { position: fixed; z-index: 950; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(4, 5, 6, 0.62); backdrop-filter: blur(10px); }
+.playlist-dialog-backdrop { position: fixed; z-index: 950; inset: 0; display: grid; place-items: center; padding: 24px; background: transparent; }
 .playlist-dialog { width: min(440px, calc(100vw - 48px)); max-height: min(620px, calc(100vh - 48px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--panel); box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42); }
 .playlist-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px; border-bottom: 1px solid var(--border); }
 .playlist-dialog > header h2 { margin: 0; font-size: 17px; letter-spacing: -0.02em; }
@@ -672,7 +672,7 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .player-bar .volume-popover .shared-volume-range::-moz-range-thumb { width: 11px; height: 11px; border: 0; border-radius: 50%; background: var(--accent); }
 .player-bar .volume-popover .shared-volume-range:disabled { cursor: not-allowed; opacity: 0.45; }
 .volume-popover output { color: var(--muted-strong); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
-.playlist-picker-backdrop { position: fixed; z-index: var(--z-dialog); inset: 0; display: grid; place-items: center; overflow: hidden; padding: 24px; background: rgba(4, 5, 6, 0.62); backdrop-filter: blur(10px); }
+.playlist-picker-backdrop { position: fixed; z-index: var(--z-dialog); inset: 0; display: grid; place-items: center; overflow: hidden; padding: 24px; background: transparent; }
 .playlist-create-dialog { width: min(430px, 100%); max-width: 100%; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--panel); box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42); }
 .playlist-create-dialog > header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 19px 20px 17px; border-bottom: 1px solid var(--border); }
 .playlist-create-dialog > header > div { min-width: 0; }
