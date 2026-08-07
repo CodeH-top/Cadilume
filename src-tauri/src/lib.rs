@@ -77,6 +77,7 @@ pub fn run() {
             audio_engine::native_audio_play,
             audio_engine::native_audio_pause,
             audio_engine::native_audio_stop,
+            audio_engine::native_audio_heartbeat,
             audio_engine::native_audio_seek,
             audio_engine::native_audio_set_volume,
             audio_engine::native_audio_status,

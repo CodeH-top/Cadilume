@@ -26,6 +26,9 @@ const AUDIO_CACHE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 /// Only applies to far-ahead cache warming, never to the immediate next
 /// track (gapless handoff must not be delayed by throttling).
 const PRECACHE_RATE_LIMIT_BYTES_PER_SEC: u64 = 5 * 1024 * 1024 / 8;
+/// 前端心跳超时：超过该时长没有收到 heartbeat 且引擎正在出声，就自动停止
+/// 播放，防止 WebView/主线程卡死或崩溃后音乐停不下来。
+const HEARTBEAT_STALL_TIMEOUT: Duration = Duration::from_secs(6);
 
 fn audio_cache_dir(cache_root: &Path) -> PathBuf {
     cache_root.join("downloads")
@@ -341,6 +344,7 @@ pub struct NativeAudioEngine {
     current_source: Arc<Mutex<Option<CurrentSource>>>,
     artwork_bytes: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
     stopped: Arc<AtomicBool>,
+    last_heartbeat: Arc<Mutex<Option<std::time::Instant>>>,
     /// 真实 PMS 单流限制：同一时刻只允许一条下载，播放优先，预取可被抢占。
     download_permit: Arc<tokio::sync::Semaphore>,
     active_download: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
@@ -742,6 +746,7 @@ impl NativeAudioEngine {
             current_source: Arc::new(Mutex::new(None)),
             artwork_bytes: Arc::new(Mutex::new(None)),
             stopped: Arc::new(AtomicBool::new(false)),
+            last_heartbeat: Arc::new(Mutex::new(None)),
             download_permit: Arc::new(tokio::sync::Semaphore::new(1)),
             active_download: Arc::new(Mutex::new(None)),
             active_precache: Arc::new(Mutex::new(None)),
@@ -1386,6 +1391,35 @@ impl NativeAudioEngine {
                     publish_natural_ended(&engine.queue, &engine.ended_sent, &app_for_task);
                     continue;
                 }
+                // 心跳看门狗：WebView 崩溃或主线程被同步命令卡死时，前端心跳会
+                // 停止。只要此时还在出声就立刻清空播放器，绝不让音乐停不下来。
+                let heartbeat_lost = engine
+                    .last_heartbeat
+                    .lock()
+                    .map(|heartbeat| {
+                        heartbeat
+                            .map(|at| at.elapsed() >= HEARTBEAT_STALL_TIMEOUT)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                let audibly_playing = !engine.player().is_paused() && !engine.player().empty();
+                if heartbeat_lost && audibly_playing {
+                    engine.loaded.store(false, Ordering::SeqCst);
+                    engine.ended_sent.store(true, Ordering::SeqCst);
+                    if let Ok(mut pending) = engine.pending.lock() {
+                        *pending = None;
+                    }
+                    engine.player().clear();
+                    eprintln!("[原生] 前端心跳丢失，自动停止播放（保护）");
+                    let _ = app_for_task.emit(
+                        "native-audio://event",
+                        serde_json::json!({
+                            "type": "playback-protected-stop",
+                            "reason": "heartbeat-lost",
+                        }),
+                    );
+                    continue;
+                }
                 if (position - last_position).abs() >= 0.05 {
                     last_position = position;
                     let _ = app_for_task.emit(
@@ -1654,6 +1688,15 @@ pub fn native_audio_stop(app: AppHandle, state: tauri::State<'_, NativeAudioEngi
             *pending = None;
         }
         engine.player().clear();
+    }
+}
+
+#[tauri::command]
+pub fn native_audio_heartbeat(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
+    if let Ok(engine) = state.ensure(&app) {
+        if let Ok(mut heartbeat) = engine.last_heartbeat.lock() {
+            *heartbeat = Some(std::time::Instant::now());
+        }
     }
 }
 

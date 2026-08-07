@@ -1232,7 +1232,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("native-audio://event", (event) => {
-      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number } | null;
+      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; reason?: string } | null;
       if (!payload) return;
       if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
         // 加载期间忽略旧歌的残留进度事件，保证切歌瞬间进度归 0 不被覆盖。
@@ -1245,6 +1245,13 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       } else if (payload.type === "ended") {
         // Queue authority lives in Rust: it already decided the next item and
         // emits `queue-item` when one exists; here we only settle local state.
+        setPlaying(false);
+        setPlaybackLoading(false);
+        setBuffering(false);
+        schedulePersistedSession(true);
+      } else if (payload.type === "playback-protected-stop") {
+        // Rust 心跳看门狗判定前端卡死/崩溃后主动停播，前端同步状态。
+        playbackLog("warn", `播放保护已停止：${String(payload.reason ?? "unknown")}`);
         setPlaying(false);
         setPlaybackLoading(false);
         setBuffering(false);
