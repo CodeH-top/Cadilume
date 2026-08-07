@@ -24,6 +24,12 @@
   保持全速；`native_audio_precache` 新增 `rate_limit` 参数（前端
   `nativeAudioPrecache(url, key, true)`），`download_progressive` 用按字节
   期望耗时做 pacing，测试用小 WAV 验证限速生效且文件完整。
+- 缓存自愈与小文件竞态（90c0d75）：命中缓存解码失败时删坏文件并走渐进下载
+  自愈；`download_progressive` 必须先 rename 再置 `finished`（否则 <256KB 的
+  小文件在等待方打开 `.part` 前已被改名，导致“打开渐进缓存失败”）。
+- Now Playing 封面仍为遗留代码项：objc2 将 AppKit 类（NSImage/
+  MPMediaItemArtwork）标为 MainThreadOnly，跨线程持有是 UB；实现须在主线程
+  构造并重建字典，且需用户实机验证，设计说明已写入升级计划文档。
 - 真实 PMS 自动化回归（290b93a，`cargo test -- --ignored
   real_pms_engine_regression`）：真实资料库两首 FLAC 串行下载→缓存→渐进播放→
   预排→自然结束无缝交接→seek→暂停/恢复，本机已通过。
