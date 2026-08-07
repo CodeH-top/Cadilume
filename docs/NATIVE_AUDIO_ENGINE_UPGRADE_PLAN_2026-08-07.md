@@ -31,6 +31,10 @@
   预排下一首 → 自然结束无缝交接 → seek → 暂停/恢复，已在本机通过。
   同时给 `download_progressive` 增加 Content-Length 完整性校验：静默截断的下载
   不再被当作完整缓存提交（修复缓存命中半截文件的风险）。
+- 真实 PMS 高频切歌回归 ✅（`cargo test -- --ignored
+  real_pms_engine_rapid_switch_regression`）：串行预缓存最多 10 首真实曲目后
+  连续快速加载/切换两轮共 20 次，第二轮穿插 seek/暂停/恢复，全部无失败，
+  覆盖历史上 WebView 高频切歌 error4/卡顿场景。
 - Phase 5 ✅ 完成：macOS Now Playing/Remote Command Center + Windows SMTC
   （Windows 代码已跨 target 类型检查，完整构建与实机验证待 Windows 环境）；
   输出设备选择已补完——cpal 枚举设备、`native_audio_set_output_device` 重建
@@ -39,7 +43,7 @@
 - Phase 6 ✅ 完成：WebView/HTMLAudio 播放路径全部移除（usePlayer native-only，
   删除 DualAudioPool/预缓冲/媒体错误回退等约 1400 行及对应单测）。
 
-剩余事项：真实 PMS 听感回归（用户实听：高频切歌 20+ 次、歌词对时、主观无间隙）、
+剩余事项：真实 PMS 听感回归（用户实听：主观无间隙、歌词对时与 UI 层高频操作）、
 Windows 实机 SMTC 验收、Windows 隐藏窗口后台播放验证。
 
 ### Windows 实机验收清单（待 Windows 环境执行）

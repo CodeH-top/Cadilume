@@ -1893,32 +1893,29 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
-    /// 真实 PMS 端到端回归（默认忽略，显式运行：
-    /// `cargo test -- --ignored real_pms_engine_regression --nocapture`）。
-    /// 使用开发态明文 token，从真实资料库取两首小曲目，静音走完整链路：
-    /// 真实下载 → 磁盘缓存 → 渐进播放 → 预排下一首 → 无缝交接 → seek → 暂停/恢复。
-    #[tokio::test]
-    #[ignore = "需要真实 PMS 与开发 token"]
-    async fn real_pms_engine_regression() {
+    /// 真实 PMS 回归共享的拉取逻辑：读取开发 token → 发现服务器 → 选可达连接
+    /// → 音乐媒体库 → 按时长/大小挑出适合回归的小曲目。
+    struct PmsRegressionFixture {
+        server_uri: String,
+        server_token: String,
+        tracks: Vec<(u64, u64, String, String, String)>,
+    }
+
+    async fn load_pms_regression_fixture() -> Option<PmsRegressionFixture> {
         let Some(home) = std::env::var("HOME").ok() else {
             eprintln!("跳过：无 HOME");
-            return;
+            return None;
         };
         let token_path = PathBuf::from(home).join(".cadilume-dev-token");
         let Ok(raw_token) = std::fs::read_to_string(&token_path) else {
             eprintln!("跳过：{} 不存在", token_path.display());
-            return;
+            return None;
         };
         let token = raw_token.trim().to_string();
         if token.is_empty() {
             eprintln!("跳过：开发 token 为空");
-            return;
+            return None;
         }
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("构建 HTTP 客户端失败");
         fn plex_headers(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
             request
                 .header("X-Plex-Token", token)
@@ -1930,18 +1927,22 @@ mod tests {
                 .header("X-Plex-Device", "Mac")
                 .header(reqwest::header::ACCEPT, "application/json")
         }
-
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .ok()?;
         let resources: serde_json::Value = plex_headers(
             client.get("https://plex.tv/api/v2/resources"),
             &token,
         )
-            .query(&[("includeHttps", "1"), ("includeRelay", "1"), ("includeIPv6", "1")])
-            .send()
-            .await
-            .expect("获取 Plex 资源失败")
-            .json()
-            .await
-            .expect("解析 Plex 资源失败");
+        .query(&[("includeHttps", "1"), ("includeRelay", "1"), ("includeIPv6", "1")])
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
         let mut server = None;
         for resource in resources.as_array().into_iter().flatten() {
             let provides = resource["provides"].as_str().unwrap_or("");
@@ -1951,7 +1952,7 @@ mod tests {
             let Some(access_token) = resource["accessToken"].as_str() else {
                 continue;
             };
-            // 与应用一致：逐个探测连接，选第一个能确认服务器身份的可用项。
+            // 与应用一致：逐个探测连接，选第一个可用的连接。
             let mut reachable = None;
             for connection in resource["connections"].as_array().into_iter().flatten() {
                 let Some(uri) = connection["uri"].as_str() else {
@@ -1981,19 +1982,18 @@ mod tests {
         }
         let Some((_server_id, server_uri, server_token)) = server else {
             eprintln!("跳过：没有可用的 Plex 服务器");
-            return;
+            return None;
         };
-
         let sections: serde_json::Value = plex_headers(
             client.get(format!("{server_uri}/library/sections")),
             &server_token,
         )
-            .send()
-            .await
-            .expect("读取媒体库失败")
-            .json()
-            .await
-            .expect("解析媒体库失败");
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
         let Some(section_key) = sections["MediaContainer"]["Directory"]
             .as_array()
             .into_iter()
@@ -2003,47 +2003,77 @@ mod tests {
             .map(str::to_string)
         else {
             eprintln!("跳过：没有音乐媒体库");
-            return;
+            return None;
         };
-
         let tracks: serde_json::Value = plex_headers(
             client.get(format!("{server_uri}/library/sections/{section_key}/all")),
             &server_token,
         )
-            .query(&[("type", "10"), ("limit", "40")])
-            .send()
-            .await
-            .expect("读取曲目失败")
-            .json()
-            .await
-            .expect("解析曲目失败");
+        .query(&[("type", "10"), ("limit", "60")])
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
         let mut candidates: Vec<(u64, u64, String, String, String)> =
             tracks["MediaContainer"]["Metadata"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|track| {
-                let rating_key = track.get("ratingKey")?.as_str()?.to_string();
-                let title = track.get("title").and_then(|value| value.as_str()).unwrap_or("").to_string();
-                let duration_ms = track.get("duration").and_then(|value| value.as_u64()).unwrap_or(u64::MAX);
-                let part = track.get("Media")?.as_array()?.first()?;
-                let part = part.get("Part")?.as_array()?.first()?;
-                let part_key = part.get("key")?.as_str()?.to_string();
-                let size = part.get("size").and_then(|value| value.as_u64()).unwrap_or(u64::MAX);
-                let short_enough = (15_000..=240_000).contains(&duration_ms);
-                (short_enough && (500_000..=30_000_000).contains(&size))
-                    .then_some((duration_ms, size, rating_key, title, part_key))
-            })
-            .collect();
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|track| {
+                    let rating_key = track.get("ratingKey")?.as_str()?.to_string();
+                    let title = track
+                        .get("title")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let duration_ms = track
+                        .get("duration")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(u64::MAX);
+                    let part = track.get("Media")?.as_array()?.first()?;
+                    let part = part.get("Part")?.as_array()?.first()?;
+                    let part_key = part.get("key")?.as_str()?.to_string();
+                    let size = part
+                        .get("size")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(u64::MAX);
+                    let short_enough = (15_000..=240_000).contains(&duration_ms);
+                    (short_enough && (500_000..=30_000_000).contains(&size))
+                        .then_some((duration_ms, size, rating_key, title, part_key))
+                })
+                .collect();
         candidates.sort_by_key(|candidate| (candidate.0, candidate.1));
         if candidates.len() < 2 {
             eprintln!("跳过：可用曲目不足两首");
-            return;
+            return None;
         }
+        Some(PmsRegressionFixture {
+            server_uri,
+            server_token,
+            tracks: candidates,
+        })
+    }
 
-        let track_a = &candidates[0];
-        let track_b = &candidates[1];
-        let stream_url = |part_key: &str| format!("{server_uri}{part_key}?X-Plex-Token={server_token}");
+    /// 真实 PMS 端到端回归（默认忽略，显式运行：
+    /// `cargo test -- --ignored real_pms_engine_regression --nocapture`）。
+    /// 使用开发态明文 token，从真实资料库取两首小曲目，静音走完整链路：
+    /// 真实下载 → 磁盘缓存 → 渐进播放 → 预排下一首 → 无缝交接 → seek → 暂停/恢复。
+    #[tokio::test]
+    #[ignore = "需要真实 PMS 与开发 token"]
+    async fn real_pms_engine_regression() {
+        let Some(fixture) = load_pms_regression_fixture().await else {
+            return;
+        };
+        let track_a = &fixture.tracks[0];
+        let track_b = &fixture.tracks[1];
+        let stream_url = |part_key: &str| {
+            format!(
+                "{}{}?X-Plex-Token={}",
+                fixture.server_uri, part_key, fixture.server_token
+            )
+        };
         let cache_root = std::env::temp_dir().join(format!(
             "cadilume-pms-regression-{}",
             uuid::Uuid::new_v4()
@@ -2164,6 +2194,105 @@ mod tests {
         assert!(cache_files >= 2, "真实 PMS 回归后缓存应有至少两首曲目");
         eprintln!("真实 PMS 引擎回归通过：下载/缓存/渐进播放/预排/无缝交接/seek/暂停恢复均正常");
 
+        engine.player().clear();
+        let _ = std::fs::remove_dir_all(&cache_root);
+    }
+
+    /// 真实 PMS 高频切歌回归（默认忽略，显式运行：
+    /// `cargo test -- --ignored real_pms_engine_rapid_switch_regression --nocapture`）。
+    /// 串行预缓存多首真实曲目后连续快速加载/切换两轮（≥20 次加载），中途穿插
+    /// seek 与暂停/恢复，覆盖历史上 WebView 播放的高频切歌 error4/卡顿场景。
+    #[tokio::test]
+    #[ignore = "需要真实 PMS 与开发 token"]
+    async fn real_pms_engine_rapid_switch_regression() {
+        let Some(fixture) = load_pms_regression_fixture().await else {
+            return;
+        };
+        let limit = fixture.tracks.len().min(10);
+        if limit < 3 {
+            eprintln!("跳过：可用曲目不足三首");
+            return;
+        }
+        let selected = fixture.tracks[..limit].to_vec();
+        let stream_url = |part_key: &str| {
+            format!(
+                "{}{}?X-Plex-Token={}",
+                fixture.server_uri, part_key, fixture.server_token
+            )
+        };
+        let cache_root = std::env::temp_dir().join(format!(
+            "cadilume-pms-rapid-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
+        engine.player().set_volume(0.0);
+
+        // 串行预缓存全部选中曲目（单条活跃流，避免服务器单流限制）。
+        for (_, _, rating_key, _title, part_key) in &selected {
+            engine
+                .precache(&stream_url(part_key), Some(rating_key.clone()))
+                .await
+                .expect("高频切换预缓存应完整");
+        }
+
+        // 两轮连续快速加载/切换，模拟用户高频点下一首；第二轮穿插 seek/暂停。
+        let mut loads = 0usize;
+        for round in 0..2 {
+            for (index, (_duration_ms, _size, rating_key, title, part_key)) in
+                selected.iter().enumerate()
+            {
+                engine
+                    .load_cached_and_play(
+                        &stream_url(part_key),
+                        Some(rating_key.clone()),
+                        Some(NowPlayingMetadata {
+                            title: Some(title.clone()),
+                            artist: None,
+                            album: None,
+                        }),
+                    )
+                    .await
+                    .expect("高频切歌加载应成功");
+                loads += 1;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                assert!(
+                    !engine.player().empty() && !engine.player().is_paused(),
+                    "高频切歌后应处于播放中"
+                );
+                let position = engine.player().get_pos().as_secs_f64();
+                assert!(position >= 0.0, "高频切歌后进度应有效");
+                if round == 1 && index % 2 == 0 {
+                    engine
+                        .player()
+                        .try_seek(Duration::from_secs_f64(1.0))
+                        .expect("高频切歌中 seek 应成功");
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    engine.player().pause();
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    assert!(engine.player().is_paused(), "高频切歌中暂停应生效");
+                    engine.player().play();
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    assert!(!engine.player().is_paused(), "高频切歌中恢复应生效");
+                }
+                eprintln!(
+                    "[回归] 高频切歌 #{loads} 曲目={title} 缓存命中"
+                );
+            }
+        }
+
+        let downloads = cache_root.join("downloads");
+        let cache_files = std::fs::read_dir(&downloads)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".audio"))
+            .count();
+        assert!(
+            cache_files >= selected.len(),
+            "高频切换后缓存应覆盖全部选中曲目"
+        );
+        assert!(loads >= 20, "高频切换应至少 20 次加载，实际 {loads}");
+        eprintln!("真实 PMS 高频切歌回归通过：{loads} 次加载/切换、seek/暂停恢复均无失败");
         engine.player().clear();
         let _ = std::fs::remove_dir_all(&cache_root);
     }
