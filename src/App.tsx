@@ -3047,9 +3047,27 @@ function SearchResults({ hubs, query, loading, artists, onOpen, onOpenArtist, on
     };
     return titles[hub.type] ?? hub.title;
   };
-  if (!query) return <EmptyState title="搜索音乐资料库" description="输入歌曲、专辑或歌手名称。" icon={<Search size={28} />} />;
+  if (!query) return (
+    <div className="search-results">
+      <div className="search-results-toolbar">
+        <DetailBackButton label="返回" onClick={() => navigate(-1)} />
+      </div>
+      <div className="search-results-fill">
+        <EmptyState title="搜索音乐资料库" description="输入歌曲、专辑或歌手名称。" icon={<Search size={28} />} />
+      </div>
+    </div>
+  );
   if (loading) return <SearchLoadingState query={query} />;
-  if (!total) return <EmptyState title={`没有找到“${query}”`} description="尝试更短的关键词，或切换到其他音乐资料库。" icon={<Search size={28} />} />;
+  if (!total) return (
+    <div className="search-results">
+      <div className="search-results-toolbar">
+        <DetailBackButton label="返回" onClick={() => navigate(-1)} />
+      </div>
+      <div className="search-results-fill">
+        <EmptyState title={`没有找到“${query}”`} description="尝试更短的关键词，或切换到其他音乐资料库。" icon={<Search size={28} />} />
+      </div>
+    </div>
+  );
   return (
     <div className="search-results">
       <div className="search-results-toolbar">

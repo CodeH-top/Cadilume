@@ -152,7 +152,7 @@ button { color: inherit; }
 button, select { cursor: pointer; }
 button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button[data-tooltip] { position: relative; overflow: visible; isolation: isolate; }
-button[data-tooltip]::after { position: absolute; z-index: 120; left: 50%; bottom: calc(100% + 8px); max-width: min(240px, calc(100vw - 24px)); content: attr(data-tooltip); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 8px; background: color-mix(in srgb, var(--panel) 96%, transparent); color: var(--muted-strong); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24); font-size: 12px; font-weight: 600; line-height: 1.3; text-align: center; white-space: nowrap; opacity: 0; pointer-events: none; transform: translate(-50%, 4px); transition: opacity 140ms ease, transform 140ms ease; }
+button[data-tooltip]::after { position: absolute; z-index: 300; left: 50%; bottom: calc(100% + 8px); max-width: min(240px, calc(100vw - 24px)); content: attr(data-tooltip); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 8px; background: color-mix(in srgb, var(--panel) 96%, transparent); color: var(--muted-strong); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24); font-size: 12px; font-weight: 600; line-height: 1.3; text-align: center; white-space: normal; overflow-wrap: anywhere; opacity: 0; pointer-events: none; transform: translate(-50%, 4px); transition: opacity 140ms ease, transform 140ms ease; }
 button[data-tooltip]:is(:hover, :focus-visible)::after { opacity: 1; transform: translate(-50%, 0); }
 .topbar-actions button[data-tooltip]::after { top: calc(100% + 8px); bottom: auto; transform: translate(-50%, -4px); }
 .topbar-actions button[data-tooltip]:is(:hover, :focus-visible)::after { transform: translate(-50%, 0); }
@@ -247,9 +247,10 @@ button[data-tooltip]:is(:hover, :focus-visible)::after { opacity: 1; transform: 
 .searchbox-clear { width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 6px; padding: 0; color: var(--muted); background: transparent; cursor: pointer; transition: color 150ms ease, background 150ms ease; }
 .searchbox-clear:hover { color: var(--text); background: var(--hover-fill); }
 .searchbox-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.search-results { display: grid; gap: 26px; align-content: start; }
+.search-results { min-height: 100%; display: flex; flex-direction: column; gap: 26px; }
 .search-results-toolbar { display: flex; align-items: flex-start; gap: 14px; }
 .search-results-toolbar .secondary-button { flex: 0 0 auto; margin-top: 2px; }
+.search-results-fill { flex: 1; min-height: 360px; display: flex; align-items: center; justify-content: center; }
 .search-results .section-heading { border-bottom: 1px solid var(--border-strong); padding-bottom: 10px; }
 .topbar-actions { display: flex; align-items: center; gap: 9px; }
 .connection-tooltip-anchor { position: relative; z-index: 2; display: inline-grid; flex: 0 0 auto; }
@@ -800,7 +801,7 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .settings-account-identity strong { color: var(--text); font-size: 13px; }
 .settings-account-identity small { color: var(--muted); font-size: 12px; }
 .empty-state, .loading-state { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted-faint); text-align: center; }
-.search-loading-state { min-height: 480px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--muted-strong); text-align: center; }
+.search-loading-state { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--muted-strong); text-align: center; }
 .search-loading-orbit { position: relative; width: 84px; height: 84px; display: grid; place-items: center; color: var(--accent); }
 .search-loading-orbit::before { position: absolute; inset: 0; content: ""; border: 3px solid color-mix(in srgb, var(--accent) 26%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: spin 900ms linear infinite; }
 .search-loading-orbit svg { position: relative; }
