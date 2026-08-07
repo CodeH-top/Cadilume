@@ -31,6 +31,10 @@
   永不访问 Keychain；Release 构建只用 Keychain。开发态启动窗口保持隐藏（用户点
   Dock/托盘才显示），热重载不抢焦点。
   Source: user requirement on 2026-08-07（凭证隔离与静默启动）。
+- [ACT-022] 音量权威在前端：前端 localStorage 缓存音量并在每次加载/恢复时同步给
+  引擎；引擎不设自身默认音量（rodio 原生 1.0 仅作瞬时值），无缓存时前端默认 50%。
+  不得在 Rust 引擎里再写死默认音量。
+  Source: user requirement on 2026-08-07（引擎默认音量与前端缓存关系）。
 
 ## Validation
 
