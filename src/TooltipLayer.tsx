@@ -82,11 +82,17 @@ export function TooltipLayer() {
       if (target) show(target);
     };
     const onHide = () => hide();
+    const onVisibilityChange = () => {
+      if (document.hidden) hide();
+    };
     document.addEventListener("mouseover", onMouseOver);
     document.addEventListener("mouseout", onMouseOut);
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", onHide);
     document.addEventListener("scroll", onHide, true);
+    document.addEventListener("mouseleave", onHide);
+    window.addEventListener("blur", onHide);
+    window.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("resize", onHide);
     return () => {
       window.clearTimeout(showTimerRef.current);
@@ -95,6 +101,9 @@ export function TooltipLayer() {
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onHide);
       document.removeEventListener("scroll", onHide, true);
+      document.removeEventListener("mouseleave", onHide);
+      window.removeEventListener("blur", onHide);
+      window.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("resize", onHide);
     };
   }, [hide, show]);
