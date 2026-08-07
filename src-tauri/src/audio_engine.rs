@@ -6,20 +6,23 @@
 //! decoding, with the Plex stream pre-downloaded to a local cache file.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 /// Native playback engine (rodio + cpal) owned by the Tauri app.
 pub struct NativeAudioEngine {
     #[allow(dead_code)]
     sink: MixerDeviceSink,
-    player: Player,
+    player: Arc<Player>,
     cache_root: PathBuf,
-    duration_seconds: Mutex<Option<f64>>,
+    duration_seconds: Arc<Mutex<Option<f64>>>,
+    loaded: Arc<AtomicBool>,
+    ended_sent: Arc<AtomicBool>,
 }
 
 /// Lazy engine slot so the device stream opens on first use.
@@ -36,7 +39,7 @@ impl NativeAudioEngineSlot {
         }
     }
 
-    pub fn ensure(&self) -> Result<Arc<NativeAudioEngine>, String> {
+    pub fn ensure(&self, app: &AppHandle) -> Result<Arc<NativeAudioEngine>, String> {
         let mut guard = self.inner.lock().map_err(|_| "原生引擎状态锁失败".to_string())?;
         if let Some(engine) = guard.as_ref() {
             return Ok(Arc::clone(engine));
@@ -45,6 +48,7 @@ impl NativeAudioEngineSlot {
             NativeAudioEngine::new(self.cache_root.clone())
                 .map_err(|e| format!("原生引擎创建失败: {e}"))?,
         );
+        engine.start_event_forwarder(app.clone());
         *guard = Some(Arc::clone(&engine));
         Ok(engine)
     }
@@ -57,19 +61,21 @@ impl NativeAudioEngine {
         let sink = builder
             .open_stream()
             .map_err(|e| anyhow::anyhow!("音频流启动失败: {e}"))?;
-        let player = Player::connect_new(sink.mixer());
+        let player = Arc::new(Player::connect_new(sink.mixer()));
         // 原生引擎默认音量取 20%，避免比 WebView 播放明显更响。
         player.set_volume(0.2);
         Ok(Self {
             sink,
             player,
             cache_root,
-            duration_seconds: Mutex::new(None),
+            duration_seconds: Arc::new(Mutex::new(None)),
+            loaded: Arc::new(AtomicBool::new(false)),
+            ended_sent: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn player(&self) -> &Player {
-        &self.player
+        self.player.as_ref()
     }
 
     /// Load a local media file and start playing it.
@@ -81,6 +87,8 @@ impl NativeAudioEngine {
         self.player.clear();
         self.player.append(decoder);
         self.player.play();
+        self.loaded.store(true, Ordering::SeqCst);
+        self.ended_sent.store(false, Ordering::SeqCst);
         eprintln!(
             "[原生] rodio 载入媒体成功 队列={} 时长={:?}",
             self.player.len(),
@@ -150,6 +158,46 @@ impl NativeAudioEngine {
             bytes.len(),
         );
         self.load_and_play(final_path.to_str().unwrap())
+    }
+
+    /// Publish sanitized playback progress/ended events to the WebView.
+    pub fn start_event_forwarder(&self, app: AppHandle) {
+        let player = Arc::clone(&self.player);
+        let duration = Arc::clone(&self.duration_seconds);
+        let loaded = Arc::clone(&self.loaded);
+        let ended_sent = Arc::clone(&self.ended_sent);
+        let app_for_task = app.clone();
+        let mut last_position = -1.0f64;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let position = player.get_pos().as_secs_f64();
+                let ended = loaded.load(Ordering::SeqCst)
+                    && !ended_sent.load(Ordering::SeqCst)
+                    && player.empty()
+                    && position > 0.05;
+                if ended {
+                    ended_sent.store(true, Ordering::SeqCst);
+                    let _ = app_for_task.emit(
+                        "native-audio://event",
+                        serde_json::json!({ "type": "ended" }),
+                    );
+                    continue;
+                }
+                if (position - last_position).abs() >= 0.05 {
+                    last_position = position;
+                    let duration_value = duration.lock().map(|guard| *guard).unwrap_or(None);
+                    let _ = app_for_task.emit(
+                        "native-audio://event",
+                        serde_json::json!({
+                            "type": "progress",
+                            "position": position,
+                            "duration": duration_value,
+                        }),
+                    );
+                }
+            }
+        });
     }
 }
 
@@ -250,46 +298,46 @@ pub fn native_audio_device_check() -> serde_json::Value {
 
 #[tauri::command]
 pub async fn native_audio_load(
-    _app: AppHandle,
+    app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
     source: String,
     cache_key: Option<String>,
 ) -> Result<usize, String> {
-    let engine = state.ensure()?;
+    let engine = state.ensure(&app)?;
     engine.load_cached_and_play(&source, cache_key).await
 }
 
 #[tauri::command]
 pub fn native_audio_play(
-    _app: AppHandle,
+    app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
 ) -> Result<(), String> {
-    let engine = state.ensure()?;
+    let engine = state.ensure(&app)?;
     engine.player().play();
     Ok(())
 }
 
 #[tauri::command]
-pub fn native_audio_pause(_app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
-    if let Ok(engine) = state.ensure() {
+pub fn native_audio_pause(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
+    if let Ok(engine) = state.ensure(&app) {
         engine.player().pause();
     }
 }
 
 #[tauri::command]
-pub fn native_audio_stop(_app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
-    if let Ok(engine) = state.ensure() {
+pub fn native_audio_stop(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
+    if let Ok(engine) = state.ensure(&app) {
         engine.player().clear();
     }
 }
 
 #[tauri::command]
 pub fn native_audio_seek(
-    _app: AppHandle,
+    app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
     seconds: f64,
 ) -> Result<(), String> {
-    let engine = state.ensure()?;
+    let engine = state.ensure(&app)?;
     engine
         .player()
         .try_seek(Duration::from_secs_f64(seconds.max(0.0)))
@@ -298,21 +346,21 @@ pub fn native_audio_seek(
 
 #[tauri::command]
 pub fn native_audio_set_volume(
-    _app: AppHandle,
+    app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
     volume: f32,
 ) {
-    if let Ok(engine) = state.ensure() {
+    if let Ok(engine) = state.ensure(&app) {
         engine.player().set_volume(volume.clamp(0.0, 1.0));
     }
 }
 
 #[tauri::command]
 pub fn native_audio_status(
-    _app: AppHandle,
+    app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
 ) -> NativeStatus {
-    let Ok(engine) = state.ensure() else {
+    let Ok(engine) = state.ensure(&app) else {
         return NativeStatus {
             is_playing: false,
             position_seconds: None,

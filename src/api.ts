@@ -763,6 +763,32 @@ export interface PlaylistChanges {
   summary?: string;
 }
 
+/** Native engine commands (rodio-backed playback in Rust). */
+export async function nativeAudioLoad(source: string, cacheKey?: string): Promise<number> {
+  if (!isDesktopRuntime()) return -1;
+  return invoke("native_audio_load", { source, cacheKey });
+}
+
+export async function nativeAudioPlay(): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_play");
+}
+
+export async function nativeAudioPause(): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_pause");
+}
+
+export async function nativeAudioSeek(seconds: number): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_seek", { seconds });
+}
+
+export async function nativeAudioSetVolume(volume: number): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_set_volume", { volume });
+}
+
 /** Update a regular playlist's title/summary through the scoped Rust command. */
 export async function updatePlaylist(
   serverId: string,

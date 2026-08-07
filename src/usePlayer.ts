@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, isDesktopRuntime } from "./api";
+import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioSeek, nativeAudioSetVolume } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
 import { usableDurationSeconds } from "./playerUi";
@@ -15,6 +15,7 @@ export const PLAYBACK_SESSION_STORAGE_KEY = "cadilume-playback-session";
 export const PLAYBACK_SESSION_VERSION = 1 as const;
 export const PLAYBACK_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const PLAYBACK_SESSION_MAX_QUEUE = 500;
+const NATIVE_ENGINE_STORAGE_KEY = "cadilume-native-engine";
 const PLAYBACK_SESSION_WRITE_THROTTLE_MS = 5_000;
 const PLAYBACK_CLOCK_PUBLISH_INTERVAL_MS = 50;
 export const PLAYBACK_START_TIMEOUT_MS = 12_000;
@@ -25,6 +26,16 @@ const MIN_LOADING_VISIBLE_MS = 250;
 const STREAM_URL_INFLIGHT_CACHE_MS = 5_000;
 
 const STREAM_QUALITY_VALUES: readonly StreamQuality[] = ["auto", "original", "320", "256", "192"];
+
+/** Native engine is on by default; set the storage key to "0" to fall back to WebView audio. */
+export function nativeEngineEnabled(): boolean {
+  try {
+    if (typeof localStorage === "undefined") return true;
+    return localStorage.getItem(NATIVE_ENGINE_STORAGE_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
 
 /**
  * Only this deliberately small shape is written to localStorage. In
@@ -1189,6 +1200,41 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     }, PLAYBACK_SESSION_WRITE_THROTTLE_MS);
   }, [flushPlaybackSession]);
 
+  const loadNativeTrack = useCallback(async (params: { index: number; autoplay: boolean; resumeSeconds: number; requestId: number }) => {
+    const { index, autoplay, resumeSeconds, requestId } = params;
+    const tracks = queueRef.current;
+    const track = tracks[index];
+    if (!track || !serverId) return;
+    try {
+      const url = await requestStreamUrl(serverId, track, quality);
+      if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
+      playbackLog("info", `原生流地址已取得：index=${index} 质量=${quality}`);
+      await nativeAudioLoad(url, track.ratingKey);
+      if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
+      if (resumeSeconds > 0.5) {
+        try {
+          await nativeAudioSeek(resumeSeconds);
+        } catch {
+          // 恢复位置失败不阻断播放。
+        }
+      }
+      if (!autoplay) await nativeAudioPause();
+      setPlaying(autoplay);
+      setBuffering(false);
+      setPlaybackLoading(false);
+      playbackLog("info", `原生引擎开始播放：index=${index} 自动播放=${autoplay}`);
+    } catch (reason) {
+      if (requestId !== loadRequestRef.current) return;
+      const diagnostic = reason instanceof Error ? reason.message : String(reason);
+      playbackLog("error", `原生加载异常：index=${index} ${diagnostic}`);
+      setPlaybackLoading(false);
+      setBuffering(false);
+      setPlaying(false);
+      setError(`音频无法播放（${diagnostic}）。`);
+      setPlaybackFailure({ message: `音频无法播放（${diagnostic}）。`, technicalDetails: diagnostic, attemptedQualities: [quality] });
+    }
+  }, [quality, requestStreamUrl, serverId]);
+
   const loadAt = useCallback(async (
     index: number,
     autoplay = true,
@@ -1221,6 +1267,10 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       resumeProgressRef.current = null;
       setPlaybackLoading(false);
       setPlaying(autoplay);
+      return;
+    }
+    if (nativeEngineEnabled()) {
+      await loadNativeTrack({ index, autoplay, resumeSeconds, requestId });
       return;
     }
 
@@ -1435,6 +1485,18 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [advance]);
 
   const previous = useCallback(() => {
+    if (nativeEngineEnabled()) {
+      if (progressRef.current > 4) {
+        progressRef.current = 0;
+        setProgress(0);
+        resumeProgressRef.current = null;
+        void nativeAudioSeek(0).catch(() => undefined);
+        schedulePersistedSession(false);
+        return;
+      }
+      void advance(false);
+      return;
+    }
     const audio = audioRef.current;
     if ((audio && audio.currentTime > 4) || (!audio?.src && progressRef.current > 4)) {
       const applied = setAudioCurrentTimeSafely(audio, 0);
@@ -1467,6 +1529,17 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       schedulePersistedSession(true);
       return;
     }
+    if (nativeEngineEnabled()) {
+      if (playing) {
+        void nativeAudioPause().catch(() => undefined);
+        setPlaying(false);
+      } else {
+        void nativeAudioPlay().catch(() => undefined);
+        setPlaying(true);
+      }
+      schedulePersistedSession(true);
+      return;
+    }
     const audio = audioRef.current;
     if (!audio || !audio.src) {
       void loadAt(indexRef.current >= 0 ? indexRef.current : currentIndex, true, resumeProgressRef.current ?? progressRef.current);
@@ -1479,7 +1552,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         void audio.play();
       }
     } else audio.pause();
-  }, [current, currentIndex, duration, loadAt, schedulePersistedSession]);
+  }, [current, currentIndex, duration, loadAt, playing, schedulePersistedSession]);
 
   const seek = useCallback((seconds: number) => {
     const maximum = duration || (current?.duration || 0) / 1000;
@@ -1490,6 +1563,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     resumeProgressRef.current = bounded;
     progressRef.current = bounded;
     setProgress(bounded);
+    if (nativeEngineEnabled()) {
+      void nativeAudioSeek(bounded).catch(() => undefined);
+      schedulePersistedSession(false);
+      return;
+    }
     if (setAudioCurrentTimeSafely(audioRef.current, bounded)) resumeProgressRef.current = null;
     schedulePersistedSession(false);
   }, [current?.duration, duration, schedulePersistedSession]);
@@ -1499,6 +1577,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     setVolumeState(normalized);
     setMuted(false);
     writeStorage(VOLUME_STORAGE_KEY, String(normalized));
+    if (nativeEngineEnabled()) {
+      void nativeAudioSetVolume(normalized).catch(() => undefined);
+    }
   }, []);
 
   const setPrebufferNext = useCallback((enabled: boolean) => {
@@ -1901,7 +1982,33 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [advance]);
 
   useEffect(() => {
-    if (!isDesktopRuntime() || !playing || currentIndex < 0) return;
+    if (!isDesktopRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("native-audio://event", (event) => {
+      const payload = event.payload as { type?: string; position?: number; duration?: number } | null;
+      if (!payload) return;
+      if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
+        progressRef.current = payload.position;
+        setProgress(payload.position);
+        if (typeof payload.duration === "number" && Number.isFinite(payload.duration) && payload.duration > 0) {
+          setDuration(payload.duration);
+        }
+      } else if (payload.type === "ended") {
+        void advance(true);
+      }
+    }).then((disposeFn) => {
+      if (disposed) disposeFn();
+      else unlisten = disposeFn;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [advance]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime() || nativeEngineEnabled() || !playing || currentIndex < 0) return;
     let animationFrame = 0;
     let lastPublishedAt = Number.NEGATIVE_INFINITY;
     const publishPlaybackClock = (timestamp: number) => {
@@ -1933,7 +2040,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const requestId = ++prebufferRequestRef.current;
     const pool = audioPoolRef.current;
     const playbackServerId = queueServerIdRef.current;
-    if (!prebufferNext || !pool || !playbackServerId || playbackServerId !== serverId || !isDesktopRuntime()) {
+    if (!prebufferNext || nativeEngineEnabled() || !pool || !playbackServerId || playbackServerId !== serverId || !isDesktopRuntime()) {
       pool?.cancelPrepared();
       return;
     }
