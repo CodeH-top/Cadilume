@@ -1969,18 +1969,24 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
   const [deleting, setDeleting] = useState<PlexPlaylist | null>(null);
   const [editBusy, setEditBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => setContextMenu(null);
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (contextMenuRef.current?.contains(target)) return;
+      close();
+    };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") close();
     };
-    document.addEventListener("mousedown", close);
+    document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("scroll", close, true);
     document.addEventListener("keydown", onKeyDown);
     return () => {
-      document.removeEventListener("mousedown", close);
+      document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("scroll", close, true);
       document.removeEventListener("keydown", onKeyDown);
     };
@@ -2041,14 +2047,12 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
       </div>
       {contextMenu && createPortal(
         <div
+          ref={contextMenuRef}
           className="playlist-context-menu"
           style={{ left: menuLeft, top: menuTop }}
           role="menu"
           aria-label={`${contextMenu.playlist.title} 歌单操作`}
         >
-          <button type="button" role="menuitem" onClick={() => { onOpen(contextMenu.playlist); setContextMenu(null); }}>
-            <Play size={15} />显示歌单
-          </button>
           <button type="button" role="menuitem" disabled={contextMenu.playlist.readOnly} onClick={() => { setEditing(contextMenu.playlist); setContextMenu(null); }}>
             <Pencil size={15} />编辑
           </button>
