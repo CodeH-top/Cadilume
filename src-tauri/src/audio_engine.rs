@@ -1240,7 +1240,10 @@ impl NativeAudioEngine {
         let engine = Arc::clone(self);
         let app_for_task = app.clone();
         let mut last_position = -1.0f64;
-        tokio::spawn(async move {
+        // 引擎可能在同步 Tauri 命令（native_queue_set 等）里首次创建，
+        // tokio::spawn 在无运行时上下文的主线程会 panic；用 Tauri 全局
+        // 运行时可同时兼容同步/异步调用。
+        tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 if engine.stopped.load(Ordering::SeqCst) {
