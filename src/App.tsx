@@ -53,6 +53,7 @@ import { KeepAlive, type KeepAliveRef, useKeepAliveContext, useKeepAliveRef } fr
 import { createHashRouter, Navigate, RouterProvider, useLocation, useNavigate, useOutlet } from "react-router-dom";
 import { createContext, FormEvent, memo, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import { createPortal, flushSync } from "react-dom";
+import { TooltipLayer } from "./TooltipLayer";
 import {
   artworkUrl,
   addTracksToPlaylist,
@@ -359,6 +360,7 @@ function AppFrame({ children, integrated = false }: { children: ReactNode; integ
     >
       {!integrated && <AppTitlebar />}
       <div className="app-frame-content">{children}</div>
+      <TooltipLayer />
     </div>
   );
 }
@@ -1905,9 +1907,7 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
         </button>
       </div>
       <div id="sidebar-playlist-list" className="sidebar-playlist-list" aria-busy={loading || undefined} hidden={collapsed}>
-        {loading ? (
-          <div className="sidebar-playlist-state" role="status"><LoaderCircle className="spin" size={17} /><span>正在同步歌单…</span></div>
-        ) : error ? (
+        {error ? (
           <div className="sidebar-playlist-state is-error" role="alert"><span>歌单读取失败</span><button type="button" onClick={onRetry}>重试</button></div>
         ) : !playlists.length ? (
           <div className="sidebar-playlist-state"><ListMusic size={18} /><span>暂无音乐歌单</span></div>
@@ -1933,6 +1933,12 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
             </button>
           );
         })}
+        {loading && (
+          <div className="sidebar-playlist-loading" role="status">
+            <LoaderCircle className="spin" size={17} />
+            <span>正在同步歌单…</span>
+          </div>
+        )}
       </div>
     </nav>
   );

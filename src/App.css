@@ -151,21 +151,7 @@ button, input, select { font: inherit; }
 button { color: inherit; }
 button, select { cursor: pointer; }
 button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-button[data-tooltip] { position: relative; overflow: visible; isolation: isolate; }
-button[data-tooltip]::after { position: absolute; z-index: 300; left: 50%; bottom: calc(100% + 8px); width: max-content; max-width: min(240px, calc(100vw - 24px)); content: attr(data-tooltip); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 8px; background: color-mix(in srgb, var(--panel) 96%, transparent); color: var(--muted-strong); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24); font-size: 12px; font-weight: 600; line-height: 1.3; text-align: center; white-space: normal; overflow-wrap: anywhere; opacity: 0; pointer-events: none; transform: translate(-50%, 4px); transition: opacity 140ms ease, transform 140ms ease; }
-button[data-tooltip]:is(:hover, :focus-visible)::after { opacity: 1; transform: translate(-50%, 0); }
-.topbar-actions button[data-tooltip]::after { top: calc(100% + 8px); bottom: auto; transform: translate(-50%, -4px); }
-.topbar-actions button[data-tooltip]:is(:hover, :focus-visible)::after { transform: translate(-50%, 0); }
-.search-results-toolbar button[data-tooltip]::after,
-.page-heading button[data-tooltip]::after,
-.section-heading button[data-tooltip]::after,
-.detail-hero button[data-tooltip]::after,
-.detail-back-button[data-tooltip]::after { top: calc(100% + 8px); bottom: auto; transform: translate(-50%, -4px); }
-.search-results-toolbar button[data-tooltip]:is(:hover, :focus-visible)::after,
-.page-heading button[data-tooltip]:is(:hover, :focus-visible)::after,
-.section-heading button[data-tooltip]:is(:hover, :focus-visible)::after,
-.detail-hero button[data-tooltip]:is(:hover, :focus-visible)::after,
-.detail-back-button[data-tooltip]:is(:hover, :focus-visible)::after { transform: translate(-50%, 0); }
+.auto-tooltip { position: fixed; z-index: 1000; max-width: min(240px, calc(100vw - 16px)); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 8px; background: color-mix(in srgb, var(--panel) 96%, transparent); color: var(--muted-strong); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24); font-size: 12px; font-weight: 600; line-height: 1.3; text-align: center; white-space: normal; overflow-wrap: anywhere; pointer-events: none; }
 .theme-transition-snapshot { position: fixed; z-index: 1000; inset: 0; width: 100vw; height: 100vh; overflow: clip; contain: layout paint style; visibility: hidden; pointer-events: none; user-select: none; -webkit-user-select: none; color: var(--text); background: var(--bg); backface-visibility: hidden; transform: translateZ(0); will-change: clip-path; }
 .theme-transition-snapshot.is-ready { visibility: visible; }
 .theme-transition-snapshot,
@@ -223,8 +209,9 @@ button[data-tooltip]:is(:hover, :focus-visible)::after { opacity: 1; transform: 
 .sidebar-playlists-create:hover, .sidebar-playlists-create:focus-visible { color: var(--text); background: var(--hover-fill); }
 .sidebar-playlists.is-collapsed { flex: 0 0 auto; grid-template-rows: auto; }
 .sidebar-playlists.is-collapsed .sidebar-playlists-heading > svg { transform: rotate(-90deg); }
-.sidebar-playlist-list { min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; display: grid; align-content: start; gap: 3px; padding: 1px 4px 2px 0; }
+.sidebar-playlist-list { position: relative; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; display: grid; align-content: start; gap: 3px; padding: 1px 4px 2px 0; }
 .sidebar-playlist-list[hidden] { display: none; }
+.sidebar-playlist-loading { position: absolute; z-index: 2; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--side-panel); color: var(--muted); font-size: 12px; }
 .sidebar-playlist-item { width: 100%; min-width: 0; min-height: 46px; display: grid; grid-template-columns: 32px minmax(0, 1fr) 7px; align-items: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; padding: 5px 8px; background: transparent; color: var(--muted); text-align: left; transition: color 170ms ease, background 170ms ease, border-color 170ms ease, box-shadow 170ms ease; }
 .sidebar-playlist-item > span:last-child { min-width: 0; display: grid; gap: 1px; }
 .sidebar-playlist-artwork { width: 32px; height: 32px; border-radius: 6px; box-shadow: 0 2px 7px rgba(0, 0, 0, 0.18); }
