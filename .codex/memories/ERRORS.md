@@ -108,3 +108,14 @@
   AX 做 Cadilume 的 UI 播放回归。
 - 机械播放验证以引擎层真实 PMS 回归为准（无缝交接 + 20 次高频切歌），
   UI 层主观听感留给用户按计划文档清单执行。
+
+## 2026-08-07 — 同步 Tauri 命令里 tokio::spawn 会 panic（fb95edc）
+
+- 崩溃现象：点击推荐专辑播放时 SIGABRT，栈在 `native_queue_set` →
+  `ensure` → `start_event_forwarder` → `tokio::task::spawn`。
+- 根因：Tauri 同步命令（`native_queue_set` 等）在主线程执行，没有 tokio
+  运行时上下文；若引擎首次创建发生在同步命令里，`tokio::spawn` 直接 panic。
+  此前首个原生调用总是异步命令（预取/加载），所以没暴露。
+- 修复：事件转发线程改用 `tauri::async_runtime::spawn`（Tauri 全局运行时，
+  同步/异步上下文都安全）；`precache` 若换用该 API，注意其 JoinHandle
+  `Future::Output` 是 `tauri::Result<T>`。
