@@ -91,6 +91,9 @@ export interface NowPlayingViewProps {
   durationSeconds?: number;
   queueOpen?: boolean;
   queueAvailable?: boolean;
+  /** 队列边界禁用：单曲/首尾曲（未循环）时由父级计算传入。 */
+  canPrevious?: boolean;
+  canNext?: boolean;
   theme?: NowPlayingTheme;
   onSeek: (seconds: number) => void;
   onShuffleChange?: (enabled: boolean) => void;
@@ -187,6 +190,8 @@ export function NowPlayingView({
   durationSeconds,
   queueOpen = false,
   queueAvailable = false,
+  canPrevious = true,
+  canNext = true,
   theme,
   onSeek,
   onShuffleChange,
@@ -421,7 +426,7 @@ export function NowPlayingView({
               <button
                 className="now-playing-control-button"
                 type="button"
-                disabled={!track || !onPrevious}
+                disabled={!track || !onPrevious || canPrevious === false}
                 aria-label="上一首"
                 onClick={onPrevious}
               >
@@ -445,7 +450,7 @@ export function NowPlayingView({
               <button
                 className="now-playing-control-button"
                 type="button"
-                disabled={!track || !onNext}
+                disabled={!track || !onNext || canNext === false}
                 aria-label="下一首"
                 onClick={onNext}
               >

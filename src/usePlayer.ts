@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
+import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
@@ -787,6 +787,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const track = tracks[index];
     if (!track || !serverId) return;
     try {
+      // 切换即停旧歌：先让引擎清空，避免取流期间旧歌继续播放/进度回跳。
+      await nativeAudioStop().catch(() => undefined);
       syncNativeQueue();
       // 引擎可能刚创建（默认 20%），把前端实际音量同步过去，避免
       // UI 显示与真实输出不一致。
@@ -1217,6 +1219,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number } | null;
       if (!payload) return;
       if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
+        // 加载期间忽略旧歌的残留进度事件，保证切歌瞬间进度归 0 不被覆盖。
+        if (playbackLoadingRef.current) return;
         progressRef.current = payload.position;
         setProgress(payload.position);
         if (typeof payload.duration === "number" && Number.isFinite(payload.duration) && payload.duration > 0) {

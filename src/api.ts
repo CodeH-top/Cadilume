@@ -785,6 +785,11 @@ export async function nativeAudioPlay(): Promise<void> {
   await invoke("native_audio_play");
 }
 
+export async function nativeAudioStop(): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_stop");
+}
+
 export async function nativeAudioPause(): Promise<void> {
   if (!isDesktopRuntime()) return;
   await invoke("native_audio_pause");

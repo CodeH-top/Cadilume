@@ -546,6 +546,17 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   };
   const hasCurrentTrack = Boolean(player.current);
   const hasQueue = hasCurrentTrack && player.queue.length > 0;
+  const queueNavigation = (() => {
+    const length = player.queue.length;
+    const atFirst = player.currentIndex <= 0;
+    const atLast = player.currentIndex >= length - 1;
+    // 循环开启或随机模式下首尾始终可切；顺序且未循环时首曲禁上一首、末曲禁下一首。
+    const anyWrap = player.repeat !== "off" || player.shuffle;
+    return {
+      canPrevious: length > 1 && (anyWrap || !atFirst),
+      canNext: length > 1 && (anyWrap || !atLast),
+    };
+  })();
   const hasLyrics = hasDisplayableLyrics(nowPlayingLyrics.document);
   const lyricsUnavailable = hasCurrentTrack
     && !nowPlayingLyrics.loading
@@ -1180,6 +1191,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         lyrics={nowPlayingLyrics}
         queueOpen={queuePanelOpen}
         queueAvailable={hasQueue}
+        canPrevious={queueNavigation.canPrevious}
+        canNext={queueNavigation.canNext}
         theme={themeMode}
         headerActions={(
           <div className="now-playing-header-status-actions" role="group" aria-label="外观与连接状态">
@@ -4271,6 +4284,12 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
   const displayDuration = usableDurationSeconds(player.duration, (player.current?.duration || 0) / 1000);
   const progressFill = rangeFillPercent(player.progress, displayDuration);
   const playbackBusy = loading || buffering;
+  const queueLength = player.queue.length;
+  const atFirst = player.currentIndex <= 0;
+  const atLast = player.currentIndex >= queueLength - 1;
+  const anyWrap = player.repeat !== "off" || player.shuffle;
+  const canPrevious = queueLength > 1 && (anyWrap || !atFirst);
+  const canNext = queueLength > 1 && (anyWrap || !atLast);
   const playbackLabel = playbackControlLabel({ playing: player.playing, loading, buffering });
   const cycleRepeat = () => player.setRepeat(player.repeat === "off" ? "all" : player.repeat === "all" ? "one" : "off");
   return (
@@ -4284,7 +4303,7 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
       <div className="player-center">
         <div className="transport-controls">
           <IconButton label={player.shuffle ? "关闭随机播放（当前列表）" : "随机播放当前列表"} tooltip={null} active={player.shuffle} onClick={() => player.setShuffle(!player.shuffle)}><Shuffle size={16} /></IconButton>
-          <IconButton label="上一首" tooltip={null} onClick={player.previous}><SkipBack size={19} fill="currentColor" /></IconButton>
+          <IconButton label="上一首" tooltip={null} disabled={!canPrevious} onClick={player.previous}><SkipBack size={19} fill="currentColor" /></IconButton>
           <button
             className={`play-button ${playbackBusy ? "is-loading" : ""}`}
             aria-label={playbackLabel}
@@ -4299,7 +4318,7 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
                 ? <Pause className="pause-icon" size={19} fill="currentColor" aria-hidden="true" />
                 : <Play className="play-icon" size={19} fill="currentColor" aria-hidden="true" />}
           </button>
-          <IconButton label="下一首" tooltip={null} onClick={player.next}><SkipForward size={19} fill="currentColor" /></IconButton>
+          <IconButton label="下一首" tooltip={null} disabled={!canNext} onClick={player.next}><SkipForward size={19} fill="currentColor" /></IconButton>
           <IconButton label={player.repeat === "one" ? "单曲循环" : player.repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止"} tooltip={null} active={player.repeat !== "off"} onClick={cycleRepeat}>{player.repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}</IconButton>
         </div>
         <div className="progress-row"><span>{formatDuration(player.progress * 1000)}</span><input aria-label="播放进度" type="range" min="0" max={Math.max(1, displayDuration)} step="1" value={Math.min(player.progress, displayDuration || 0)} style={{ "--range-progress": `${progressFill}%` } as CSSProperties} onChange={(event) => player.seek(Number(event.target.value))} /><span>{formatDuration(displayDuration * 1000)}</span></div>
