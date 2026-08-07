@@ -2,21 +2,30 @@
 //! macOS: MPNowPlayingInfoCenter + MPRemoteCommandCenter.
 //! Windows: SystemMediaTransportControls (SMTC).
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaybackState {
+    Playing,
+    Paused,
+    Stopped,
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
+    use super::PlaybackState;
     use std::ptr::NonNull;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use block2::RcBlock;
-    use objc2_core_foundation::CGSize;
     use objc2::rc::Retained;
-    use objc2::AnyThread;
     use objc2::runtime::AnyObject;
+    use objc2::AnyThread;
     use objc2_app_kit::NSImage;
+    use objc2_core_foundation::CGSize;
     use objc2_foundation::{NSData, NSDictionary, NSNumber, NSString};
     use objc2_media_player::{
         MPChangePlaybackPositionCommandEvent, MPMediaItemArtwork, MPNowPlayingInfoCenter,
-        MPRemoteCommand, MPRemoteCommandCenter, MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
+        MPNowPlayingPlaybackState, MPRemoteCommand, MPRemoteCommandCenter, MPRemoteCommandEvent,
+        MPRemoteCommandHandlerStatus,
     };
     use tauri::{AppHandle, Emitter};
 
@@ -28,6 +37,8 @@ mod macos {
     const KEY_DURATION: &str = "MPMediaItemPropertyPlaybackDuration";
     const KEY_POSITION: &str = "MPNowPlayingInfoPropertyElapsedPlaybackTime";
     const KEY_RATE: &str = "MPNowPlayingInfoPropertyPlaybackRate";
+    const KEY_DEFAULT_RATE: &str = "MPNowPlayingInfoPropertyDefaultPlaybackRate";
+    const KEY_MEDIA_TYPE: &str = "MPNowPlayingInfoPropertyMediaType";
     const KEY_ARTWORK: &str = "MPMediaItemPropertyArtwork";
 
     fn app_handle() -> Option<AppHandle> {
@@ -56,15 +67,13 @@ mod macos {
             run(unsafe { event.as_ref() })
         });
         unsafe {
+            command.setEnabled(true);
             command.addTargetWithHandler(&block);
         }
     }
 
     pub fn install(app: AppHandle) {
-        *COMMAND_APP
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap() = Some(app);
+        *COMMAND_APP.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(app);
         let center = unsafe { MPRemoteCommandCenter::sharedCommandCenter() };
 
         register_command(unsafe { &center.playCommand() }, |_| {
@@ -87,14 +96,18 @@ mod macos {
             emit_remote("previous", None);
             MPRemoteCommandHandlerStatus::Success
         });
-        register_command(unsafe { &center.changePlaybackPositionCommand() }, |event| {
-            let position_event = unsafe {
-                &*(event as *const MPRemoteCommandEvent as *const MPChangePlaybackPositionCommandEvent)
-            };
-            let position = unsafe { position_event.positionTime() };
-            emit_remote("seek", Some(position));
-            MPRemoteCommandHandlerStatus::Success
-        });
+        register_command(
+            unsafe { &center.changePlaybackPositionCommand() },
+            |event| {
+                let position_event = unsafe {
+                    &*(event as *const MPRemoteCommandEvent
+                        as *const MPChangePlaybackPositionCommandEvent)
+                };
+                let position = unsafe { position_event.positionTime() };
+                emit_remote("seek", Some(position));
+                MPRemoteCommandHandlerStatus::Success
+            },
+        );
     }
 
     /// Build an `MPMediaItemArtwork` from image bytes. AppKit classes are
@@ -102,9 +115,8 @@ mod macos {
     fn make_artwork(bytes: &[u8]) -> Option<Retained<MPMediaItemArtwork>> {
         let data = NSData::with_bytes(bytes);
         let image = NSImage::initWithData(NSImage::alloc(), &data)?;
-        let block = RcBlock::new(move |_size: CGSize| -> NonNull<NSImage> {
-            NonNull::from(&*image)
-        });
+        let block =
+            RcBlock::new(move |_size: CGSize| -> NonNull<NSImage> { NonNull::from(&*image) });
         Some(unsafe {
             MPMediaItemArtwork::initWithBoundsSize_requestHandler(
                 MPMediaItemArtwork::alloc(),
@@ -123,23 +135,20 @@ mod macos {
         album: &str,
         duration_seconds: Option<f64>,
         position_seconds: f64,
-        playing: bool,
+        playback_state: PlaybackState,
         artwork: Option<&[u8]>,
     ) {
         // 变更时输出脱敏诊断：确认系统更新确实被调用并带上了内容。
         static LAST_LOGGED: OnceLock<Mutex<Option<String>>> = OnceLock::new();
         let log_key = format!(
-            "{title}|{artist}|{album}|artwork={}",
+            "{title}|{artist}|{album}|state={playback_state:?}|artwork={}",
             artwork.map(|bytes| bytes.len()).unwrap_or(0)
         );
         {
-            let mut last = LAST_LOGGED
-                .get_or_init(|| Mutex::new(None))
-                .lock()
-                .unwrap();
+            let mut last = LAST_LOGGED.get_or_init(|| Mutex::new(None)).lock().unwrap();
             if last.as_deref() != Some(&log_key) {
                 eprintln!(
-                    "[播放] NowPlaying 更新：title={title} artist={artist} album={album} artwork_bytes={}",
+                    "[播放] NowPlaying 更新：title={title} artist={artist} album={album} state={playback_state:?} artwork_bytes={}",
                     artwork.map(|bytes| bytes.len()).unwrap_or(0),
                 );
                 *last = Some(log_key);
@@ -167,7 +176,18 @@ mod macos {
             push_number(KEY_DURATION, duration);
         }
         push_number(KEY_POSITION, position_seconds);
-        push_number(KEY_RATE, if playing { 1.0 } else { 0.0 });
+        push_number(
+            KEY_RATE,
+            if playback_state == PlaybackState::Playing {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        push_number(KEY_DEFAULT_RATE, 1.0);
+        // MPNowPlayingInfoMediaTypeAudio = 1. Explicitly publishing it lets
+        // Control Center choose the audio card presentation.
+        push_number(KEY_MEDIA_TYPE, 1.0);
         if let Some(bytes) = artwork {
             if let Some(artwork_object) = make_artwork(bytes) {
                 keys.push(NSString::from_str(KEY_ARTWORK));
@@ -179,6 +199,11 @@ mod macos {
         let dictionary = NSDictionary::from_retained_objects(&key_refs, &values);
         unsafe {
             center.setNowPlayingInfo(Some(&dictionary));
+            center.setPlaybackState(match playback_state {
+                PlaybackState::Playing => MPNowPlayingPlaybackState::Playing,
+                PlaybackState::Paused => MPNowPlayingPlaybackState::Paused,
+                PlaybackState::Stopped => MPNowPlayingPlaybackState::Stopped,
+            });
         }
     }
 
@@ -188,8 +213,8 @@ mod macos {
         album: &str,
         duration_seconds: Option<f64>,
         position_seconds: f64,
-        playing: bool,
-        artwork: Option<&[u8]>,
+        playback_state: PlaybackState,
+        artwork: Option<Arc<Vec<u8>>>,
     ) {
         let Some(app) = app_handle() else {
             return;
@@ -197,7 +222,6 @@ mod macos {
         let title = title.to_string();
         let artist = artist.to_string();
         let album = album.to_string();
-        let artwork = artwork.map(|bytes| bytes.to_vec());
         let _ = app.run_on_main_thread(move || {
             build_and_set_now_playing(
                 &title,
@@ -205,9 +229,22 @@ mod macos {
                 &album,
                 duration_seconds,
                 position_seconds,
-                playing,
-                artwork.as_deref(),
+                playback_state,
+                artwork.as_deref().map(|bytes| bytes.as_slice()),
             );
+        });
+    }
+
+    pub fn clear() {
+        let Some(app) = app_handle() else {
+            return;
+        };
+        let _ = app.run_on_main_thread(|| {
+            let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
+            unsafe {
+                center.setPlaybackState(MPNowPlayingPlaybackState::Stopped);
+                center.setNowPlayingInfo(None);
+            }
         });
     }
 
@@ -223,7 +260,7 @@ mod macos {
                 "测试专辑",
                 Some(180.0),
                 12.5,
-                true,
+                PlaybackState::Playing,
                 None,
             );
             let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
@@ -237,8 +274,14 @@ mod macos {
             assert_eq!(title_string.to_string(), "测试歌名");
             let rate = info.objectForKey(&NSString::from_str(KEY_RATE));
             assert!(rate.is_some(), "应有播放速率键");
+            assert_eq!(
+                unsafe { center.playbackState() },
+                MPNowPlayingPlaybackState::Playing,
+                "应显式发布 macOS 播放状态",
+            );
             // 清掉，避免影响真实运行时的控制中心。
             unsafe {
+                center.setPlaybackState(MPNowPlayingPlaybackState::Stopped);
                 center.setNowPlayingInfo(None);
             }
         }
@@ -247,7 +290,8 @@ mod macos {
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use std::sync::{Mutex, OnceLock};
+    use super::PlaybackState;
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use tauri::{AppHandle, Emitter};
     use windows::core::HSTRING;
@@ -286,10 +330,7 @@ mod windows {
     }
 
     pub fn install(app: AppHandle) {
-        *COMMAND_APP
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap() = Some(app);
+        *COMMAND_APP.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(app);
         let Ok(controls) = SystemMediaTransportControls::GetForCurrentView() else {
             return;
         };
@@ -327,8 +368,8 @@ mod windows {
         album: &str,
         duration_seconds: Option<f64>,
         position_seconds: f64,
-        playing: bool,
-        _artwork: Option<&[u8]>,
+        playback_state: PlaybackState,
+        _artwork: Option<Arc<Vec<u8>>>,
     ) {
         let Some(controls) = CONTROLS.get() else {
             return;
@@ -349,10 +390,10 @@ mod windows {
         if !album.is_empty() {
             let _ = music.SetAlbumTitle(&HSTRING::from(album));
         }
-        let _ = controls.SetPlaybackStatus(if playing {
-            MediaPlaybackStatus::Playing
-        } else {
-            MediaPlaybackStatus::Paused
+        let _ = controls.SetPlaybackStatus(match playback_state {
+            PlaybackState::Playing => MediaPlaybackStatus::Playing,
+            PlaybackState::Paused => MediaPlaybackStatus::Paused,
+            PlaybackState::Stopped => MediaPlaybackStatus::Stopped,
         });
         let Ok(timeline) = SystemMediaTransportControlsTimelineProperties::new() else {
             return;
@@ -367,9 +408,20 @@ mod windows {
         let _ = controls.UpdateTimelineProperties(&timeline);
         let _ = updater.Update();
     }
+
+    pub fn clear() {
+        let Some(controls) = CONTROLS.get() else {
+            return;
+        };
+        let _ = controls.SetPlaybackStatus(MediaPlaybackStatus::Stopped);
+        if let Ok(updater) = controls.DisplayUpdater() {
+            let _ = updater.ClearAll();
+            let _ = updater.Update();
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
-pub use macos::{install, update_metadata};
+pub use macos::{clear, install, update_metadata};
 #[cfg(target_os = "windows")]
-pub use windows::{install, update_metadata};
+pub use windows::{clear, install, update_metadata};

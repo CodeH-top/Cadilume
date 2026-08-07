@@ -82,6 +82,36 @@ const finiteNumber = (value: unknown): value is number => (
   typeof value === "number" && Number.isFinite(value)
 );
 
+/**
+ * Versioned identity for the native disk cache. Rust hashes this value before
+ * using it as a filename, preventing identifier leakage and separating server,
+ * quality and concrete media-part variants of the same rating key.
+ */
+export function nativeAudioCacheIdentity(
+  serverId: string,
+  track: PlexItem,
+  quality: StreamQuality,
+): string {
+  const media = track.Media?.[0];
+  const part = media?.Part?.[0];
+  const boundedNumber = (value: number | undefined): number => (
+    finiteNumber(value) && value >= 0 ? value : 0
+  );
+  return JSON.stringify([
+    "cadilume-native-audio-v2",
+    serverId,
+    track.ratingKey,
+    track.key,
+    quality,
+    media?.audioCodec || "",
+    media?.container || "",
+    boundedNumber(media?.bitrate),
+    part?.key || "",
+    boundedNumber(part?.size),
+    boundedNumber(part?.duration ?? track.duration),
+  ]);
+}
+
 /** Plex paths are relative and must never be turned into persisted URLs. */
 function safePersistedPath(value: unknown): string | undefined {
   if (typeof value !== "string" || !value || value.length > 2_048) return undefined;
@@ -766,9 +796,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     }, PLAYBACK_SESSION_WRITE_THROTTLE_MS);
   }, [flushPlaybackSession]);
 
-  const syncNativeQueue = useCallback(() => {
-    if (!isDesktopRuntime()) return;
-    void nativeQueueSet(
+  const syncNativeQueue = useCallback((): Promise<void> => {
+    if (!isDesktopRuntime()) return Promise.resolve();
+    return nativeQueueSet(
       queueRef.current.map((track) => ({
         rating_key: track.ratingKey,
         title: track.title || "",
@@ -778,7 +808,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       indexRef.current,
       repeatRef.current,
       shuffleRef.current,
-    ).catch(() => undefined);
+    );
   }, []);
 
   const loadNativeTrack = useCallback(async (params: { index: number; autoplay: boolean; resumeSeconds: number; requestId: number }) => {
@@ -789,10 +819,10 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     try {
       // 切换即停旧歌：先让引擎清空，避免取流期间旧歌继续播放/进度回跳。
       await nativeAudioStop().catch(() => undefined);
-      syncNativeQueue();
-      // 引擎可能刚创建（默认 20%），把前端实际音量同步过去，避免
-      // UI 显示与真实输出不一致。
-      void nativeAudioSetVolume(volumeRef.current).catch(() => undefined);
+      await syncNativeQueue();
+      // 音量权威始终在前端；即使引擎尚未创建，Rust slot 也会先记住该值，
+      // 在创建 Player 的同一轮应用，避免首个采样短暂以 100% 输出。
+      await nativeAudioSetVolume(volumeRef.current);
       const url = await requestStreamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       playbackLog("info", `原生流地址已取得：index=${index} 质量=${quality}`);
@@ -801,7 +831,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         ?? (track.thumb
           ? await artworkUrl(serverId, track.thumb, 512, 512).catch(() => undefined)
           : undefined);
-      await nativeAudioLoad(url, track.ratingKey, {
+      if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
+      await nativeAudioLoad(url, nativeAudioCacheIdentity(serverId, track, quality), {
         title: track.title,
         artist: trackArtist(track),
         album: trackAlbum(track),
@@ -989,30 +1020,37 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [loadAt, schedulePersistedSession]);
 
   /** 切歌瞬间的动作：立即停掉旧歌，并把进度状态同步归 0，不等任何引擎 IPC 返回。 */
-  const stopCurrentImmediately = useCallback(() => {
-    if (isDesktopRuntime()) void nativeAudioStop().catch(() => undefined);
+  const stopCurrentImmediately = useCallback((): Promise<void> => {
+    const stop = isDesktopRuntime()
+      ? nativeAudioStop().catch(() => undefined)
+      : Promise.resolve();
     resumeProgressRef.current = null;
     progressRef.current = 0;
     setProgress(0);
+    return stop;
   }, []);
 
   const next = useCallback(() => {
     // 先停旧歌 + 进度归 0，避免 nativeQueueNext IPC 往返期间旧歌继续出声/进度残留。
-    stopCurrentImmediately();
+    const stopped = stopCurrentImmediately();
     if (!isDesktopRuntime()) {
       void advance(false);
       return;
     }
-    void nativeQueueNext()
-      .then((index) => {
-        if (index >= 0) void loadAt(index, true);
-      })
-      .catch(() => void advance(false));
+    void (async () => {
+      await stopped;
+      try {
+        const index = await nativeQueueNext();
+        if (index >= 0) await loadAt(index, true);
+      } catch {
+        advance(false);
+      }
+    })();
   }, [advance, loadAt, stopCurrentImmediately]);
 
   const previous = useCallback(() => {
     if (!isDesktopRuntime()) {
-      stopCurrentImmediately();
+      void stopCurrentImmediately();
       void advance(false);
       return;
     }
@@ -1025,15 +1063,17 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       return;
     }
     // 切到上一首同样先停旧歌 + 进度归 0，不等引擎 IPC 返回。
-    stopCurrentImmediately();
-    void nativeQueuePrevious()
-      .then((index) => {
-        if (index >= 0) void loadAt(index, true);
-      })
-      .catch(() => {
+    const stopped = stopCurrentImmediately();
+    void (async () => {
+      await stopped;
+      try {
+        const index = await nativeQueuePrevious();
+        if (index >= 0) await loadAt(index, true);
+      } catch {
         // 没有上一首时回落到当前曲目开头重新播放，避免停在“已停止且进度为 0”的状态。
-        if (indexRef.current >= 0) void loadAt(indexRef.current, true, 0);
-      });
+        if (indexRef.current >= 0) await loadAt(indexRef.current, true, 0);
+      }
+    })();
   }, [loadAt, schedulePersistedSession, stopCurrentImmediately]);
 
   const toggle = useCallback(() => {
@@ -1277,7 +1317,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         schedulePersistedSession(true);
       } else if (payload.type === "remote") {
         const command = typeof payload.command === "string" ? payload.command : "";
-        if (command === "play" || command === "toggle") toggle();
+        if (command === "play") { if (!playing) toggle(); }
+        else if (command === "toggle") toggle();
         else if (command === "pause") { if (playing) toggle(); }
         else if (command === "next") next();
         else if (command === "previous") previous();
@@ -1313,36 +1354,50 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const nextTrack = nextIndex == null ? undefined : tracks[nextIndex];
     if (!nextTrack || !serverId) return;
     const requestId = ++precacheRequestRef.current;
-    if (!shuffle && nextIndex != null) {
-      // 顺序模式额外预热第二首 ahead（后台限速，不参与 gapless 预排），
-      // 让切歌缓存再往深一层，Plexamp 风格的 2–3 首 ahead 预取。
-      const secondIndex = getSequentialNextIndex(
-        nextIndex,
-        tracks.length,
-        repeat === "one" ? "all" : repeat,
-      );
-      const secondTrack =
-        secondIndex == null || secondIndex === nextIndex ? undefined : tracks[secondIndex];
-      if (secondTrack) {
-        void requestStreamUrl(serverId, secondTrack, quality)
-          .then((url) => {
-            if (precacheRequestRef.current !== requestId) return undefined;
-            return nativeAudioPrecache(url, secondTrack.ratingKey, true);
-          })
-          .catch(() => undefined);
+    const secondIndex = !shuffle && nextIndex != null
+      ? getSequentialNextIndex(nextIndex, tracks.length, repeat === "one" ? "all" : repeat)
+      : null;
+    const secondTrack = secondIndex == null || secondIndex === nextIndex
+      ? undefined
+      : tracks[secondIndex];
+    void (async () => {
+      try {
+        // Immediate next is always admitted before far-ahead warming. Rust also
+        // enforces this priority, so another caller cannot invert the order.
+        const url = await requestStreamUrl(serverId, nextTrack, quality);
+        if (precacheRequestRef.current !== requestId || nextIndex == null) return;
+        const artworkPromise = nextTrack.imageUrl
+          ? Promise.resolve(nextTrack.imageUrl)
+          : nextTrack.thumb
+            ? artworkUrl(serverId, nextTrack.thumb, 512, 512).catch(() => undefined)
+            : Promise.resolve(undefined);
+        const nextCacheIdentity = nativeAudioCacheIdentity(serverId, nextTrack, quality);
+        await nativeAudioPrecache(url, nextCacheIdentity);
+        if (precacheRequestRef.current !== requestId) return;
+        const artworkTicket = await artworkPromise;
+        if (precacheRequestRef.current !== requestId) return;
+        // Carry the complete source identity into Rust. Device switching and
+        // Now Playing remain correct after a sample-level gapless handoff.
+        await nativeAudioQueueNextSource(nextIndex, url, nextCacheIdentity, {
+          title: nextTrack.title,
+          artist: trackArtist(nextTrack),
+          album: trackAlbum(nextTrack),
+          artworkUrl: artworkTicket,
+        });
+        if (precacheRequestRef.current !== requestId || !secondTrack) return;
+        const secondUrl = await requestStreamUrl(serverId, secondTrack, quality);
+        if (precacheRequestRef.current !== requestId) return;
+        // Far-ahead warming is throttled and opportunistic; it starts only
+        // after the immediate next source is safely attached to rodio.
+        await nativeAudioPrecache(
+          secondUrl,
+          nativeAudioCacheIdentity(serverId, secondTrack, quality),
+          true,
+        );
+      } catch {
+        // Prefetch is best-effort and never blocks ordinary playback fallback.
       }
-    }
-    void requestStreamUrl(serverId, nextTrack, quality)
-      .then((url) => {
-        if (precacheRequestRef.current !== requestId) return undefined;
-        return nativeAudioPrecache(url, nextTrack.ratingKey);
-      })
-      .then(() => {
-        if (precacheRequestRef.current !== requestId || nextIndex == null) return undefined;
-        // 下载完成后立即挂到 rodio 队列：当前曲目结束时会无间隙交接。
-        return nativeAudioQueueNextSource(nextIndex, nextTrack.ratingKey);
-      })
-      .catch(() => undefined);
+    })();
     return () => {
       if (precacheRequestRef.current === requestId) precacheRequestRef.current += 1;
     };
@@ -1381,7 +1436,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [current, playing, serverId]);
 
   useEffect(() => {
-    if (!current || !("mediaSession" in navigator)) return;
+    // The native MPNowPlayingInfoCenter/SMTC bridge is the sole desktop owner.
+    // A concurrent WebKit MediaSession can overwrite its metadata and artwork.
+    if (isDesktopRuntime() || !current || !("mediaSession" in navigator)) return;
     navigator.mediaSession.metadata = new MediaMetadata({
       title: current.title,
       artist: trackArtist(current),
@@ -1392,7 +1449,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [current, playing]);
 
   useEffect(() => {
-    if (!("mediaSession" in navigator)) return;
+    if (isDesktopRuntime() || !("mediaSession" in navigator)) return;
     const actions: Array<[MediaSessionAction, MediaSessionActionHandler | null]> = [
       ["play", () => { if (!playing) toggle(); }],
       ["pause", () => { if (playing) toggle(); }],

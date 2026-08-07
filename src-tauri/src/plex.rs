@@ -24,7 +24,7 @@ use tauri::{AppHandle, State};
 use url::Url;
 use uuid::Uuid;
 
-use crate::stream_proxy::StreamProxy;
+use crate::{audio_engine::NativeAudioEngineSlot, stream_proxy::StreamProxy};
 
 const PRODUCT_NAME: &str = "Cadilume";
 const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -906,6 +906,7 @@ pub async fn poll_pin(
     pin_id: i64,
     state: State<'_, PlexState>,
     stream_proxy: State<'_, StreamProxy>,
+    audio_engine: State<'_, NativeAudioEngineSlot>,
 ) -> Result<PinResponse, String> {
     let response = state
         .plex_headers(
@@ -924,6 +925,7 @@ pub async fn poll_pin(
         .map_err(display_error)?;
 
     let authenticated = if let Some(token) = pin.auth_token.as_deref() {
+        audio_engine.reset_and_clear_cache().await?;
         stream_proxy.clear().map_err(display_error)?;
         state
             .servers
@@ -944,11 +946,16 @@ pub async fn poll_pin(
 }
 
 #[tauri::command]
-pub fn logout(
+pub async fn logout(
     state: State<'_, PlexState>,
     stream_proxy: State<'_, StreamProxy>,
+    audio_engine: State<'_, NativeAudioEngineSlot>,
 ) -> Result<(), String> {
-    stream_proxy.clear().map_err(display_error)?;
+    // Authentication must still be revoked if a cache file is temporarily
+    // undeletable. Return the cleanup error only after clearing credentials,
+    // server state and loopback tickets.
+    let audio_result = audio_engine.reset_and_clear_cache().await;
+    let proxy_result = stream_proxy.clear().map_err(display_error);
     delete_account_token();
     *state
         .token
@@ -960,6 +967,8 @@ pub fn logout(
         .map_err(|_| "服务器缓存写入失败".to_string())?
         .clear();
     let _ = clear_artwork_for_account_change(&state);
+    audio_result?;
+    proxy_result?;
     Ok(())
 }
 

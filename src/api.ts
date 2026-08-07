@@ -833,9 +833,14 @@ export async function nativeAudioPrecache(
   await invoke("native_audio_precache", { source, cacheKey, rateLimit });
 }
 
-export async function nativeAudioQueueNextSource(index: number, cacheKey?: string): Promise<void> {
+export async function nativeAudioQueueNextSource(
+  index: number,
+  source: string,
+  cacheKey?: string,
+  metadata?: NativeNowPlayingMetadata,
+): Promise<void> {
   if (!isDesktopRuntime()) return;
-  await invoke("native_audio_queue_next_source", { index, cacheKey });
+  await invoke("native_audio_queue_next_source", { index, source, cacheKey, metadata });
 }
 
 export interface NativeAudioCacheStatus {

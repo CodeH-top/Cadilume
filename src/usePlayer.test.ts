@@ -14,6 +14,7 @@ import {
   insertQueueBatchNext,
   mergeFreshTrackMetadata,
   moveShufflePrevious,
+  nativeAudioCacheIdentity,
   normalizeRestoredProgress,
   normalizeQueueBatch,
   parsePersistedPlaybackSession,
@@ -33,6 +34,20 @@ const track = (index: number): PlexItem => ({
   duration: 180_000,
   thumb: `/library/metadata/track-${index}/thumb`,
   Media: [{ Part: [{ key: `/library/parts/${index}.flac`, duration: 180_000, size: 1234 }] }],
+});
+
+describe("native audio cache identity", () => {
+  it("separates servers, qualities and media revisions deterministically", () => {
+    const source = track(1);
+    const first = nativeAudioCacheIdentity("server-a", source, "original");
+    expect(nativeAudioCacheIdentity("server-a", source, "original")).toBe(first);
+    expect(nativeAudioCacheIdentity("server-b", source, "original")).not.toBe(first);
+    expect(nativeAudioCacheIdentity("server-a", source, "192")).not.toBe(first);
+    expect(nativeAudioCacheIdentity("server-a", {
+      ...source,
+      Media: [{ ...source.Media![0], Part: [{ ...source.Media![0].Part![0], size: 5678 }] }],
+    }, "original")).not.toBe(first);
+  });
 });
 
 describe("persisted playback session", () => {
