@@ -12,6 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use rodio::source::SeekError;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -28,6 +29,54 @@ fn audio_cache_dir(cache_root: &Path) -> PathBuf {
 
 fn touch_cache_file(path: &Path) {
     let _ = filetime::set_file_mtime(path, filetime::FileTime::now());
+}
+
+/// Wraps a queued source so the engine can detect the exact sample-level
+/// handoff: the flag flips the first time the queued source is actually
+/// pulled by the output (i.e. the previous track has fully ended). Polling
+/// `len()`/position cannot reliably observe a handoff that happens between
+/// polls, so this marker is the authoritative transition signal.
+struct HandoffMarker<S> {
+    inner: S,
+    started: Arc<AtomicBool>,
+}
+
+impl<S: Source> Iterator for HandoffMarker<S> {
+    type Item = S::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sample = self.inner.next();
+        if sample.is_some() {
+            self.started.store(true, Ordering::SeqCst);
+        }
+        sample
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<S: Source> Source for HandoffMarker<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(pos)
+    }
 }
 
 /// LRU eviction: when total cached audio exceeds the cap, delete oldest
@@ -216,6 +265,7 @@ pub struct NativeAudioEngine {
     ended_sent: Arc<AtomicBool>,
     metadata: Arc<Mutex<Option<NowPlayingMetadata>>>,
     queue: Arc<Mutex<QueueState>>,
+    pending: Arc<Mutex<Option<PendingTrack>>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -302,6 +352,57 @@ impl QueueState {
             None
         }
     }
+
+    /// Compute the next index for a natural end without mutating the queue.
+    /// `queue_next_source` uses this to verify that the frontend's prefetch
+    /// target still matches the Rust queue decision before appending it.
+    fn peek_next_index(&self, natural_ended: bool) -> Option<usize> {
+        if self.tracks.is_empty() {
+            return None;
+        }
+        let current = self.current_index.max(0) as usize;
+        if natural_ended && self.repeat == NativeRepeatMode::One {
+            return Some(current);
+        }
+        if self.shuffle {
+            let mut available: Vec<usize> = (0..self.tracks.len())
+                .filter(|index| *index != current)
+                .collect();
+            if !available.is_empty() {
+                if let Some(last) = self.bag.last() {
+                    if available.len() > 1 {
+                        available.retain(|index| index != last);
+                    }
+                }
+                return available.first().copied();
+            }
+            return None;
+        }
+        let next = current + 1;
+        if next < self.tracks.len() {
+            Some(next)
+        } else if self.repeat == NativeRepeatMode::All {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    /// Commit an already-queued source as the current track. The index was
+    /// validated against `peek_next_index` when it was queued, so no further
+    /// decision is needed here; keep the shuffle bag in sync with reality.
+    fn commit_index(&mut self, index: usize) {
+        if index >= self.tracks.len() {
+            return;
+        }
+        self.current_index = index as i64;
+        if self.shuffle && self.tracks.len() > 1 {
+            self.bag.push(index);
+            if self.bag.len() > self.tracks.len() {
+                self.bag.remove(0);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -309,6 +410,27 @@ pub struct NowPlayingMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
+}
+
+/// A fully-downloaded next track already appended to the rodio queue.
+#[derive(Clone, Debug)]
+struct PendingTrack {
+    index: usize,
+    duration_seconds: Option<f64>,
+    title: String,
+    artist: String,
+    album: String,
+    started: Arc<AtomicBool>,
+}
+
+impl PendingTrack {
+    fn metadata(&self) -> NowPlayingMetadata {
+        NowPlayingMetadata {
+            title: Some(self.title.clone()),
+            artist: Some(self.artist.clone()),
+            album: Some(self.album.clone()),
+        }
+    }
 }
 
 /// Lazy engine slot so the device stream opens on first use.
@@ -344,6 +466,37 @@ impl NativeAudioEngineSlot {
     }
 }
 
+/// Advance the queue after a natural end and publish the sanitized
+/// `ended`/`queue-item` events. Queue authority lives in Rust: the next index
+/// is decided here and only then mirrored to the WebView.
+fn publish_natural_ended(
+    queue: &Arc<Mutex<QueueState>>,
+    ended_sent: &Arc<AtomicBool>,
+    app: &AppHandle,
+) {
+    ended_sent.store(true, Ordering::SeqCst);
+    let next_index = queue
+        .lock()
+        .map(|mut state| {
+            let next = state.next_index(true);
+            if let Some(index) = next {
+                state.current_index = index as i64;
+            }
+            next
+        })
+        .unwrap_or(None);
+    let _ = app.emit(
+        "native-audio://event",
+        serde_json::json!({ "type": "ended" }),
+    );
+    if let Some(index) = next_index {
+        let _ = app.emit(
+            "native-audio://event",
+            serde_json::json!({ "type": "queue-item", "index": index }),
+        );
+    }
+}
+
 impl NativeAudioEngine {
     pub fn new(cache_root: PathBuf) -> anyhow::Result<Self> {
         let builder = DeviceSinkBuilder::from_default_device()
@@ -363,6 +516,7 @@ impl NativeAudioEngine {
             ended_sent: Arc::new(AtomicBool::new(false)),
             metadata: Arc::new(Mutex::new(None)),
             queue: Arc::new(Mutex::new(QueueState::default())),
+            pending: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -393,6 +547,9 @@ impl NativeAudioEngine {
         let total = decoder.total_duration().map(|d| d.as_secs_f64());
         *self.duration_seconds.lock().map_err(|_| "时长状态锁失败".to_string())? = total;
         self.player.clear();
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = None;
+        }
         self.player.append(decoder);
         self.player.play();
         self.loaded.store(true, Ordering::SeqCst);
@@ -476,6 +633,9 @@ impl NativeAudioEngine {
         let total = decoder.total_duration().map(|d| d.as_secs_f64());
         *self.duration_seconds.lock().map_err(|_| "时长状态锁失败".to_string())? = total;
         self.player.clear();
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = None;
+        }
         self.player.append(decoder);
         self.player.play();
         self.loaded.store(true, Ordering::SeqCst);
@@ -495,6 +655,8 @@ impl NativeAudioEngine {
 
     /// Pre-download a future track into the cache without playing it, so the
     /// next switch can start from the local file (reduces cross-track gap).
+    /// Completes only when the download is fully committed, so callers can
+    /// follow it with `queue_next_source` for a gapless handoff.
     pub async fn precache(&self, source: &str, cache_key: Option<String>) -> Result<(), String> {
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return Ok(());
@@ -513,43 +675,172 @@ impl NativeAudioEngine {
         let final_for_task = final_path;
         let source_for_task = source.to_string();
         let client = reqwest::Client::new();
-        tokio::spawn(async move {
-            if let Err(error) = download_progressive(
+        let task = tokio::spawn(async move {
+            let outcome = download_progressive(
                 &client,
                 &source_for_task,
                 &part_for_task,
                 &final_for_task,
                 &progress_task,
             )
-            .await
-            {
+            .await;
+            if let Err(error) = &outcome {
                 progress_task.failed.store(true, Ordering::SeqCst);
                 progress_task.wake();
                 eprintln!("[原生] 预缓存下载失败：{error}");
             }
+            outcome
         });
+        task.await
+            .map_err(|e| format!("预缓存任务中断: {e}"))??;
+        enforce_audio_cache_limit(&self.cache_root);
         Ok(())
     }
 
+    /// Queue a fully-cached next track onto the rodio queue. The current
+    /// source keeps playing; when it ends, rodio pulls the queued source in
+    /// the same sample loop, producing a gapless PCM handoff. The marker flips
+    /// exactly when the handoff happens so the event forwarder can publish a
+    /// `track` event without any polling race.
+    pub fn queue_next_source(
+        &self,
+        index: i64,
+        cache_key: Option<String>,
+    ) -> Result<(), String> {
+        if !self.loaded.load(Ordering::SeqCst) {
+            return Err("当前没有正在播放的曲目".to_string());
+        }
+        if self
+            .pending
+            .lock()
+            .map_err(|_| "预排状态锁失败".to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let index = usize::try_from(index).map_err(|_| "无效的曲目序号".to_string())?;
+        let track = {
+            let queue = self
+                .queue
+                .lock()
+                .map_err(|_| "队列状态锁失败".to_string())?;
+            if queue.peek_next_index(true) != Some(index) {
+                return Err("预排顺序与队列不一致".to_string());
+            }
+            queue
+                .tracks
+                .get(index)
+                .cloned()
+                .ok_or_else(|| "曲目不在队列中".to_string())?
+        };
+        let (_, final_path, _) = self.resolve_cache_paths(cache_key)?;
+        if !std::fs::metadata(&final_path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+        {
+            return Err("下一首尚未完整下载".to_string());
+        }
+        let file =
+            std::fs::File::open(&final_path).map_err(|e| format!("打开预排缓存失败: {e}"))?;
+        let decoder = Decoder::new(file).map_err(|e| format!("预排解码失败: {e}"))?;
+        let total = decoder.total_duration().map(|d| d.as_secs_f64());
+        let started = Arc::new(AtomicBool::new(false));
+        let marker = HandoffMarker {
+            inner: decoder,
+            started: Arc::clone(&started),
+        };
+        self.player.append(marker);
+        *self
+            .pending
+            .lock()
+            .map_err(|_| "预排状态锁失败".to_string())? = Some(PendingTrack {
+            index,
+            duration_seconds: total,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            started,
+        });
+        eprintln!(
+            "[原生] 已预排下一首 index={index} 时长={total:?} 队列={}",
+            self.player.len(),
+        );
+        Ok(())
+    }
+
+    /// Consume a queued source whose gapless handoff has started (the previous
+    /// track exhausted and rodio pulled the first sample of the queued one).
+    /// Commits it as the current track and returns it so the caller can
+    /// publish the `track` event.
+    fn consume_started_handoff(&self) -> Option<PendingTrack> {
+        let queued = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let Some(queued) = queued else {
+            return None;
+        };
+        if !queued.started.load(Ordering::SeqCst) {
+            if let Ok(mut pending) = self.pending.lock() {
+                *pending = Some(queued);
+            }
+            return None;
+        }
+        if let Ok(mut queue_guard) = self.queue.lock() {
+            queue_guard.commit_index(queued.index);
+        }
+        if let Some(duration_value) = queued.duration_seconds {
+            if let Ok(mut duration_guard) = self.duration_seconds.lock() {
+                *duration_guard = Some(duration_value);
+            }
+        }
+        if let Ok(mut metadata_guard) = self.metadata.lock() {
+            *metadata_guard = Some(queued.metadata());
+        }
+        self.ended_sent.store(false, Ordering::SeqCst);
+        Some(queued)
+    }
+
+    /// Consume a queued source that ended without producing any sample (failed
+    /// or empty media), committing its index so the queue can advance past it.
+    fn consume_failed_handoff(&self) -> Option<PendingTrack> {
+        let queued = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(queued) = queued {
+            if let Ok(mut queue_guard) = self.queue.lock() {
+                queue_guard.commit_index(queued.index);
+            }
+            return Some(queued);
+        }
+        None
+    }
+
     /// Publish sanitized playback progress/ended events to the WebView.
-    pub fn start_event_forwarder(&self, app: AppHandle) {
-        let player = Arc::clone(&self.player);
-        let duration = Arc::clone(&self.duration_seconds);
-        let loaded = Arc::clone(&self.loaded);
-        let ended_sent = Arc::clone(&self.ended_sent);
-        let metadata = Arc::clone(&self.metadata);
-        let queue = Arc::clone(&self.queue);
+    pub fn start_event_forwarder(self: &Arc<Self>, app: AppHandle) {
+        let engine = Arc::clone(self);
         let app_for_task = app.clone();
         let mut last_position = -1.0f64;
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                let position = player.get_pos().as_secs_f64();
-                let duration_value = duration.lock().map(|guard| *guard).unwrap_or(None);
+                let position = engine.player().get_pos().as_secs_f64();
+                let duration_value = engine
+                    .duration_seconds
+                    .lock()
+                    .map(|guard| *guard)
+                    .unwrap_or(None);
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
-                    let playing = !player.is_paused() && !player.empty();
-                    let meta = metadata.lock().map(|guard| guard.clone()).unwrap_or(None);
+                    let playing = !engine.player().is_paused() && !engine.player().empty();
+                    let meta = engine
+                        .metadata
+                        .lock()
+                        .map(|guard| guard.clone())
+                        .unwrap_or(None);
                     if let Some(meta) = meta {
                         crate::now_playing::update_metadata(
                             meta.title.as_deref().unwrap_or(""),
@@ -561,32 +852,69 @@ impl NativeAudioEngine {
                         );
                     }
                 }
-                let ended = loaded.load(Ordering::SeqCst)
-                    && !ended_sent.load(Ordering::SeqCst)
-                    && player.empty()
-                    && position > 0.05;
-                if ended {
-                    ended_sent.store(true, Ordering::SeqCst);
-                    let next_index = queue
-                        .lock()
-                        .map(|mut state| {
-                            let next = state.next_index(true);
-                            if let Some(index) = next {
-                                state.current_index = index as i64;
-                            }
-                            next
-                        })
-                        .unwrap_or(None);
-                    let _ = app_for_task.emit(
-                        "native-audio://event",
-                        serde_json::json!({ "type": "ended" }),
-                    );
-                    if let Some(index) = next_index {
+
+                // Gapless handoff: a queued source started (its marker flipped
+                // exactly when the previous track exhausted), or it failed
+                // without producing a single sample (len dropped to zero).
+                let pending_started = engine
+                    .pending
+                    .lock()
+                    .map(|guard| {
+                        guard
+                            .as_ref()
+                            .map(|queued| queued.started.load(Ordering::SeqCst))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                let pending_exists = engine
+                    .pending
+                    .lock()
+                    .map(|guard| guard.is_some())
+                    .unwrap_or(false);
+                if engine.loaded.load(Ordering::SeqCst) && pending_exists && pending_started {
+                    if let Some(queued) = engine.consume_started_handoff() {
                         let _ = app_for_task.emit(
                             "native-audio://event",
-                            serde_json::json!({ "type": "queue-item", "index": index }),
+                            serde_json::json!({
+                                "type": "track",
+                                "index": queued.index,
+                                "duration": queued.duration_seconds,
+                                "position": position,
+                            }),
                         );
+                        last_position = position;
+                        if engine.player().empty() {
+                            // The queued source ended inside the same poll
+                            // window (very short or failed track): fall back
+                            // to the normal ended/advance path immediately.
+                            publish_natural_ended(
+                                &engine.queue,
+                                &engine.ended_sent,
+                                &app_for_task,
+                            );
+                        }
+                        continue;
                     }
+                }
+                if engine.loaded.load(Ordering::SeqCst)
+                    && pending_exists
+                    && engine.player().empty()
+                {
+                    // The queued source produced no samples at all. Treat it
+                    // as consumed and advance past it, otherwise playback
+                    // would sit on silence forever.
+                    if engine.consume_failed_handoff().is_some() {
+                        publish_natural_ended(&engine.queue, &engine.ended_sent, &app_for_task);
+                        continue;
+                    }
+                }
+
+                let ended = engine.loaded.load(Ordering::SeqCst)
+                    && !engine.ended_sent.load(Ordering::SeqCst)
+                    && engine.player().empty()
+                    && position > 0.05;
+                if ended {
+                    publish_natural_ended(&engine.queue, &engine.ended_sent, &app_for_task);
                     continue;
                 }
                 if (position - last_position).abs() >= 0.05 {
@@ -768,6 +1096,17 @@ pub async fn native_audio_precache(
 }
 
 #[tauri::command]
+pub fn native_audio_queue_next_source(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+    index: i64,
+    cache_key: Option<String>,
+) -> Result<(), String> {
+    let engine = state.ensure(&app)?;
+    engine.queue_next_source(index, cache_key)
+}
+
+#[tauri::command]
 pub fn native_audio_play(
     app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
@@ -787,6 +1126,11 @@ pub fn native_audio_pause(app: AppHandle, state: tauri::State<'_, NativeAudioEng
 #[tauri::command]
 pub fn native_audio_stop(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
     if let Ok(engine) = state.ensure(&app) {
+        engine.loaded.store(false, Ordering::SeqCst);
+        engine.ended_sent.store(false, Ordering::SeqCst);
+        if let Ok(mut pending) = engine.pending.lock() {
+            *pending = None;
+        }
         engine.player().clear();
     }
 }
@@ -851,6 +1195,12 @@ pub fn native_queue_set(
     shuffle: bool,
 ) -> Result<(), String> {
     let engine = state.ensure(&app)?;
+    // A full queue replacement invalidates any queued gapless source. Clear
+    // the pending slot before touching the queue to keep lock ordering with
+    // the event forwarder (pending -> queue) consistent.
+    if let Ok(mut pending) = engine.pending.lock() {
+        *pending = None;
+    }
     let mut queue = engine
         .queue
         .lock()
@@ -921,6 +1271,7 @@ pub fn native_queue_set_shuffle(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use super::*;
 
@@ -1038,5 +1389,140 @@ mod tests {
         let cached = cache_root.join("downloads/sample-cache-test.audio");
         assert!(cached.exists(), "缓存文件应落盘");
         engine.player().clear();
+    }
+
+    fn queue_track(key: &str) -> QueueTrack {
+        QueueTrack {
+            rating_key: key.to_string(),
+            title: key.to_string(),
+            artist: String::new(),
+            album: String::new(),
+        }
+    }
+
+    #[test]
+    fn queue_peek_next_index_matches_natural_advance() {
+        let mut queue = QueueState {
+            tracks: vec![queue_track("a"), queue_track("b"), queue_track("c")],
+            current_index: 0,
+            repeat: NativeRepeatMode::All,
+            shuffle: false,
+            bag: vec![],
+        };
+        assert_eq!(queue.peek_next_index(true), Some(1));
+        assert_eq!(queue.next_index(true), Some(1));
+        queue.current_index = 2;
+        assert_eq!(queue.peek_next_index(true), Some(0), "repeat-all 应回绕");
+        queue.repeat = NativeRepeatMode::One;
+        queue.current_index = 1;
+        assert_eq!(queue.peek_next_index(true), Some(1), "repeat-one 自然结束应重播当前曲目");
+        assert_eq!(queue.peek_next_index(false), Some(2), "手动 next 不受 repeat-one 约束");
+    }
+
+    #[test]
+    fn queue_shuffle_peek_is_pure_and_avoids_last() {
+        let queue = QueueState {
+            tracks: vec![
+                queue_track("a"),
+                queue_track("b"),
+                queue_track("c"),
+                queue_track("d"),
+            ],
+            current_index: 0,
+            repeat: NativeRepeatMode::All,
+            shuffle: true,
+            bag: vec![2],
+        };
+        let first = queue.peek_next_index(true).unwrap();
+        let second = queue.peek_next_index(true).unwrap();
+        assert_eq!(first, second, "peek 不应推进 bag");
+        assert_ne!(first, 0, "不应选当前曲目");
+        assert_ne!(first, 2, "不应重复上一条 bag 记录");
+
+        let mut queue = queue;
+        queue.commit_index(first);
+        assert_eq!(queue.current_index, first as i64);
+        assert_eq!(queue.bag, vec![2, first], "提交后 bag 应记录实际播放的曲目");
+    }
+
+    #[tokio::test]
+    async fn gapless_queue_next_rejects_stale_or_incomplete_source() {
+        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-gapless-reject");
+        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
+        engine.player().set_volume(0.0);
+        let wav = std::env::temp_dir().join("cadilume-gapless-reject.wav");
+        write_test_wav(&wav);
+        engine.load_and_play(wav.to_str().unwrap()).unwrap();
+        {
+            let mut queue = engine.queue.lock().unwrap();
+            queue.tracks = vec![queue_track("a"), queue_track("b")];
+            queue.current_index = 0;
+            queue.repeat = NativeRepeatMode::All;
+        }
+        // 下一首缓存文件缺失。
+        let missing = engine.queue_next_source(1, Some("missing-b".into()));
+        assert!(missing.is_err(), "缓存未就绪时不应预排");
+        // 队列已前进（与前端预取目标不一致）时拒绝。
+        engine.queue.lock().unwrap().current_index = 1;
+        let downloads = cache_root.join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::copy(&wav, downloads.join("stale-b.audio")).unwrap();
+        let stale = engine.queue_next_source(1, Some("stale-b".into()));
+        assert!(stale.is_err(), "预排顺序与队列不一致时应拒绝");
+        engine.player().clear();
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    #[tokio::test]
+    async fn gapless_queue_next_handoff_commits_index() {
+        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-gapless");
+        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
+        engine.player().set_volume(0.0);
+        let wav_a = std::env::temp_dir().join("cadilume-gapless-a.wav");
+        let wav_b = std::env::temp_dir().join("cadilume-gapless-b.wav");
+        write_test_wav(&wav_a);
+        write_test_wav(&wav_b);
+        engine.load_and_play(wav_a.to_str().unwrap()).unwrap();
+        {
+            let mut queue = engine.queue.lock().unwrap();
+            queue.tracks = vec![queue_track("a"), queue_track("b")];
+            queue.current_index = 0;
+            queue.repeat = NativeRepeatMode::All;
+            queue.shuffle = false;
+        }
+        let downloads = cache_root.join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::copy(&wav_b, downloads.join("gapless-b.audio")).unwrap();
+        engine.queue_next_source(1, Some("gapless-b".into())).unwrap();
+        assert_eq!(engine.player().len(), 2, "预排后播放器队列应有两首");
+
+        // A 是 3 秒短曲：等 A 自然结束、B 的握手标记翻转。
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let started = loop {
+            let started = engine
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|queued| queued.started.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            if started || std::time::Instant::now() >= deadline {
+                break started;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert!(started, "A 结束后 B 的握手标记应翻转");
+        let queued = engine.consume_started_handoff().expect("应能消费预排交接");
+        assert_eq!(queued.index, 1);
+        assert_eq!(engine.queue.lock().unwrap().current_index, 1);
+        assert!(!engine.player().empty(), "B 应继续播放");
+        let duration = *engine.duration_seconds.lock().unwrap();
+        assert!(duration.unwrap_or(0.0) > 2.5, "时长应切换到 B");
+        let metadata = engine.metadata.lock().unwrap().clone().expect("应有元数据");
+        assert_eq!(metadata.title.as_deref(), Some("b"));
+
+        engine.player().clear();
+        let _ = std::fs::remove_file(&wav_a);
+        let _ = std::fs::remove_file(&wav_b);
     }
 }

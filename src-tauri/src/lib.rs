@@ -73,6 +73,7 @@ pub fn run() {
             plex::scrobble,
             audio_engine::native_audio_load,
             audio_engine::native_audio_precache,
+            audio_engine::native_audio_queue_next_source,
             audio_engine::native_audio_play,
             audio_engine::native_audio_pause,
             audio_engine::native_audio_stop,

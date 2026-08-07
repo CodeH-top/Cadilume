@@ -22,15 +22,17 @@
 - Phase 2 ✅ 完成：磁盘缓存 512MB LRU（按 mtime 淘汰、`.part` 优先清理、命中刷新），
   设置页展示并清理封面+音频缓存。
 - Phase 3 ✅ 完成：边下边播（渐进 Reader + 后台下载，头部 256KB 就绪即开播）。
-- Phase 4 🟡 MVP 完成：ahead 预取下一首到缓存减少间隙；严格 gapless（PCM 衔接/
-  编码延迟处理）待后续优化，MVP 按计划允许非严格。
+- Phase 4 ✅ 完成：ahead 预取下一首到缓存；严格 gapless 已实现——预取完成后把
+  下一首解码器直接挂入 rodio 顺序队列（`HandoffMarker` 在样本级交接时翻转），
+  当前曲目结束即无间隙 PCM 衔接；MP3 编码延迟由 rodio 队列的帧对齐处理，
+  FLAC 天然无缝。重复一首/队列不一致时自动降级为普通顺序播放。
 - Phase 5 ✅ 完成：macOS Now Playing/Remote Command Center + Windows SMTC
   （Windows 代码已跨 target 类型检查，完整构建与实机验证待 Windows 环境）。
 - Phase 6 ✅ 完成：WebView/HTMLAudio 播放路径全部移除（usePlayer native-only，
   删除 DualAudioPool/预缓冲/媒体错误回退等约 1400 行及对应单测）。
 
-剩余事项：严格 gapless（Phase 4 增强）、Windows 实机 SMTC 验收、真实 PMS 听感回归
-（高频切歌 20+ 次、歌词对时、seek/暂停恢复）、Windows 隐藏窗口后台播放验证。
+剩余事项：Windows 实机 SMTC 验收、真实 PMS 听感回归（高频切歌 20+ 次、歌词对时、
+seek/暂停恢复）、Windows 隐藏窗口后台播放验证。
 
 ## 2. 现状盘点（dev 分支起点）
 

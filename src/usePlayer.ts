@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioSeek, nativeAudioSetVolume, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
+import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetVolume, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
@@ -1197,6 +1197,23 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         schedulePersistedSession(true);
       } else if (payload.type === "queue-item" && typeof payload.index === "number") {
         void loadAt(payload.index, true);
+      } else if (payload.type === "track" && typeof payload.index === "number") {
+        // Gapless handoff: Rust already queued and started the next source.
+        // Mirror the UI without re-requesting a stream URL or reloading the
+        // engine, otherwise the seamless PCM transition would be interrupted.
+        indexRef.current = payload.index;
+        setCurrentIndex(payload.index);
+        progressRef.current = typeof payload.position === "number" && Number.isFinite(payload.position)
+          ? Math.max(0, payload.position)
+          : 0;
+        setProgress(progressRef.current);
+        if (typeof payload.duration === "number" && Number.isFinite(payload.duration) && payload.duration > 0) {
+          setDuration(payload.duration);
+        }
+        setPlaying(true);
+        setPlaybackLoading(false);
+        setBuffering(false);
+        schedulePersistedSession(true);
       } else if (payload.type === "remote") {
         const command = typeof payload.command === "string" ? payload.command : "";
         if (command === "play" || command === "toggle") toggle();
@@ -1239,6 +1256,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       .then((url) => {
         if (precacheRequestRef.current !== requestId) return undefined;
         return nativeAudioPrecache(url, nextTrack.ratingKey);
+      })
+      .then(() => {
+        if (precacheRequestRef.current !== requestId || nextIndex == null) return undefined;
+        // 下载完成后立即挂到 rodio 队列：当前曲目结束时会无间隙交接。
+        return nativeAudioQueueNextSource(nextIndex, nextTrack.ratingKey);
       })
       .catch(() => undefined);
     return () => {
