@@ -1470,6 +1470,15 @@ function RouteKeepAliveHost({ location, aliveRef }: { location: ReturnType<typeo
   const navigate = useNavigate();
   const outlet = useOutlet();
   const route = useMemo(() => parseLibraryRoute(`${location.pathname}${location.search}`), [location.pathname, location.search]);
+  const lastSearchCacheKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (route.view !== "search") return;
+    const previous = lastSearchCacheKeyRef.current;
+    lastSearchCacheKeyRef.current = activeCacheKey;
+    if (previous && previous !== activeCacheKey) {
+      void aliveRef.current?.destroy(previous);
+    }
+  }, [activeCacheKey, aliveRef, route.view]);
   const entryLocation = useMemo<RouteLocationSnapshot>(() => ({
     key: location.key,
     pathname: location.pathname,
