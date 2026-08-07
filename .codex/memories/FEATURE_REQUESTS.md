@@ -32,6 +32,32 @@
 
 - Move queue authority, Range/cache, decoding, independent gain, gapless/prefetch and output device selection into Rust so Windows hidden-window playback does not depend on WebView timers.
 - Add macOS Now Playing/Remote Command Center and Windows SMTC with metadata, progress, Seek and artwork.
+- 2026-08-06 用户新增硬约束：程序必须完全独立可用，禁止系统安装依赖（如
+  `brew install mpv`），一切依赖必须集成进程序内部。该约束直接排除 libmpv 的
+  Homebrew/系统库路线，也排除 tauri-plugin-libmpv（其 setup 在 macOS 明确要求
+  `brew install mpv`，且 macOS 标为未测试）。
+- 2026-08-06 选型结论（待用户确认后启动 POC）：首选纯 Rust 静态方案
+  `rodio 0.22 + cpal + symphonia 0.6`，全部编译进现有二进制，macOS/Windows 单一
+  代码路径。实测：含 rodio+cpal+symphonia（MP3/AAC/FLAC/ALAC/Vorbis/WAV）的
+  release 二进制仅 2.5MB；对比 Windows LGPL 版 `libmpv-2.dll` 解压 95MB（单架构、
+  压缩包 27MB）。许可全部兼容 MIT 应用（rodio/cpal MIT OR Apache-2.0，
+  symphonia MPL-2.0，miniaudio Unlicense/MIT-0）；libmpv 本体是 GPLv2+/LGPLv2.1+
+  双许可、Rust 绑定 crate 是 LGPL-2.1，不是 MIT。
+- 已知边界：symphonia 0.6.0 无 Opus/WMA/APE/DSD/HE-AAC；MP3 gapless 能力有限；
+  Now Playing/SMTC 仍需 Rust 侧单独接入。PMS 转码回退（container=mp3）可兜住
+  不支持格式；磁盘缓存与“先落盘再解码”设计可同时解决 seek 与 Plexamp 式 ahead 预缓存。
+- 2026-08-06 用户追问“JS 端是否有现成开源引擎”后补充两条可选路线：
+  （1）JS WASM 解码（`@wasm-audio-decoders`，MIT）：可消除 codec 级 MediaError 4、
+  支持 gapless，完全打进前端产物，无系统依赖；但仍在 WebView 内，后台播放/SMTC/
+  磁盘缓存问题不解决，需自己写 PCM 缓冲/seek/队列层。
+  （2）Rust 现成引擎替代自研：rodio 稳定优先；kithara（MIT OR Apache-2.0）具备
+  Plexamp 式 progressive HTTP + 磁盘 LRU 缓存 + gapless + HE-AAC/Opus，但仍是
+  alpha，须 pin 版本并先做 spike 验证 macOS/Windows 可用性再定。
+- 2026-08-07 spike 结论：kithara 在 Tauri 进程播放卡死（firewheel 管线约 1 秒
+  后停止、只出噪声），暂缓；**rodio 0.22 + 本地缓存落盘方案已在真实 PMS 流验证
+  通过**（连续播放正常，默认音量 20%）。正式原生内核按此路线实施：AudioEngine
+  边界 + 队列/进度事件 + seek + Now Playing/SMTC + 缓存上限/LRU + ahead 预取；
+  kithara 保留为上游稳定后的备选。
 
 ## [FR-20260801-001] 页面标题与歌手资料层级
 

@@ -1,9 +1,11 @@
+mod audio_engine;
 mod plex;
 mod stream_proxy;
 mod window;
 
 use std::fs;
 
+use audio_engine::NativeAudioEngineSlot;
 use plex::PlexState;
 use stream_proxy::StreamProxy;
 use tauri::{Listener, Manager};
@@ -20,6 +22,9 @@ pub fn run() {
             let plex_state = PlexState::load(config_dir, cache_dir)?;
             let status_icon_enabled = plex_state.status_icon_enabled();
             app.manage(plex_state);
+            let native_cache = app.path().app_cache_dir()?.join("native-audio");
+            fs::create_dir_all(&native_cache)?;
+            app.manage(NativeAudioEngineSlot::new(native_cache));
             app.manage(StreamProxy::start(app.handle().clone())?);
             app.manage(window::QuitCoordinator::default());
             app.listen("playback://log", |event| {
@@ -53,6 +58,14 @@ pub fn run() {
             plex::clear_cache,
             plex::report_timeline,
             plex::scrobble,
+            audio_engine::native_audio_load,
+            audio_engine::native_audio_play,
+            audio_engine::native_audio_pause,
+            audio_engine::native_audio_stop,
+            audio_engine::native_audio_seek,
+            audio_engine::native_audio_set_volume,
+            audio_engine::native_audio_status,
+            audio_engine::native_audio_device_check,
             plex::set_status_icon_enabled,
             plex::set_device_name,
             plex::set_brand_preset,

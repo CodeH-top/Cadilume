@@ -74,7 +74,9 @@ import {
   getSections,
   isDesktopRuntime,
   logout,
+  nativeAudioDeviceCheck,
   normalizeDeviceName,
+  nativeAudioStatus,
   openWindowsAudioSettings,
   removeTracksFromPlaylist,
   searchLibrary,
@@ -494,6 +496,45 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const player = usePlayer(serverId, quality);
   const outputDevices = useOutputDevices(player.setOutputSinkId);
   const lyrics = useLyrics(serverId, player.current, player.progress, player.duration);
+  const [nativeSpike, setNativeSpike] = useState<{ busy: boolean; message: string }>({
+    busy: false,
+    message: "",
+  });
+  const runNativeSpike = useCallback(async () => {
+    setNativeSpike({ busy: true, message: "正在获取票据并缓存…" });
+    try {
+      const result = await player.spikePlayNative();
+      setNativeSpike({ busy: false, message: result });
+    } catch (reason) {
+      setNativeSpike({
+        busy: false,
+        message: reason instanceof Error ? reason.message : String(reason),
+      });
+    }
+  }, [player.spikePlayNative]);
+  const [deviceCheck, setDeviceCheck] = useState("");
+  const runDeviceCheck = useCallback(async () => {
+    setDeviceCheck("检查中…");
+    try {
+      const result = await nativeAudioDeviceCheck();
+      setDeviceCheck(JSON.stringify(result));
+    } catch (reason) {
+      setDeviceCheck(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, []);
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const spike = {
+      /** Play the current queue item through the kithara native engine. */
+      playNative: () => player.spikePlayNative(),
+      status: () => nativeAudioStatus(),
+    };
+    const target = window as unknown as Record<string, unknown>;
+    target.__cadilumeSpike__ = spike;
+    return () => {
+      delete target.__cadilumeSpike__;
+    };
+  }, [player.spikePlayNative]);
   const previewLyricsCountParam = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("now-playing-preview-lines")
     : null;
@@ -1064,6 +1105,31 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     <MusicShellContext.Provider value={runtime}>
     <div className="app-shell">
       <RouterProvider key={`route-cache-${routeCacheEpoch}`} router={router} />
+
+      {import.meta.env.DEV && (
+        <div className="native-spike-fab" role="status" aria-live="polite">
+          <button
+            type="button"
+            className="native-spike-button"
+            onClick={() => void runNativeSpike()}
+            disabled={nativeSpike.busy}
+            title="使用 kithara 原生引擎播放当前歌曲（spike 调试）"
+          >
+            {nativeSpike.busy ? <LoaderCircle className="spin" size={14} /> : <Speaker size={14} />}
+            原生试播
+          </button>
+          <button
+            type="button"
+            className="native-spike-button"
+            onClick={() => void runDeviceCheck()}
+            title="检查 Tauri 进程能否打开系统音频设备"
+          >
+            设备自检
+          </button>
+          {nativeSpike.message && <span>{nativeSpike.message}</span>}
+          {deviceCheck && <span>{deviceCheck}</span>}
+        </div>
+      )}
 
       {queuePanelMounted && (
         <div className={`queue-panel-layer ${queuePanelOpen ? "is-open" : "is-closing"}`} aria-hidden={!queuePanelOpen || undefined}>

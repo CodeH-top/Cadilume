@@ -25,6 +25,8 @@
   Source: explicit user correction on 2026-07-31.
 - [ACT-019] Cadilume 持续开发期间保留且只保留一条已确认归属本项目的 `pnpm tauri dev` 开发链；前端改动优先依赖该链的 HMR，非必要不得重启原生进程或另起开发态，以维持 Keychain 权限与登录会话连续性。只有 Rust/原生配置变动或最终真实验收确有需要时，才在明确说明后重启这同一条链。
   Source: user request on 2026-07-31.
+- [ACT-020] Cadilume 必须完全独立可用：播放内核及一切运行依赖都必须集成到程序内部，禁止要求用户在系统上安装任何独立依赖（如 `brew install mpv`、`libmpv-dev` 等）。系统自带 API（CoreAudio/WASAPI 等）与静态链接进二进制的 Rust 依赖符合此边界；外部动态库若无法静态集成且需要系统安装，默认不采用。
+  Source: user constraint on 2026-08-06（原生播放内核选型轮）。
 
 ## Validation
 

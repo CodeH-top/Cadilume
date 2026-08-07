@@ -12,7 +12,7 @@ use axum::{
     http::{
         header::{
             ACCEPT, ACCEPT_ENCODING, ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE,
-            CONTENT_TYPE, ETAG, HOST, IF_RANGE, LAST_MODIFIED, RANGE,
+            CONTENT_TYPE, ETAG, HOST, IF_RANGE, LAST_MODIFIED, RANGE, TRANSFER_ENCODING,
         },
         HeaderMap, HeaderValue, Method, StatusCode, Uri,
     },
@@ -417,6 +417,21 @@ async fn proxy_request(
         return error_response(StatusCode::BAD_REQUEST, "无效的音频代理参数");
     }
 
+    let request_range = headers
+        .get(RANGE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("无")
+        .to_string();
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("无")
+        .to_string();
+    eprintln!(
+        "[播放] 代理请求 方法={} Range={} User-Agent={}",
+        method, request_range, user_agent
+    );
+
     let range = match parse_range_header(&headers) {
         Ok(range) => range,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
@@ -700,6 +715,39 @@ fn is_supported_audio_content_type(headers: &HeaderMap) -> bool {
 fn downstream_response(upstream: reqwest::Response, method: &Method) -> Response {
     let status = upstream.status();
     let upstream_headers = upstream.headers().clone();
+    let content_length = upstream_headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("无")
+        .to_string();
+    let content_range = upstream_headers
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("无")
+        .to_string();
+    let accept_ranges = upstream_headers
+        .get(ACCEPT_RANGES)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("无")
+        .to_string();
+    let transfer_encoding = upstream_headers
+        .get(TRANSFER_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("无")
+        .to_string();
+    eprintln!(
+        "[播放] 转发响应 HTTP={} Content-Type={} Content-Length={} Content-Range={} Accept-Ranges={} Transfer-Encoding={} 方法={}",
+        status.as_u16(),
+        upstream_headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("无"),
+        content_length,
+        content_range,
+        accept_ranges,
+        transfer_encoding,
+        method,
+    );
     let body = if method == Method::HEAD {
         Body::empty()
     } else {

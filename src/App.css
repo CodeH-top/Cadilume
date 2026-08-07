@@ -530,6 +530,40 @@ button[data-tooltip]:is(:hover, :focus-visible)::after { opacity: 1; transform: 
 .track-pagination button:disabled { cursor: not-allowed; opacity: 0.42; }
 .track-pagination-pages { display: inline-flex; align-items: center; gap: 4px; }
 .track-pagination-pages > span { min-width: 18px; color: var(--muted-faint); text-align: center; }
+/* Spike 专用：kithara 原生引擎试播入口（仅开发态可见）。 */
+.native-spike-fab {
+  position: fixed;
+  right: 16px;
+  bottom: 76px;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 340px;
+}
+.native-spike-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 6px 10px;
+  background: var(--side-panel);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.16);
+}
+.native-spike-button:hover:not(:disabled) { background: var(--hover-fill); }
+.native-spike-button:disabled { opacity: 0.65; cursor: wait; }
+.native-spike-fab > span {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .queue-panel-layer { position: absolute; z-index: var(--z-queue-panel); inset: 0; }
 .queue-panel-scrim { position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; border: 0; padding: 0; background: transparent; cursor: default; }
 .queue-panel { position: absolute; z-index: 1; top: calc(var(--app-titlebar-height) + 14px); right: 16px; bottom: calc(var(--player-height) + 14px); width: 350px; min-width: 0; min-height: 0; display: grid; grid-template-rows: 60px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border-strong); border-radius: 14px; background: color-mix(in srgb, var(--side-panel) 96%, transparent); box-shadow: 0 0 0 0.5px color-mix(in srgb, var(--border) 74%, transparent), 0 12px 32px rgba(0, 0, 0, 0.2), 0 28px 66px rgba(0, 0, 0, 0.24); backdrop-filter: saturate(160%) blur(20px); -webkit-backdrop-filter: saturate(160%) blur(20px); }

@@ -661,6 +661,41 @@ export async function streamUrl(serverId: string, track: PlexItem, quality: Stre
   return invoke("stream_url", { serverId, metadataKey: track.key, partKey, quality });
 }
 
+export interface NativeAudioStatus {
+  is_playing: boolean;
+  position_seconds: number | null;
+  duration_seconds: number | null;
+  volume: number;
+  item_count: number;
+  current_index: number | null;
+}
+
+/** Spike: drive the kithara native engine from the DevTools hook. */
+export async function nativeAudioLoad(source: string, cacheKey?: string): Promise<number> {
+  if (!isDesktopRuntime()) return -1;
+  return invoke("native_audio_load", { source, cacheKey });
+}
+
+export async function nativeAudioStatus(): Promise<NativeAudioStatus> {
+  if (!isDesktopRuntime()) {
+    return {
+      is_playing: false,
+      position_seconds: null,
+      duration_seconds: null,
+      volume: 1,
+      item_count: 0,
+      current_index: null,
+    };
+  }
+  return invoke("native_audio_status");
+}
+
+/** Spike: check whether cpal can open the OS output device from Tauri. */
+export async function nativeAudioDeviceCheck(): Promise<Record<string, unknown>> {
+  if (!isDesktopRuntime()) return { device: "no-desktop" };
+  return invoke("native_audio_device_check");
+}
+
 export async function addTrackToPlaylist(serverId: string, playlistId: string, ratingKey: string): Promise<void> {
   if (isDesktopRuntime()) await invoke("add_to_playlist", { serverId, playlistId, ratingKey });
 }

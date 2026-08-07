@@ -1,5 +1,91 @@
 # LEARNINGS
 
+## 2026-08-07 — 原生播放 spike：kithara 失败、rodio 验证通过（决策更新）
+
+- kithara-play/firewheel 在 Tauri 进程里播放**本地文件或真实 PMS 流都会卡死**：
+  解码器只产出固定 11×4096 帧（约 1.02 秒）或 1×4096 帧后停止，播放中=false，
+  无 PrerollCompleted/错误事件；扬声器只有约 1 秒“滋啦”噪声。cargo test 进程
+  播放同样文件却正常推进——问题在 kithara 的 firewheel/cpal 管线与 Tauri 进程
+  的兼容性，不是解码/HTTP 层。已放弃 kithara 作为当前路线（保留待上游稳定后
+  复评），spike 引擎改用 rodio。
+- rodio 0.22 在 Tauri 进程验证通过：cpal 输出 + symphonia 解码，真实 PMS 流经
+  “代理下载落盘 → 播放本地文件”链路连续播放正常、无卡顿；设备自检确认
+  cpal 能打开默认输出（Shokz OpenDots，44100Hz F32）。rodio 0.22 依赖
+  symphonia 0.5.5（不是 0.6）。
+- rodio 0.22 API 备忘：`DeviceSinkBuilder::from_default_device()?.open_stream()`
+  → `MixerDeviceSink`，`Player::connect_new(sink.mixer())`；
+  `append/play/pause/clear/try_seek/get_pos/set_volume/empty/is_paused/len`；
+  `Decoder::new(File)` 后取 `total_duration()` 需 `use rodio::Source`。
+- 磁盘缓存方案验证通过：Rust 侧用 reqwest 下载 loopback 票据 URL 全量落盘到
+  `app_cache/native-audio/downloads/{ratingKey}.{ext}`（按 Content-Type 推断
+  扩展名），重复播放同曲目直接命中；这正是后续 Plexamp 式 ahead 缓存的基础。
+- 原生引擎默认音量按用户要求设为 20%（比 WebView 播放明显更响的问题）。
+- BASS（Un4seen）许可结论：闭源，非商业个人免费，商业产品约 $120 起且插件另算；
+  Plexamp 由 Plex 公司商业使用（付费许可）。Cadilume 是 MIT 开源并要分发，
+  不采用 BASS；rodio/cpal/symphonia（MIT/Apache + MPL）无此负担。
+
+## 2026-08-06 — 原生播放引擎选型：许可与体积事实（用户要求独立可用，禁系统依赖）
+
+- libmpv 不是 MIT：mpv 本体是 GPLv2+ / LGPLv2.1+ 双许可（只有 `-Dgpl=false`
+  LGPL 构建才适用 LGPL），Rust `libmpv` crate 是 LGPL-2.1，
+  `tauri-plugin-libmpv` 是 MPL-2.0 且 macOS “Not tested”，其 setup 脚本在 macOS
+  明确要求 `brew install mpv`——违反用户“禁止系统安装依赖”的约束。
+- 体积实测（2026-08-06）：zhongfly Windows `mpv-dev-lgpl-x86_64` 压缩包
+  26.6MB，解压 `libmpv-2.dll` 95MB（单架构，静态内含 FFmpeg）；aarch64 与 x86_64
+  需分别打包。macOS 没有官方 LGPL 预编译 dylib，Homebrew 是 GPL 且属系统安装。
+- 纯 Rust 实测：`rodio 0.22.2`（默认 playback+flac+mp3+mp4/vorbis/wav）+ cpal +
+  symphonia 的 release 探测二进制仅 2.5MB（arm64），全部静态链接，无外部 dylib/dll。
+  rodio 0.22 API 已从 `OutputStream` 改为
+  `DeviceSinkBuilder::from_default_device() → open_stream() → mixer()` +
+  `Player::append/play/pause/try_seek/set_volume`；`Decoder::new` 走 symphonia。
+- 许可：rodio/cpal 为 MIT OR Apache-2.0；symphonia 0.6.0 为 MPL-2.0（文件级弱
+  copyleft，兼容 MIT 应用，修改其源文件才需保持 MPL，发行需附许可文本）；
+  miniaudio 为 Unlicense/MIT-0 双许可。symphonia 0.6.0 解码范围：AAC-LC、ALAC、
+  FLAC、MP1/2/3、PCM、Vorbis、ADPCM；不含 Opus/WMA/APE/DSD/HE-AAC。
+- 外部动态库（即使打进安装包）的额外成本：macOS 每个 dylib 需签名/公证、@rpath、
+  双架构需 lipo 后重签；Windows DLL 需按 x86_64/aarch64 分别发布、处理运行时依赖，
+  均显著大于纯静态方案的“零外部文件”。本约束下原生内核默认走纯 Rust 静态方案。
+- JS 端现成方案分级（2026-08-06 补充）：
+  - howler.js / SoundJS 等只是 Web Audio/HTMLAudio 封装（MIT），不改变 WebView
+    播放边界，解决不了 MediaError code 4、后台播放、SMTC、磁盘缓存。
+  - `@wasm-audio-decoders`（eshaz，MIT）是真解码：mpg123/aac/flac/opus 等 WASM
+    解码器，mpg123 压缩后约 76.6 KiB，浏览器/Web Worker 可用，可绕过 WebKit 对
+    格式的原生支持限制（可消除 codec 级 error4），mpg123 已支持 gapless；但仍跑在
+    WebView 内，后台/隐藏窗口/Now Playing/磁盘缓存边界未变。
+  - Tauri 桌面端没有成熟的“一键音频插件”；现成的是底层 Rust 引擎：
+    rodio 0.22（MIT OR Apache-2.0，稳定）+ kithara（zvuk，MIT OR Apache-2.0，
+    AVPlayer 级完整引擎：progressive HTTP + 磁盘 LRU 缓存 + gapless +
+    crossfade + HE-AAC/Opus + macOS AudioToolbox 硬解；当前 0.0.1-alpha4、
+    MSRV 1.89，未到生产成熟度）。所谓“自研内核”实际只需写 Tauri 集成胶水
+    （命令/事件/缓存策略/SMTC），解码与输出引擎都是现成库。
+- 2026-08-06 kithara 实地检查（clone 到 /tmp/kithara-check 实测）：
+  - 仓库创建 2026-02-11，几乎每日提交（2026-08-06 仍在推），有 nightly 发布与
+    v0.0.1-alpha1..alpha4；最新提交 63ad1e5 是大型 CI 修复（MSRV 提到 1.92、
+    修通 Windows lane、macOS CI 改用 tart VM）；stars 仅 5，仍属 alpha。
+  - 工作区 28 个 crate，可按需裁剪；核心 API 是门面 `Resource`/`ResourceConfig`
+    （builder 必填 store/byte_pool/pcm_pool）+ `kithara-play::PlayerImpl`
+    （多槽位、交叉淡化、EQ、自动前进、prefetch）。
+  - 实测最小可用组合（file+symphonia+backend-cpal+client-reqwest+tls-rustls）
+    release 二进制 13MB（arm64）；依赖 firewheel 0.10（MIT OR Apache-2.0）+
+    cpal + symphonia 0.6 + reqwest 0.13.4 + rustls 0.23.40 + aws-lc-sys 0.41
+    （Cadilume 现有 aws-lc-sys 0.43，接入时可能同时编译两个版本）。
+  - 当前 feature 组合有坑：`client-reqwest` 必须同时开 `tls-rustls`（kithara-net
+    无条件调用 `danger_accept_invalid_certs`）；纯 file 后端不带任何 HTTP 后端时
+    kithara-net 编译失败（15 errors）。接入时只能按“完整 HTTP 组合”先跑通。
+  - 许可确认：仓库 LICENSE-MIT + LICENSE-APACHE（MIT OR Apache-2.0）；
+    fdk-aac（LGPL+专利）只在 kithara-decode 默认启用，门面 `kithara` 默认关闭，
+    裁剪后不引入；ffmpeg 只在 kithara-encode，播放链路不依赖。
+  - 平台：macOS/Windows/iOS/Android/WASM 均有 CI lane；Windows ARM64 需排除
+    libfdk（CI 已处理）。接入风险主要是 alpha 稳定性与 feature 组合维护，需
+    pin 版本并先做真实 PMS 流 spike。
+  - 2026-08-06 alpha4 vs main 实测对比：crates.io `0.0.1-alpha4`（2026-07-01）
+    落后 main 46 个提交；门面 feature 集合没有 `backend-cpal`（直接编译冲突），
+    而 main 已加入；main 还包含与我们直接相关的修复：MP3 Xing tag 时长/seek
+    （#127）、切码率连续性（#119）、Windows lane 编译修复。结论：spike 必须用
+    main 源码并 pin 具体 commit（当前 63ad1e5），不要用 alpha4；后续生产采用
+    等上游 alpha5/beta 或继续 pin main commit，Tauri 集成层应封装为薄
+    `AudioEngine` 边界以便升级或回退 rodio。
+
 ## 2026-08-06 — Plexamp 缓存与高频切歌参考（clean-room 结论）
 
 - Plexamp（Electron + React Native Web + 私有 BASS 原生音频引擎）有明确的多级缓存策略：
