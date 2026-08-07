@@ -1153,11 +1153,14 @@
 }
 
 .now-playing-volume-popover output {
+  width: 34px;
   overflow: hidden;
   color: var(--now-playing-faint);
   font-size: 12px;
+  line-height: 18px;
   font-variant-numeric: tabular-nums;
   text-align: right;
+  white-space: nowrap;
 }
 
 @keyframes now-playing-record-spin {

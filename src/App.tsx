@@ -3634,14 +3634,21 @@ const QueueItem = memo(function QueueItem({ track, index, active, onSelect, onRe
 }) {
   return (
     <div className={`queue-item ${active ? "active" : ""}`}>
-      <button type="button" onClick={() => onSelect(track)}>
-        <span className="queue-item-artwork" aria-hidden="true">
+      <div className="queue-item-main">
+        <span className="queue-item-artwork">
           <Artwork item={track} size="small" />
-          <span className="queue-item-play-indicator"><Play size={14} fill="currentColor" strokeWidth={2.2} /></span>
+          <button
+            type="button"
+            className="queue-item-play-indicator"
+            aria-label={`播放${track.title}`}
+            onClick={() => onSelect(track)}
+          >
+            <Play size={14} fill="currentColor" strokeWidth={2.2} aria-hidden="true" />
+          </button>
         </span>
         <span><strong>{track.title}</strong><small>{trackArtist(track)}</small></span>
-      </button>
-      {!active && <IconButton label="从队列移除" onClick={() => onRemove(index)}><X size={14} /></IconButton>}
+      </div>
+      {!active && <IconButton label="从队列移除" onClick={() => onRemove(index)}><Trash2 size={14} /></IconButton>}
     </div>
   );
 });
