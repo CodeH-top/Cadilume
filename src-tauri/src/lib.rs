@@ -35,6 +35,9 @@ pub fn run() {
                 eprintln!("[播放] {}", event.payload());
             });
             window::set_status_icon_enabled(&app.handle(), status_icon_enabled)?;
+            #[cfg(debug_assertions)]
+            window::reveal_main_window_silent(&app.handle())?;
+            #[cfg(not(debug_assertions))]
             window::reveal_main_window(&app.handle())?;
             Ok(())
         })

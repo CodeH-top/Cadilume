@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Development credential fallback (never commit)
+.cadilume-dev-token
+*dev-token*
+*.token
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -216,6 +216,16 @@ pub(crate) fn reveal_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Resul
     Ok(())
 }
 
+/// Show the window without stealing focus — used for silent development
+/// startup so Rust hot-reloads do not keep popping the app to the front.
+pub(crate) fn reveal_main_window_silent<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        window.show()?;
+        window.unminimize()?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn show_main_window(app: AppHandle) -> Result<(), String> {
     reveal_main_window(&app).map_err(|error| error.to_string())

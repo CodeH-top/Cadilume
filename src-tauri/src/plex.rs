@@ -29,7 +29,9 @@ use crate::stream_proxy::StreamProxy;
 const PRODUCT_NAME: &str = "Cadilume";
 const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PLEX_TV: &str = "https://plex.tv";
+#[cfg(not(debug_assertions))]
 const KEYRING_SERVICE: &str = "top.codeh.cadilume";
+#[cfg(not(debug_assertions))]
 const KEYRING_ACCOUNT: &str = "cadilume-account-token";
 const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ARTWORK_CACHE_BYTES: u64 = 512 * 1024 * 1024;
@@ -278,10 +280,9 @@ impl PlexState {
             write_persisted_config(&config_path, &config)?;
         }
 
-        // Plaintext file first avoids the Keychain authorization prompt during
-        // development restarts; Keychain remains the production store.
-        let token = read_dev_token_fallback()
-            .or_else(|| keyring_entry().ok().and_then(|entry| entry.get_password().ok()));
+        // Dev builds read only the plaintext fallback file; release builds use
+        // the Keychain exclusively. The two credential stores never mix.
+        let token = read_account_token();
         let protected_client = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
@@ -930,10 +931,7 @@ pub async fn poll_pin(
             .map_err(|_| "服务器缓存写入失败".to_string())?
             .clear();
         let _ = clear_artwork_for_account_change(&state);
-        keyring_entry()
-            .map_err(display_error)?
-            .set_password(token)
-            .map_err(display_error)?;
+        store_account_token(token).map_err(display_error)?;
         *state
             .token
             .write()
@@ -951,9 +949,7 @@ pub fn logout(
     stream_proxy: State<'_, StreamProxy>,
 ) -> Result<(), String> {
     stream_proxy.clear().map_err(display_error)?;
-    if let Ok(entry) = keyring_entry() {
-        let _ = entry.delete_credential();
-    }
+    delete_account_token();
     *state
         .token
         .write()
@@ -2622,6 +2618,7 @@ fn string_field(value: &Value, key: &str) -> String {
         .to_string()
 }
 
+#[cfg(not(debug_assertions))]
 fn keyring_entry() -> Result<keyring::Entry> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(Into::into)
 }
@@ -2649,6 +2646,73 @@ fn read_dev_token_fallback() -> Option<String> {
         None
     } else {
         Some(token)
+    }
+}
+
+#[cfg(unix)]
+fn write_dev_token_fallback(token: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dev_token_fallback_path();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
+    file.write_all(token.as_bytes())
+        .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_dev_token_fallback(token: &str) -> Result<(), String> {
+    use std::io::Write;
+    let path = dev_token_fallback_path();
+    let mut file = std::fs::File::create(&path)
+        .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
+    file.write_all(token.as_bytes())
+        .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
+    Ok(())
+}
+
+/// Dev builds store credentials only in the plaintext fallback file and never
+/// touch the Keychain; release builds use the Keychain exclusively.
+#[cfg(debug_assertions)]
+fn read_account_token() -> Option<String> {
+    read_dev_token_fallback()
+}
+
+#[cfg(not(debug_assertions))]
+fn read_account_token() -> Option<String> {
+    keyring_entry()
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
+}
+
+#[cfg(debug_assertions)]
+fn store_account_token(token: &str) -> Result<(), String> {
+    write_dev_token_fallback(token)
+}
+
+#[cfg(not(debug_assertions))]
+fn store_account_token(token: &str) -> Result<(), String> {
+    keyring_entry()
+        .map_err(|e| e.to_string())?
+        .set_password(token)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(debug_assertions)]
+fn delete_account_token() {
+    let _ = std::fs::remove_file(dev_token_fallback_path());
+}
+
+#[cfg(not(debug_assertions))]
+fn delete_account_token() {
+    if let Ok(entry) = keyring_entry() {
+        let _ = entry.delete_credential();
     }
 }
 

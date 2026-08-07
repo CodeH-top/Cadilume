@@ -77,6 +77,8 @@ import {
   getSections,
   isDesktopRuntime,
   logout,
+  nativeAudioCacheStatus,
+  nativeAudioClearCache,
   normalizeDeviceName,
   openWindowsAudioSettings,
   removeTracksFromPlaylist,
@@ -87,6 +89,7 @@ import {
   showMainWindow,
   updatePlaylist,
   type PlaylistChanges,
+  type NativeAudioCacheStatus,
 } from "./api";
 import "./App.css";
 import { ARTIST_BIOGRAPHY_COLLAPSE_LINES, normalizeArtistBiography, previewArtistBiography, shouldCollapseArtistBiography } from "./artistBiography";
@@ -201,6 +204,7 @@ interface MusicShellRuntime {
   quality: StreamQuality;
   prebufferNext: boolean;
   cacheStatus?: CacheStatus;
+  nativeCacheStatus?: NativeAudioCacheStatus;
   cacheStatusError?: string;
   cacheBusy: boolean;
   sourcesSyncing: boolean;
@@ -486,6 +490,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [deviceName, setDeviceName] = useState(initialSession.deviceName);
   const [quality, setQuality] = useState<StreamQuality>(() => readStoredQuality(initialPlaybackSession?.quality));
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>();
+  const [nativeCacheStatus, setNativeCacheStatus] = useState<NativeAudioCacheStatus>();
   const [cacheStatusError, setCacheStatusError] = useState<string>();
   const [cacheBusy, setCacheBusy] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
@@ -811,8 +816,14 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     const requestId = ++cacheStatusRequestRef.current;
     setCacheStatusError(undefined);
     try {
-      const status = await getCacheStatus();
-      if (cacheStatusRequestRef.current === requestId) setCacheStatus(status);
+      const [status, nativeStatus] = await Promise.all([
+        getCacheStatus(),
+        nativeAudioCacheStatus(),
+      ]);
+      if (cacheStatusRequestRef.current === requestId) {
+        setCacheStatus(status);
+        setNativeCacheStatus(nativeStatus);
+      }
     } catch (reason) {
       if (cacheStatusRequestRef.current !== requestId) return;
       setCacheStatus(undefined);
@@ -860,9 +871,15 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     setCacheBusy(true);
     setCacheStatusError(undefined);
     try {
-      setCacheStatus(await clearArtworkCache());
+      await nativeAudioClearCache();
+      const [status, nativeStatus] = await Promise.all([
+        clearArtworkCache(),
+        nativeAudioCacheStatus(),
+      ]);
+      setCacheStatus(status);
+      setNativeCacheStatus(nativeStatus);
       artworkCache.clear();
-      notify("封面磁盘缓存已清理；当前页面已显示的封面会保留到下次加载。");
+      notify("封面与音频磁盘缓存已清理。");
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
       setCacheStatusError(message);
@@ -1078,6 +1095,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     quality,
     prebufferNext: player.prebufferNext,
     cacheStatus,
+    nativeCacheStatus,
     cacheStatusError,
     cacheBusy,
     sourcesSyncing,
@@ -1862,6 +1880,7 @@ function RoutePage() {
       quality={runtime.quality}
       prebufferNext={runtime.prebufferNext}
       cacheStatus={runtime.cacheStatus}
+      nativeCacheStatus={runtime.nativeCacheStatus}
       cacheStatusError={runtime.cacheStatusError}
       cacheBusy={runtime.cacheBusy}
       sourcesSyncing={runtime.sourcesSyncing}
@@ -1918,6 +1937,7 @@ interface ContentViewProps {
   quality: StreamQuality;
   prebufferNext: boolean;
   cacheStatus?: CacheStatus;
+  nativeCacheStatus?: NativeAudioCacheStatus;
   cacheStatusError?: string;
   cacheBusy: boolean;
   sourcesSyncing: boolean;
@@ -3321,6 +3341,12 @@ function SettingsView(props: ContentViewProps) {
     : props.cacheStatusError ? "暂时无法统计"
       : "正在统计…";
   const cacheDescription = props.cacheStatus ? `${props.cacheStatus.fileCount} 个缓存文件` : undefined;
+  const nativeCacheSummary = props.nativeCacheStatus
+    ? formatBytes(props.nativeCacheStatus.size_bytes)
+    : "暂无";
+  const nativeCacheDescription = props.nativeCacheStatus?.file_count
+    ? `${props.nativeCacheStatus.file_count} 个音频缓存`
+    : undefined;
   return (
     <div className="settings-page">
       <div className="page-heading sticky-page-heading"><h1>设置</h1></div>
@@ -3362,10 +3388,13 @@ function SettingsView(props: ContentViewProps) {
           </div>
         </div>
       </SettingsGroup>
-      <SettingsGroup icon={<Database size={18} />} title="封面缓存">
+      <SettingsGroup icon={<Database size={18} />} title="缓存">
         <div className="cache-row">
-          <span aria-live="polite"><strong>{cacheSummary}</strong>{cacheDescription && <small>{cacheDescription}</small>}</span>
-          <button className="danger-button" type="button" disabled={props.cacheBusy || !props.cacheStatus?.fileCount} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
+          <span aria-live="polite"><strong>封面：{cacheSummary}</strong>{cacheDescription && <small>{cacheDescription}</small>}</span>
+          <button className="danger-button" type="button" disabled={props.cacheBusy || (!props.cacheStatus?.fileCount && !props.nativeCacheStatus?.file_count)} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
+        </div>
+        <div className="cache-row">
+          <span aria-live="polite"><strong>音频：{nativeCacheSummary}</strong>{nativeCacheDescription && <small>{nativeCacheDescription}</small>}</span>
         </div>
       </SettingsGroup>
       <SettingsGroup icon={<Server size={18} />} title="音乐来源">

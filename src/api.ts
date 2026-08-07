@@ -789,6 +789,21 @@ export async function nativeAudioSetVolume(volume: number): Promise<void> {
   await invoke("native_audio_set_volume", { volume });
 }
 
+export interface NativeAudioCacheStatus {
+  size_bytes: number;
+  file_count: number;
+}
+
+export async function nativeAudioCacheStatus(): Promise<NativeAudioCacheStatus> {
+  if (!isDesktopRuntime()) return { size_bytes: 0, file_count: 0 };
+  return invoke("native_audio_cache_status");
+}
+
+export async function nativeAudioClearCache(): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_clear_cache");
+}
+
 /** Update a regular playlist's title/summary through the scoped Rust command. */
 export async function updatePlaylist(
   serverId: string,
