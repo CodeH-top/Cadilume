@@ -453,6 +453,7 @@ dependencies = [
  "anyhow",
  "axum",
  "cpal",
+ "futures-util",
  "keyring",
  "objc2",
  "objc2-app-kit",

@@ -5,14 +5,149 @@
 //! uses the simpler, battle-tested rodio path: cpal output + symphonia
 //! decoding, with the Plex stream pre-downloaded to a local cache file.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+
+/// Minimum bytes downloaded before progressive playback may start.
+const MIN_PROGRESSIVE_PRELOAD_BYTES: u64 = 256 * 1024;
+
+/// Shared download state between the background downloader and the
+/// progressive reader (pull-driven, kithara-stream style).
+struct DownloadProgress {
+    downloaded: AtomicU64,
+    failed: AtomicBool,
+    finished: AtomicBool,
+    lock: Mutex<()>,
+    notify: Condvar,
+}
+
+impl DownloadProgress {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            downloaded: AtomicU64::new(0),
+            failed: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            lock: Mutex::new(()),
+            notify: Condvar::new(),
+        })
+    }
+
+    fn wait_until(&self, bytes: u64) {
+        let mut guard = self.lock.lock().unwrap();
+        while self.downloaded.load(Ordering::SeqCst) < bytes
+            && !self.failed.load(Ordering::SeqCst)
+            && !self.finished.load(Ordering::SeqCst)
+        {
+            let result = self.notify.wait_timeout(guard, Duration::from_millis(150)).unwrap();
+            guard = result.0;
+        }
+    }
+
+    fn wake(&self) {
+        self.notify.notify_all();
+    }
+}
+
+/// Read+Seek over a file that is still being written by the downloader:
+/// reads beyond the downloaded frontier wait for more bytes (or EOF/failure).
+struct ProgressiveFile {
+    file: std::fs::File,
+    progress: Arc<DownloadProgress>,
+}
+
+impl Read for ProgressiveFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let pos = self.file.stream_position()?;
+            let downloaded = self.progress.downloaded.load(Ordering::SeqCst);
+            if pos < downloaded {
+                let n = self.file.read(buf)?;
+                if n > 0 {
+                    return Ok(n);
+                }
+                if downloaded > pos && !self.progress.finished.load(Ordering::SeqCst) {
+                    self.progress.wait_until(downloaded + 1);
+                    continue;
+                }
+                return Ok(0);
+            }
+            if self.progress.failed.load(Ordering::SeqCst)
+                || self.progress.finished.load(Ordering::SeqCst)
+            {
+                return Ok(0);
+            }
+            self.progress.wait_until(pos + 1);
+        }
+    }
+}
+
+impl Seek for ProgressiveFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let target = match pos {
+            SeekFrom::Start(p) => p,
+            SeekFrom::Current(delta) => {
+                (self.file.stream_position()? as i128 + delta as i128).max(0) as u64
+            }
+            SeekFrom::End(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "progressive seek from end is unsupported",
+                ));
+            }
+        };
+        while target > self.progress.downloaded.load(Ordering::SeqCst) {
+            if self.progress.failed.load(Ordering::SeqCst)
+                || self.progress.finished.load(Ordering::SeqCst)
+            {
+                break;
+            }
+            self.progress.wait_until(target + 1);
+        }
+        self.file.seek(SeekFrom::Start(target))
+    }
+}
+
+/// Stream the loopback media URL into `part_path`, publishing progress, then
+/// atomically promote the completed file to `final_path`.
+async fn download_progressive(
+    client: &reqwest::Client,
+    url: &str,
+    part_path: &Path,
+    final_path: &Path,
+    progress: &DownloadProgress,
+) -> Result<u64, String> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("下载请求失败: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("下载返回 HTTP {}", response.status()));
+    }
+    let mut file = std::fs::File::create(part_path).map_err(|e| format!("创建缓存文件失败: {e}"))?;
+    let mut stream = response.bytes_stream();
+    let mut total = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("下载读取失败: {e}"))?;
+        file.write_all(&chunk).map_err(|e| format!("缓存写入失败: {e}"))?;
+        total += chunk.len() as u64;
+        progress.downloaded.store(total, Ordering::SeqCst);
+        progress.wake();
+    }
+    file.flush().map_err(|e| format!("缓存刷新失败: {e}"))?;
+    progress.finished.store(true, Ordering::SeqCst);
+    progress.wake();
+    let _ = std::fs::rename(part_path, final_path);
+    Ok(total)
+}
 
 /// Native playback engine (rodio + cpal) owned by the Tauri app.
 pub struct NativeAudioEngine {
@@ -97,8 +232,9 @@ impl NativeAudioEngine {
         Ok(self.player.len())
     }
 
-    /// Spike: download a loopback media URL to the local cache and play the
-    /// file through rodio. Doubles as the planned disk-cache strategy.
+    /// Stream a loopback media URL into the local cache and start playing
+    /// once the head is available (progressive download, kithara-stream
+    /// style). Completed downloads are promoted to a reusable cache file.
     pub async fn load_cached_and_play(
         &self,
         source: &str,
@@ -107,33 +243,6 @@ impl NativeAudioEngine {
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return self.load_and_play(source);
         }
-        let response = reqwest::Client::new()
-            .get(source)
-            .send()
-            .await
-            .map_err(|e| format!("缓存下载请求失败: {e}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("缓存下载返回 HTTP {status}"));
-        }
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| format!("缓存下载读取失败: {e}"))?;
-        let ext = match content_type.split(';').next().unwrap_or("").trim() {
-            "audio/flac" => "flac",
-            "audio/mpeg" => "mp3",
-            "audio/x-wav" | "audio/wav" | "audio/wave" => "wav",
-            "audio/mp4" | "audio/aac" | "audio/x-m4a" => "m4a",
-            "audio/ogg" => "ogg",
-            _ => "bin",
-        };
         let key = cache_key
             .filter(|value| {
                 !value.is_empty()
@@ -144,20 +253,71 @@ impl NativeAudioEngine {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let dir = self.cache_root.join("downloads");
         std::fs::create_dir_all(&dir).map_err(|e| format!("缓存目录创建失败: {e}"))?;
-        let final_path = dir.join(format!("{key}.{ext}"));
-        let existed = final_path.exists();
-        if !existed {
-            let part_path = dir.join(format!("{key}.{ext}.part"));
-            std::fs::write(&part_path, &bytes)
-                .map_err(|e| format!("缓存文件写入失败: {e}"))?;
-            std::fs::rename(&part_path, &final_path)
-                .map_err(|e| format!("缓存文件提交失败: {e}"))?;
+        let final_path = dir.join(format!("{key}.audio"));
+        let final_ready = std::fs::metadata(&final_path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false);
+        if final_ready {
+            eprintln!("[原生] 命中完整缓存 key={key}");
+            return self.load_and_play(final_path.to_str().unwrap());
         }
+
+        let part_path = dir.join(format!("{key}.audio.part"));
+        let _ = std::fs::remove_file(&part_path);
+        let progress = DownloadProgress::new();
+        let progress_task = Arc::clone(&progress);
+        let part_for_task = part_path.clone();
+        let final_for_task = final_path.clone();
+        let source_for_task = source.to_string();
+        let client = reqwest::Client::new();
+        tokio::spawn(async move {
+            if let Err(error) = download_progressive(
+                &client,
+                &source_for_task,
+                &part_for_task,
+                &final_for_task,
+                &progress_task,
+            )
+            .await
+            {
+                progress_task.failed.store(true, Ordering::SeqCst);
+                progress_task.wake();
+                eprintln!("[原生] 渐进下载失败：{error}");
+            }
+        });
+
+        // Wait for the head bytes (or terminal state) before decoding.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while progress.downloaded.load(Ordering::SeqCst) < MIN_PROGRESSIVE_PRELOAD_BYTES
+            && !progress.failed.load(Ordering::SeqCst)
+            && !progress.finished.load(Ordering::SeqCst)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if progress.failed.load(Ordering::SeqCst) {
+            return Err("下载歌曲失败，无法开始播放".to_string());
+        }
+        let file = std::fs::File::open(&part_path)
+            .map_err(|e| format!("打开渐进缓存失败: {e}"))?;
+        let reader = ProgressiveFile {
+            file,
+            progress: Arc::clone(&progress),
+        };
+        let decoder = Decoder::new(reader).map_err(|e| format!("媒体解码失败: {e}"))?;
+        let total = decoder.total_duration().map(|d| d.as_secs_f64());
+        *self.duration_seconds.lock().map_err(|_| "时长状态锁失败".to_string())? = total;
+        self.player.clear();
+        self.player.append(decoder);
+        self.player.play();
+        self.loaded.store(true, Ordering::SeqCst);
+        self.ended_sent.store(false, Ordering::SeqCst);
         eprintln!(
-            "[原生] 已落盘缓存 key={key} 字节={} 类型={content_type} 命中={existed}",
-            bytes.len(),
+            "[原生] 渐进播放开始 key={key} 已预载={} 时长={:?}",
+            progress.downloaded.load(Ordering::SeqCst),
+            total,
         );
-        self.load_and_play(final_path.to_str().unwrap())
+        Ok(self.player.len())
     }
 
     /// Publish sanitized playback progress/ended events to the WebView.
@@ -495,7 +655,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1_200)).await;
         let position = engine.player().get_pos().as_secs_f64();
         assert!(position > 0.2, "缓存下载后播放进度应前进，实际 {position}");
-        let cached = cache_root.join("downloads/sample-cache-test.flac");
+        let cached = cache_root.join("downloads/sample-cache-test.audio");
         assert!(cached.exists(), "缓存文件应落盘");
         engine.player().clear();
     }
