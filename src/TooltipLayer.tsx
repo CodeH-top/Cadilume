@@ -64,7 +64,7 @@ export function TooltipLayer() {
   }, [tip.text, tip.visible]);
 
   useEffect(() => {
-    const onMouseOver = (event: MouseEvent) => {
+    const onPointerMove = (event: PointerEvent) => {
       const target = (event.target as Element | null)?.closest<HTMLElement>("[data-tooltip]") ?? null;
       if (target === currentTargetRef.current) return;
       currentTargetRef.current = target;
@@ -73,17 +73,6 @@ export function TooltipLayer() {
         return;
       }
       show(target);
-    };
-    const onMouseOut = (event: MouseEvent) => {
-      const related = event.relatedTarget as Node | null;
-      if (!related || !document.contains(related)) {
-        // 光标瞬间移出窗口/文档：直接隐藏，避免残留。
-        onHide();
-        return;
-      }
-      const nextTarget = (related as Element).closest?.("[data-tooltip]") as HTMLElement | null;
-      if (nextTarget === currentTargetRef.current) return;
-      onHide();
     };
     const onFocusIn = (event: FocusEvent) => {
       const target = (event.target as Element | null)?.closest<HTMLElement>("[data-tooltip]") ?? null;
@@ -99,8 +88,7 @@ export function TooltipLayer() {
     const onVisibilityChange = () => {
       if (document.hidden) hide();
     };
-    document.addEventListener("mouseover", onMouseOver);
-    document.addEventListener("mouseout", onMouseOut);
+    document.addEventListener("pointermove", onPointerMove);
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", onHide);
     document.addEventListener("scroll", onHide, true);
@@ -110,8 +98,7 @@ export function TooltipLayer() {
     window.addEventListener("resize", onHide);
     return () => {
       window.clearTimeout(showTimerRef.current);
-      document.removeEventListener("mouseover", onMouseOver);
-      document.removeEventListener("mouseout", onMouseOut);
+      document.removeEventListener("pointermove", onPointerMove);
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onHide);
       document.removeEventListener("scroll", onHide, true);
