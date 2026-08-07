@@ -83,6 +83,13 @@
   （`SetPlaybackStatus` + `UpdateTimelineProperties`），DisplayUpdater 只管
   类型/属性/Update；`args.Button()` 返回 Result，需先 unwrap。
 
+## 2026-08-07 — 音量弹层 hover 断链修复（ca9ecd6）
+
+- 绝对定位 popover 用 `bottom: calc(100% + 9px)` 与触发按钮留空隙时，鼠标从
+  按钮上移到弹层会经过空隙导致 `:hover` 断开、弹层消失；在容器上加透明
+  `::before`（宽=弹层宽、高=空隙高、`bottom: 100%` 居中）做 hover 桥即可，
+  保留视觉空隙又不打断 hover。Cadilume 紧凑/展开两套音量弹层都按此修复。
+
 ## 2026-08-07 — 开发态“来回弹窗抢焦点”根因与修复（dev 0cf767a）
 
 - 静默启动不能只看 Rust 侧：`src/App.tsx` 的 `MainApplication` 挂载 effect 曾
