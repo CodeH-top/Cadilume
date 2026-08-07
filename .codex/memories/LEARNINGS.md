@@ -45,6 +45,19 @@
   断言/日志避免打印 URL，或把 token 放请求头。开发 token 只存在于
   `~/.cadilume-dev-token`，测试也只用它做只读拉取。
 
+## 2026-08-07 — 输出设备选择与 Windows 交叉验证边界（7a76f92）
+
+- rodio/cpal 输出设备切换：`DeviceSinkBuilder::from_device` 按设备名打开，
+  Player 与 mixer 绑定后不能热换，正确做法是引擎快照（进度/音量/队列/当前源）
+  → 新设备重建引擎 → 从缓存或渐进下载恢复播放 → 旧事件线程用 `stopped`
+  原子标记退出，再替换 NativeAudioEngineSlot 里的引擎。
+- cpal 0.17 `default_output_device()` 返回 `Option<Device>`（不是 Result）；
+  `output_devices()` 迭代项直接是 `Device`（无 `Result` 包装）；设备名用
+  `description().name()`（`name()` 已废弃）。
+- macOS 上 `cargo check --target x86_64-pc-windows-msvc` 会被 aws-lc-sys 的
+  C 构建挡住（缺 windows.h/SDK），不是 Rust 代码问题；Windows 侧验证必须在
+  Windows 机器上完成，验收清单已写入升级计划文档。
+
 ## 2026-08-07 — 开发态“来回弹窗抢焦点”根因与修复（dev 0cf767a）
 
 - 静默启动不能只看 Rust 侧：`src/App.tsx` 的 `MainApplication` 挂载 effect 曾
