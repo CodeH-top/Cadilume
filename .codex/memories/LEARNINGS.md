@@ -22,6 +22,16 @@
 - 遗留验证项：严格 gapless（当前为预取减间隙 MVP）、Windows 实机 SMTC、
   真实 PMS 高频切歌 20+ 次/歌词对时/seek/后台播放验收。
 
+## 2026-08-07 — 开发态“来回弹窗抢焦点”根因与修复（dev 0cf767a）
+
+- 静默启动不能只看 Rust 侧：`src/App.tsx` 的 `MainApplication` 挂载 effect 曾
+  无条件调用 `showMainWindow()`，热更新/原生重启后前端一加载就把隐藏窗口
+  `show + set_focus`，表现为每次改前端文件/重启都会弹窗抢焦点。
+- 修复：删除该 effect（release 启动显示由 Rust setup 的 `reveal_main_window`
+  负责，Dock Reopen/托盘“显示”也走 Rust 侧），前端不再自动显示窗口。
+- 验证方式：`System Events` 查询进程可见窗口数为 0（隐藏窗口不计入），
+  触发热重载与 touch Rust 文件让 tauri dev 重启后窗口仍保持隐藏。
+
 ## 2026-08-07 — UI/业务修复要点（dev 44e1b9d）
 
 - 歌单内删除歌曲报“请至少选择一首歌曲”根因：PMS `/playlists/{id}/items` 返回的
