@@ -625,6 +625,7 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .now-playing { min-width: 0; display: grid; grid-template-columns: 54px minmax(0, 1fr); align-items: center; gap: 12px; }
 .now-playing-trigger { width: fit-content; min-width: min(244px, 100%); max-width: 100%; border: 0; border-radius: 10px; padding: 7px 13px 7px 7px; background: transparent; text-align: left; transition: background 160ms ease; }
 .now-playing-trigger:hover:not(:disabled), .now-playing-trigger:focus-visible { background: var(--hover-fill); }
+.now-playing-trigger:focus-visible { outline: none; }
 .now-playing-trigger:disabled { cursor: not-allowed; opacity: 0.58; }
 .mini-vinyl { position: relative; width: 54px; height: 54px; display: grid; place-items: center; overflow: hidden; border: 0; border-radius: 50%; background: repeating-radial-gradient(circle, rgba(255, 255, 255, 0.07) 0 1px, transparent 1.5px 4px), conic-gradient(from 22deg, #060708, #2c3034 16%, #070809 31%, #282c30 48%, #050607 67%, #25292d 82%, #060708); box-shadow: inset 4px -5px 9px rgba(0, 0, 0, 0.62), inset -3px 4px 7px rgba(255, 255, 255, 0.075), 0 4px 12px rgba(0, 0, 0, 0.26); animation: mini-vinyl-spin 14s linear infinite; animation-play-state: paused; }
 .mini-vinyl .artwork-player { border: 0; }
