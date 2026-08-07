@@ -119,3 +119,15 @@
 - 修复：事件转发线程改用 `tauri::async_runtime::spawn`（Tauri 全局运行时，
   同步/异步上下文都安全）；`precache` 若换用该 API，注意其 JoinHandle
   `Future::Output` 是 `tauri::Result<T>`。
+
+## 2026-08-07 — 开发态卡死/静默退出根因未定位，已加播放保护
+
+- 症状：17:05 左右开发态整条链静默退出，无新崩溃报告；此前症状是“UI 卡住但音乐继续”。
+- 16:17 的 SIGABRT 崩溃报告为旧 `tokio::spawn` 无运行时上下文 panic（`native_queue_set`
+  首建引擎路径），`fb95edc` 已修复，该报告来自修复前调试包。
+- 兜底已落地（`bce742e`）：前端 error/unhandledrejection/主线程卡顿 >3s 立即停播；
+  前端 1s 心跳，Rust 6s 未收到且正在出声自动清空播放器并发出
+  `playback-protected-stop` 事件。
+- 下次复现时优先抓主线程栈（`sample <pid>`）和终端完整日志；重点怀疑同步命令
+  `native_audio_stop`/`native_queue_next` 与事件转发线程的锁交互，以及
+  `player().clear()` 在源占用时是否阻塞。
