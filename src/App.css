@@ -147,6 +147,7 @@
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
 #root { -webkit-user-select: none; user-select: none; }
 input, textarea, [contenteditable]:not([contenteditable="false"]), .playback-alert-details code { -webkit-user-select: text; user-select: text; }
+textarea { resize: none; }
 button, input, select { font: inherit; }
 button { color: inherit; }
 button, select { cursor: pointer; }
@@ -243,9 +244,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .playlist-dialog > header small { color: var(--muted); font-size: 12px; }
 .playlist-dialog form { display: grid; gap: 14px; padding: 20px; }
 .playlist-dialog-field { display: grid; gap: 6px; color: var(--muted-strong); font-size: 12px; }
-.playlist-dialog-field input, .playlist-dialog-field textarea { border: 1px solid var(--border-strong); border-radius: 9px; padding: 8px 10px; background: var(--surface-soft); color: var(--text); font-size: 13px; resize: vertical; }
+.playlist-dialog-field input, .playlist-dialog-field textarea { border: 1px solid var(--border-strong); border-radius: 9px; padding: 8px 10px; background: var(--surface-soft); color: var(--text); font-size: 13px; }
 .playlist-dialog-field input:focus, .playlist-dialog-field textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-.playlist-dialog form > footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
+.playlist-dialog form > footer { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding-top: 4px; }
+.playlist-dialog form > footer button { height: 37px; }
 .playlist-delete-dialog > footer { display: flex; justify-content: flex-end; gap: 10px; padding: 0 20px 20px; }
 .playlist-delete-copy { padding: 20px; color: var(--text); font-size: 13px; line-height: 1.55; }
 .now-playing > span, .track-title > span, .queue-item button > span { min-width: 0; display: grid; gap: 2px; }
