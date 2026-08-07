@@ -988,7 +988,17 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     }
   }, [loadAt, schedulePersistedSession]);
 
+  /** 切歌瞬间的动作：立即停掉旧歌，并把进度状态同步归 0，不等任何引擎 IPC 返回。 */
+  const stopCurrentImmediately = useCallback(() => {
+    if (isDesktopRuntime()) void nativeAudioStop().catch(() => undefined);
+    resumeProgressRef.current = null;
+    progressRef.current = 0;
+    setProgress(0);
+  }, []);
+
   const next = useCallback(() => {
+    // 先停旧歌 + 进度归 0，避免 nativeQueueNext IPC 往返期间旧歌继续出声/进度残留。
+    stopCurrentImmediately();
     if (!isDesktopRuntime()) {
       void advance(false);
       return;
@@ -998,10 +1008,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         if (index >= 0) void loadAt(index, true);
       })
       .catch(() => void advance(false));
-  }, [advance, loadAt]);
+  }, [advance, loadAt, stopCurrentImmediately]);
 
   const previous = useCallback(() => {
     if (!isDesktopRuntime()) {
+      stopCurrentImmediately();
       void advance(false);
       return;
     }
@@ -1013,12 +1024,17 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       schedulePersistedSession(false);
       return;
     }
+    // 切到上一首同样先停旧歌 + 进度归 0，不等引擎 IPC 返回。
+    stopCurrentImmediately();
     void nativeQueuePrevious()
       .then((index) => {
         if (index >= 0) void loadAt(index, true);
       })
-      .catch(() => undefined);
-  }, [loadAt, schedulePersistedSession]);
+      .catch(() => {
+        // 没有上一首时回落到当前曲目开头重新播放，避免停在“已停止且进度为 0”的状态。
+        if (indexRef.current >= 0) void loadAt(indexRef.current, true, 0);
+      });
+  }, [loadAt, schedulePersistedSession, stopCurrentImmediately]);
 
   const toggle = useCallback(() => {
     if (!current || playbackLoadingRef.current) return;
