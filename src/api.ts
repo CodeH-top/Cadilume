@@ -824,6 +824,22 @@ export async function nativeAudioClearCache(): Promise<void> {
   await invoke("native_audio_clear_cache");
 }
 
+export interface NativeOutputDevice {
+  device_id: string;
+  label: string;
+  is_default: boolean;
+}
+
+export async function nativeAudioOutputDevices(): Promise<NativeOutputDevice[]> {
+  if (!isDesktopRuntime()) return [];
+  return invoke("native_audio_output_devices");
+}
+
+export async function nativeAudioSetOutputDevice(deviceId: string): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_set_output_device", { deviceId });
+}
+
 export interface NativeQueueTrack {
   rating_key: string;
   title: string;

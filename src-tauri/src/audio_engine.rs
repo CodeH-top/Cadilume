@@ -277,6 +277,8 @@ pub struct NativeAudioEngine {
     metadata: Arc<Mutex<Option<NowPlayingMetadata>>>,
     queue: Arc<Mutex<QueueState>>,
     pending: Arc<Mutex<Option<PendingTrack>>>,
+    current_source: Arc<Mutex<Option<CurrentSource>>>,
+    stopped: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -444,10 +446,36 @@ impl PendingTrack {
     }
 }
 
+/// Where the current track is being read from, so a device switch can rebuild
+/// the player and resume from the same source (cache hit first, otherwise a
+/// fresh progressive download).
+#[derive(Clone, Debug)]
+struct CurrentSource {
+    source: String,
+    cache_key: Option<String>,
+    metadata: NowPlayingMetadata,
+}
+
+/// State captured before rebuilding the player on another output device.
+#[derive(Clone, Debug)]
+struct PlaybackSnapshot {
+    playing: bool,
+    position: f64,
+    volume: f32,
+    duration_seconds: Option<f64>,
+    metadata: Option<NowPlayingMetadata>,
+    source: Option<CurrentSource>,
+    queue_tracks: Vec<QueueTrack>,
+    queue_index: i64,
+    repeat: NativeRepeatMode,
+    shuffle: bool,
+}
+
 /// Lazy engine slot so the device stream opens on first use.
 pub struct NativeAudioEngineSlot {
     cache_root: PathBuf,
     inner: Mutex<Option<Arc<NativeAudioEngine>>>,
+    preferred_device: Mutex<Option<String>>,
 }
 
 impl NativeAudioEngineSlot {
@@ -455,6 +483,7 @@ impl NativeAudioEngineSlot {
         Self {
             cache_root,
             inner: Mutex::new(None),
+            preferred_device: Mutex::new(None),
         }
     }
 
@@ -467,13 +496,62 @@ impl NativeAudioEngineSlot {
         if let Some(engine) = guard.as_ref() {
             return Ok(Arc::clone(engine));
         }
+        let preferred_device = self
+            .preferred_device
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or(None);
         let engine = Arc::new(
-            NativeAudioEngine::new(self.cache_root.clone())
+            NativeAudioEngine::new_with_device(
+                self.cache_root.clone(),
+                preferred_device.as_deref().unwrap_or(""),
+            )
                 .map_err(|e| format!("原生引擎创建失败: {e}"))?,
         );
         engine.start_event_forwarder(app.clone());
         *guard = Some(Arc::clone(&engine));
         Ok(engine)
+    }
+
+    /// Switch the live engine to another output device. The current track is
+    /// captured and resumed on the new device from cache (or a fresh
+    /// progressive download); the old event forwarder stops cleanly.
+    pub async fn set_output_device(
+        &self,
+        app: &AppHandle,
+        device_name: String,
+    ) -> Result<(), String> {
+        if let Ok(mut preferred) = self.preferred_device.lock() {
+            *preferred = Some(device_name.clone());
+        }
+        let snapshot = {
+            let guard = self
+                .inner
+                .lock()
+                .map_err(|_| "原生引擎状态锁失败".to_string())?;
+            let Some(old) = guard.as_ref() else {
+                return Ok(());
+            };
+            old.capture_playback_snapshot()
+        };
+        let new_engine = Arc::new(
+            NativeAudioEngine::new_with_device(self.cache_root.clone(), &device_name)
+                .map_err(|e| format!("切换输出设备失败: {e}"))?,
+        );
+        new_engine
+            .restore_playback_snapshot(&snapshot)
+            .await
+            .map_err(|e| format!("在新输出设备上恢复播放失败: {e}"))?;
+        new_engine.start_event_forwarder(app.clone());
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| "原生引擎状态锁失败".to_string())?;
+        if let Some(old) = guard.as_ref() {
+            old.stopped.store(true, Ordering::SeqCst);
+        }
+        *guard = Some(new_engine);
+        Ok(())
     }
 }
 
@@ -509,9 +587,31 @@ fn publish_natural_ended(
 }
 
 impl NativeAudioEngine {
+    #[allow(dead_code)]
     pub fn new(cache_root: PathBuf) -> anyhow::Result<Self> {
-        let builder = DeviceSinkBuilder::from_default_device()
-            .map_err(|e| anyhow::anyhow!("打开默认音频设备失败: {e}"))?;
+        Self::new_with_device(cache_root, "")
+    }
+
+    fn new_with_device(cache_root: PathBuf, device_name: &str) -> anyhow::Result<Self> {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let builder = if device_name.is_empty() {
+            DeviceSinkBuilder::from_default_device()
+                .map_err(|e| anyhow::anyhow!("打开默认音频设备失败: {e}"))?
+        } else {
+            let host = cpal::default_host();
+            let device = host
+                .output_devices()
+                .map_err(|e| anyhow::anyhow!("枚举输出设备失败: {e}"))?
+                .find(|device| {
+                    device
+                        .description()
+                        .map(|description| description.name() == device_name)
+                        .unwrap_or(false)
+                })
+                .ok_or_else(|| anyhow::anyhow!("找不到输出设备: {device_name}"))?;
+            DeviceSinkBuilder::from_device(device)
+                .map_err(|e| anyhow::anyhow!("打开所选输出设备失败: {e}"))?
+        };
         let sink = builder
             .open_stream()
             .map_err(|e| anyhow::anyhow!("音频流启动失败: {e}"))?;
@@ -528,6 +628,8 @@ impl NativeAudioEngine {
             metadata: Arc::new(Mutex::new(None)),
             queue: Arc::new(Mutex::new(QueueState::default())),
             pending: Arc::new(Mutex::new(None)),
+            current_source: Arc::new(Mutex::new(None)),
+            stopped: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -556,6 +658,19 @@ impl NativeAudioEngine {
         let file = std::fs::File::open(path).map_err(|e| format!("打开媒体文件失败: {e}"))?;
         let decoder = Decoder::new(file).map_err(|e| format!("媒体解码失败: {e}"))?;
         let total = decoder.total_duration().map(|d| d.as_secs_f64());
+        let metadata = self
+            .metadata
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or(None)
+            .unwrap_or_default();
+        if let Ok(mut current_source) = self.current_source.lock() {
+            *current_source = Some(CurrentSource {
+                source: path.to_string(),
+                cache_key: None,
+                metadata,
+            });
+        }
         *self.duration_seconds.lock().map_err(|_| "时长状态锁失败".to_string())? = total;
         self.player.clear();
         if let Ok(mut pending) = self.pending.lock() {
@@ -582,13 +697,14 @@ impl NativeAudioEngine {
         cache_key: Option<String>,
         metadata: Option<NowPlayingMetadata>,
     ) -> Result<usize, String> {
+        let metadata_for_source = metadata.clone();
         if let Some(metadata) = metadata {
             *self.metadata.lock().map_err(|_| "元数据状态锁失败".to_string())? = Some(metadata);
         }
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return self.load_and_play(source);
         }
-        let (key, final_path, part_path) = self.resolve_cache_paths(cache_key)?;
+        let (key, final_path, part_path) = self.resolve_cache_paths(cache_key.clone())?;
         let final_ready = std::fs::metadata(&final_path)
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false);
@@ -642,6 +758,13 @@ impl NativeAudioEngine {
         };
         let decoder = Decoder::new(reader).map_err(|e| format!("媒体解码失败: {e}"))?;
         let total = decoder.total_duration().map(|d| d.as_secs_f64());
+        if let Ok(mut current_source) = self.current_source.lock() {
+            *current_source = Some(CurrentSource {
+                source: source.to_string(),
+                cache_key,
+                metadata: metadata_for_source.unwrap_or_default(),
+            });
+        }
         *self.duration_seconds.lock().map_err(|_| "时长状态锁失败".to_string())? = total;
         self.player.clear();
         if let Ok(mut pending) = self.pending.lock() {
@@ -830,6 +953,85 @@ impl NativeAudioEngine {
         None
     }
 
+    /// Capture everything needed to rebuild the player on another device.
+    fn capture_playback_snapshot(&self) -> PlaybackSnapshot {
+        let queue_state = self
+            .queue
+            .lock()
+            .map(|guard| {
+                (
+                    guard.tracks.clone(),
+                    guard.current_index,
+                    guard.repeat,
+                    guard.shuffle,
+                )
+            })
+            .unwrap_or_default();
+        PlaybackSnapshot {
+            playing: !self.player().is_paused() && !self.player().empty(),
+            position: self.player().get_pos().as_secs_f64(),
+            volume: self.player().volume(),
+            duration_seconds: self
+                .duration_seconds
+                .lock()
+                .map(|guard| *guard)
+                .unwrap_or(None),
+            metadata: self
+                .metadata
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or(None),
+            source: self
+                .current_source
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or(None),
+            queue_tracks: queue_state.0,
+            queue_index: queue_state.1,
+            repeat: queue_state.2,
+            shuffle: queue_state.3,
+        }
+    }
+
+    /// Restore a captured snapshot on a freshly built engine (device switch).
+    async fn restore_playback_snapshot(&self, snapshot: &PlaybackSnapshot) -> Result<(), String> {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.tracks = snapshot.queue_tracks.clone();
+            queue.current_index = snapshot.queue_index;
+            queue.repeat = snapshot.repeat;
+            queue.shuffle = snapshot.shuffle;
+            queue.bag.clear();
+        }
+        if let Ok(mut metadata) = self.metadata.lock() {
+            *metadata = snapshot.metadata.clone();
+        }
+        if let Ok(mut duration) = self.duration_seconds.lock() {
+            *duration = snapshot.duration_seconds;
+        }
+        self.player().set_volume(snapshot.volume);
+        if let Some(source) = snapshot.source.as_ref() {
+            if source.source.starts_with("http://") || source.source.starts_with("https://") {
+                self.load_cached_and_play(
+                    &source.source,
+                    source.cache_key.clone(),
+                    Some(source.metadata.clone()),
+                )
+                .await?;
+            } else {
+                self.load_and_play(&source.source)?;
+            }
+            if snapshot.position > 0.5 {
+                let _ = self
+                    .player()
+                    .try_seek(Duration::from_secs_f64(snapshot.position));
+            }
+            if !snapshot.playing {
+                self.player().pause();
+            }
+        }
+        Ok(())
+    }
+
     /// Publish sanitized playback progress/ended events to the WebView.
     pub fn start_event_forwarder(self: &Arc<Self>, app: AppHandle) {
         let engine = Arc::clone(self);
@@ -838,6 +1040,9 @@ impl NativeAudioEngine {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(200)).await;
+                if engine.stopped.load(Ordering::SeqCst) {
+                    break;
+                }
                 let position = engine.player().get_pos().as_secs_f64();
                 let duration_value = engine
                     .duration_seconds
@@ -952,6 +1157,53 @@ pub struct NativeStatus {
     pub volume: f32,
     pub item_count: usize,
     pub current_index: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct NativeOutputDevice {
+    pub device_id: String,
+    pub label: String,
+    pub is_default: bool,
+}
+
+#[tauri::command]
+pub fn native_audio_output_devices() -> Result<Vec<NativeOutputDevice>, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let default_name = host
+        .default_output_device()
+        .and_then(|device| device.description().ok())
+        .map(|description| description.name().to_string())
+        .unwrap_or_default();
+    let devices = host
+        .output_devices()
+        .map_err(|e| format!("枚举输出设备失败: {e}"))?
+        .filter_map(|device| {
+            let name = device.description().ok()?.name().to_string();
+            Some(NativeOutputDevice {
+                device_id: name.clone(),
+                label: name.clone(),
+                is_default: default_name.is_empty() || name == default_name,
+            })
+        })
+        .collect::<Vec<_>>();
+    if devices.is_empty() {
+        return Ok(vec![NativeOutputDevice {
+            device_id: String::new(),
+            label: "系统默认".to_string(),
+            is_default: true,
+        }]);
+    }
+    Ok(devices)
+}
+
+#[tauri::command]
+pub async fn native_audio_set_output_device(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+    device_id: String,
+) -> Result<(), String> {
+    state.set_output_device(&app, device_id).await
 }
 
 /// Spike diagnostic: verify the OS audio device can actually be opened from
@@ -1584,6 +1836,61 @@ mod tests {
         assert_eq!(engine.queue.lock().unwrap().current_index, 1);
         assert!(!engine.player().empty(), "MP3 B 应继续播放");
         engine.player().clear();
+    }
+
+    #[tokio::test]
+    async fn output_device_list_contains_the_default_device() {
+        use cpal::traits::HostTrait;
+        let host = cpal::default_host();
+        if host.default_output_device().is_none() {
+            eprintln!("跳过：无默认输出设备");
+            return;
+        }
+        let devices = native_audio_output_devices().expect("枚举输出设备应成功");
+        assert!(!devices.is_empty(), "至少应返回系统默认设备");
+        assert!(
+            devices.iter().any(|device| device.is_default),
+            "设备列表应标记默认设备"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_device_switch_resumes_playback_from_position() {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let wav = std::env::temp_dir().join("cadilume-device-switch.wav");
+        write_test_wav(&wav);
+        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-device");
+        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
+        engine.player().set_volume(0.0);
+        engine.load_and_play(wav.to_str().unwrap()).unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let snapshot = engine.capture_playback_snapshot();
+        assert!(snapshot.position > 0.1, "切换前播放进度应已前进");
+        assert!(snapshot.playing, "切换前应处于播放中");
+
+        let host = cpal::default_host();
+        let device_name = host
+            .default_output_device()
+            .and_then(|device| device.description().ok())
+            .map(|description| description.name().to_string())
+            .unwrap_or_default();
+        let rebuilt =
+            NativeAudioEngine::new_with_device(cache_root.clone(), &device_name).unwrap();
+        rebuilt
+            .restore_playback_snapshot(&snapshot)
+            .await
+            .expect("新设备上恢复播放应成功");
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        let resumed = rebuilt.player().get_pos().as_secs_f64();
+        assert!(
+            resumed >= snapshot.position - 0.05,
+            "切换设备后应从原进度继续，原 {} 现 {}",
+            snapshot.position,
+            resumed
+        );
+        assert!(!rebuilt.player().empty(), "切换设备后应继续播放");
+        rebuilt.player().clear();
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// 真实 PMS 端到端回归（默认忽略，显式运行：

@@ -83,6 +83,8 @@ pub fn run() {
             audio_engine::native_audio_device_check,
             audio_engine::native_audio_cache_status,
             audio_engine::native_audio_clear_cache,
+            audio_engine::native_audio_output_devices,
+            audio_engine::native_audio_set_output_device,
             audio_engine::native_queue_set,
             audio_engine::native_queue_next,
             audio_engine::native_queue_previous,

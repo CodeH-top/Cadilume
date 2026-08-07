@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetVolume, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
+import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
@@ -1058,13 +1058,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [schedulePersistedSession]);
 
   const setOutputSinkId = useCallback((sinkId: string): Promise<boolean> => {
-    // Native output-device selection lands with the SMTC phase; keep the UI
-    // state mirrored until cpal device switching is wired.
     const normalized = sinkId || "";
     outputSinkIdRef.current = normalized;
     setOutputSinkIdState(normalized);
     writeStorage(OUTPUT_SINK_STORAGE_KEY, normalized);
-    return Promise.resolve(false);
+    if (!isDesktopRuntime()) return Promise.resolve(false);
+    return nativeAudioSetOutputDevice(normalized)
+      .then(() => true)
+      .catch(() => false);
   }, []);
 
   const removeFromQueue = useCallback((index: number) => {

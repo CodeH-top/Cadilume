@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { isDesktopRuntime, nativeAudioOutputDevices } from "./api";
 
 export type OutputPlatform = "macos" | "windows" | "other";
 
@@ -85,10 +86,19 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
   const [message, setMessage] = useState<string>();
 
   const refresh = useCallback(async () => {
-    if (!mediaDevices?.enumerateDevices) return;
+    if (!isDesktopRuntime() && !mediaDevices?.enumerateDevices) return;
     setLoading(true);
     try {
-      const nextDevices = normalizeOutputDevices(await mediaDevices.enumerateDevices());
+      const nextDevices = isDesktopRuntime()
+        ? (await nativeAudioOutputDevices()).map((device) => ({
+            deviceId: device.device_id,
+            label: device.label,
+            isDefault: device.is_default,
+          }))
+        : normalizeOutputDevices(await mediaDevices!.enumerateDevices());
+      if (!nextDevices.some((device) => device.isDefault)) {
+        nextDevices.unshift({ deviceId: "", label: "系统默认", isDefault: true });
+      }
       setDevices(nextDevices);
       const persisted = readOutputDevicePreference();
       if (persisted && !nextDevices.some((device) => device.deviceId === persisted)) {
@@ -160,6 +170,35 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
   }, [mediaDevices, refresh, selectDevice, selectedDeviceId]);
 
   useEffect(() => {
+    if (isDesktopRuntime()) {
+      let cancelled = false;
+      const restore = async () => {
+        const stored = readOutputDevicePreference();
+        let restored = true;
+        if (stored) {
+          try {
+            restored = await setOutputSinkId(stored);
+          } catch {
+            restored = false;
+          }
+          if (!restored) {
+            try {
+              await setOutputSinkId("");
+            } catch {
+              // The system mixer remains the final fallback.
+            }
+          }
+        }
+        if (stored && !restored && !cancelled) {
+          setSelectedDeviceId("");
+          writeOutputDevicePreference("");
+          setMessage("上次使用的输出设备不可用，已恢复系统默认。");
+        }
+        if (!cancelled) await refresh();
+      };
+      void restore();
+      return () => { cancelled = true; };
+    }
     if (platform !== "windows" || !canSelectSink) return;
     let cancelled = false;
     const restore = async () => {
@@ -193,7 +232,7 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
   }, [canSelectSink, platform, refresh, setOutputSinkId]);
 
   useEffect(() => {
-    if (platform !== "windows" || !mediaDevices?.addEventListener) return;
+    if (isDesktopRuntime() || platform !== "windows" || !mediaDevices?.addEventListener) return;
     const onDeviceChange = () => void refresh();
     mediaDevices.addEventListener("devicechange", onDeviceChange);
     return () => mediaDevices.removeEventListener("devicechange", onDeviceChange);

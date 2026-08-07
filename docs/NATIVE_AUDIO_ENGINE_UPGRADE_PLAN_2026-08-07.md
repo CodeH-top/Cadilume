@@ -32,7 +32,10 @@
   同时给 `download_progressive` 增加 Content-Length 完整性校验：静默截断的下载
   不再被当作完整缓存提交（修复缓存命中半截文件的风险）。
 - Phase 5 ✅ 完成：macOS Now Playing/Remote Command Center + Windows SMTC
-  （Windows 代码已跨 target 类型检查，完整构建与实机验证待 Windows 环境）。
+  （Windows 代码已跨 target 类型检查，完整构建与实机验证待 Windows 环境）；
+  输出设备选择已补完——cpal 枚举设备、`native_audio_set_output_device` 重建
+  播放器并从原进度恢复（缓存命中优先，否则重新渐进下载），前端
+  `setOutputSinkId` 与设备列表走原生通道，旧事件线程干净退出。
 - Phase 6 ✅ 完成：WebView/HTMLAudio 播放路径全部移除（usePlayer native-only，
   删除 DualAudioPool/预缓冲/媒体错误回退等约 1400 行及对应单测）。
 
