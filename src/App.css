@@ -517,8 +517,8 @@ button[data-tooltip]:is(:hover, :focus-visible)::after { opacity: 1; transform: 
 .track-data-row:hover .track-remove-button, .track-remove-button:focus-visible { display: grid; }
 .track-data-row:hover .duration-label { display: none; }
 .track-remove-button:hover, .track-remove-button:focus-visible { background: color-mix(in srgb, var(--danger) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 34%, transparent); }
-.popconfirm { position: fixed; z-index: 500; width: max-content; min-width: 232px; max-width: min(340px, calc(100vw - 16px)); display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel-strong); color: var(--text); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.12); }
-.popconfirm::before { content: ""; position: absolute; left: 50%; bottom: -5px; width: 9px; height: 9px; border-right: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); background: var(--panel-strong); transform: translateX(-50%) rotate(45deg); }
+.popconfirm { position: fixed; z-index: 500; width: max-content; min-width: 232px; max-width: min(340px, calc(100vw - 16px)); display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 14px rgba(0, 0, 0, 0.10); }
+.popconfirm::before { content: ""; position: absolute; left: 50%; bottom: -5px; width: 9px; height: 9px; border-right: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); background: var(--panel); transform: translateX(-50%) rotate(45deg); }
 .popconfirm.is-below::before { top: -5px; bottom: auto; border: 0; border-left: 1px solid var(--border-strong); border-top: 1px solid var(--border-strong); transform: translateX(-50%) rotate(45deg); }
 .popconfirm-title { font-size: 13px; font-weight: 650; color: var(--text); }
 .popconfirm.is-danger .popconfirm-title { color: var(--danger); }
