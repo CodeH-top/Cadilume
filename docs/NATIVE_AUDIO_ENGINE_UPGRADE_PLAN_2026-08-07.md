@@ -21,6 +21,9 @@
   （曲目列表/当前索引/repeat/shuffle 决策在 Rust，前端负责票据加载与 UI 镜像）。
 - Phase 2 ✅ 完成：磁盘缓存 512MB LRU（按 mtime 淘汰、`.part` 优先清理、命中刷新），
   设置页展示并清理封面+音频缓存。
+- Phase 2 增强 ✅：缓存损坏自愈——命中缓存解码失败时删除坏文件并自动重下；
+  顺带修复小文件（<256KB）下载完成后 `.part` 已被改名、主路径仍打开 `.part`
+  导致播放失败的竞态（改为先 rename 再标记 finished，等待方优先读 final）。
 - Phase 3 ✅ 完成：边下边播（渐进 Reader + 后台下载，头部 256KB 就绪即开播）。
 - Phase 3 增强 ✅：顺序模式下 prebuffer 额外预热第二首 ahead（2 首 ahead，
   符合 Plexamp“建议 2–3 首”）；远前置缓存限速 5 Mbps（`PRECACHE_RATE_LIMIT_`
@@ -50,6 +53,18 @@
 
 剩余事项：真实 PMS 听感回归（用户实听：主观无间隙、歌词对时与 UI 层高频操作）、
 Windows 实机运行时验收（SMTC 交互、隐藏窗口后台播放；编译与链接已通过）。
+
+### 遗留代码项：Now Playing / SMTC 封面
+
+- 计划 Phase 5 验收含“封面”，当前 macOS/Windows 系统媒体控制只更新
+  标题/歌手/专辑/时长/进度，未设置封面图。
+- 设计说明（待用户可验证的会话落地）：`NowPlayingMetadata` 增加
+  `artwork_url`（前端传 loopback 票据地址，不暴露 PMS），Rust 下载图片字节后
+  在**主线程**构造 `NSImage` + `MPMediaItemArtwork`（objc2 将 AppKit 类标记为
+  MainThreadOnly，跨线程持有是 UB），之后每次 200ms 轮询更新都须在主线程
+  重建含封面的字典；Windows 端需开启 `Storage_Streams` 并用
+  `RandomAccessStreamReference` 包装字节。实现后须在 macOS 实机确认 Now Playing
+  封面显示、切歌后封面更新、无内存问题。
 
 ### Windows 实机验收清单（待 Windows 环境执行）
 

@@ -272,9 +272,10 @@ async fn download_progressive(
         }
     }
     file.flush().map_err(|e| format!("缓存刷新失败: {e}"))?;
+    let _ = std::fs::rename(part_path, final_path);
+    // 先改名再标记完成，保证等待方看到 finished 时 final 已可读。
     progress.finished.store(true, Ordering::SeqCst);
     progress.wake();
-    let _ = std::fs::rename(part_path, final_path);
     Ok(total)
 }
 
@@ -722,10 +723,19 @@ impl NativeAudioEngine {
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false);
         if final_ready {
-            eprintln!("[原生] 命中完整缓存 key={key}");
-            touch_cache_file(&final_path);
-            enforce_audio_cache_limit(&self.cache_root);
-            return self.load_and_play(final_path.to_str().unwrap());
+            match self.load_and_play(final_path.to_str().unwrap()) {
+                Ok(len) => {
+                    eprintln!("[原生] 命中完整缓存 key={key}");
+                    touch_cache_file(&final_path);
+                    enforce_audio_cache_limit(&self.cache_root);
+                    return Ok(len);
+                }
+                Err(error) => {
+                    // 损坏/截断的缓存文件不能挡住播放：删除后走渐进下载自愈。
+                    eprintln!("[原生] 缓存文件损坏，自动重下 key={key}：{error}");
+                    let _ = std::fs::remove_file(&final_path);
+                }
+            }
         }
 
         let _ = std::fs::remove_file(&part_path);
@@ -763,6 +773,10 @@ impl NativeAudioEngine {
         }
         if progress.failed.load(Ordering::SeqCst) {
             return Err("下载歌曲失败，无法开始播放".to_string());
+        }
+        if progress.finished.load(Ordering::SeqCst) {
+            // 小文件/快速下载可能在等待期间已完整落盘并改名。
+            return self.load_and_play(final_path.to_str().unwrap());
         }
         let file = std::fs::File::open(&part_path)
             .map_err(|e| format!("打开渐进缓存失败: {e}"))?;
@@ -1750,6 +1764,61 @@ mod tests {
             data.len() as u64,
             "限速预取文件应完整落盘"
         );
+        let _ = std::fs::remove_file(&wav);
+        let _ = std::fs::remove_dir_all(&cache_root);
+    }
+
+    #[tokio::test]
+    async fn corrupt_cache_file_is_self_healed_and_redownloaded() {
+        let wav = std::env::temp_dir().join("cadilume-self-heal.wav");
+        write_test_wav_of_seconds(&wav, 1);
+        let data = std::fs::read(&wav).unwrap();
+        let data_for_server = data.clone();
+        let app = axum::Router::new().route(
+            "/heal.wav",
+            axum::routing::get(|| async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "audio/wav")],
+                    data_for_server,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let url = format!("http://127.0.0.1:{}/heal.wav", addr.port());
+        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-heal");
+        let downloads = cache_root.join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        // 预置一个损坏的缓存文件（头合法但内容不是有效媒体）。
+        std::fs::write(
+            downloads.join("heal-test.audio"),
+            b"RIFFxxxxWAVEfmt corrupt garbage that cannot decode",
+        )
+        .unwrap();
+
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        engine.player().set_volume(0.0);
+        engine
+            .load_cached_and_play(&url, Some("heal-test".into()), None)
+            .await
+            .expect("损坏缓存应自动重下并开始播放");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !engine.player().empty() && !engine.player().is_paused(),
+            "自愈后应处于播放中"
+        );
+        let healed = downloads.join("heal-test.audio");
+        assert_eq!(
+            std::fs::metadata(&healed)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            data.len() as u64,
+            "损坏缓存应被完整新文件替换"
+        );
+        engine.player().clear();
         let _ = std::fs::remove_file(&wav);
         let _ = std::fs::remove_dir_all(&cache_root);
     }
