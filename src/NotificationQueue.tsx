@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { CircleCheck, CircleX, Info, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FocusEvent } from "react";
 import {
   GLOBAL_NOTIFICATION_EXIT_MS,
@@ -10,11 +10,12 @@ import {
   remainingNotificationDuration,
   shouldStackGlobalNotifications,
   type GlobalNotification,
+  type GlobalNotificationLevel,
 } from "./notifications";
 
 export interface GlobalNotificationQueueController {
   notices: GlobalNotification[];
-  notify: (message: string) => void;
+  notify: (message: string, level?: GlobalNotificationLevel) => void;
   dismiss: (id: string) => void;
   clear: () => void;
   setPaused: (paused: boolean) => void;
@@ -68,14 +69,14 @@ export function useGlobalNotificationQueue(): GlobalNotificationQueueController 
   const dismissRef = useRef(dismiss);
   dismissRef.current = dismiss;
 
-  const notify = useCallback((message: string) => {
+  const notify = useCallback((message: string, level: GlobalNotificationLevel = "info") => {
     const normalizedMessage = message.trim();
     if (!normalizedMessage) return;
     const order = ++noticeSequenceRef.current;
     const createdAt = Date.now();
     setNotices((current) => [
       ...current,
-      createGlobalNotification(`notice-${createdAt}-${order}`, normalizedMessage, createdAt, order),
+      createGlobalNotification(`notice-${createdAt}-${order}`, normalizedMessage, level, createdAt, order),
     ]);
   }, []);
 
@@ -161,6 +162,17 @@ function stackLayer(index: number): string {
   if (index === 1) return "is-stack-back-one";
   if (index === 2) return "is-stack-back-two";
   return "is-hidden-in-stack";
+}
+
+function notificationIcon(level: GlobalNotificationLevel) {
+  const icons = {
+    info: Info,
+    success: CircleCheck,
+    warning: TriangleAlert,
+    error: CircleX,
+  } as const;
+  const Icon = icons[level] ?? Info;
+  return <Icon size={17} aria-hidden="true" />;
 }
 
 export function GlobalNotificationQueue({
@@ -300,12 +312,15 @@ export function GlobalNotificationQueue({
             >
               <div className="global-notification-motion" data-notification-motion>
                 <article
-                  className="global-notification-card"
+                  className={`global-notification-card is-${notice.level}`}
                   role={announce ? "status" : undefined}
                   aria-live={announce ? "polite" : undefined}
                   aria-atomic={announce || undefined}
                 >
                   <span className="global-notification-mark" aria-hidden="true" />
+                  <span className={`global-notification-icon is-${notice.level}`} aria-hidden="true">
+                    {notificationIcon(notice.level)}
+                  </span>
                   <span className="global-notification-message">{notice.message}</span>
                   <button
                     className="global-notification-close"

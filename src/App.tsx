@@ -121,6 +121,7 @@ import { usePlexLogin } from "./usePlexLogin";
 import { BrandIcon } from "./BrandIcon";
 import { applyBrandPreset, BRAND_STORAGE_KEY, normalizeBrandPreset, persistBrandPreset, readInitialBrandPreset } from "./brand";
 import { GlobalNotificationQueue, useGlobalNotificationQueue } from "./NotificationQueue";
+import type { GlobalNotificationLevel } from "./notifications";
 import { applyThemeMode, readInitialThemeMode } from "./theme";
 import { SharedVolumeControl } from "./VolumeControl";
 
@@ -198,7 +199,7 @@ interface MusicShellRuntime {
   sourcesSyncing: boolean;
   playbackSettingsRequest: number;
   player: MusicPlayer;
-  notify: (message: string) => void;
+  notify: (message: string, level?: GlobalNotificationLevel) => void;
   playRecommendationItem: (item: PlexItem, context: PlexItem[]) => Promise<void>;
   playRecommendationPlaylist: (playlist: PlexPlaylist) => Promise<void>;
   changeStatusIconEnabled: (enabled: boolean) => Promise<void>;
@@ -399,7 +400,7 @@ function NotificationFixture() {
     queue.setPaused(holdTimers || paused);
   }, [holdTimers, queue.setPaused]);
   const addMessages = (count: number) => {
-    for (const message of NOTIFICATION_FIXTURE_MESSAGES.slice(0, count)) queue.notify(message);
+    for (const message of NOTIFICATION_FIXTURE_MESSAGES.slice(0, count)) queue.notify(message, "error");
   };
 
   return (
@@ -651,11 +652,11 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         return result[0]?.id;
       });
       if (refreshDependents) setSourceRevision((revision) => revision + 1);
-      if (!result.length) notify("当前账号没有发现可访问的 Plex Media Server。请先让服务器所有者共享音乐库。" );
+      if (!result.length) notify("当前账号没有发现可访问的 Plex Media Server。请先让服务器所有者共享音乐库。", "warning");
       return result;
     } catch (reason) {
       setConnectionAvailable(false);
-      notify(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason), "error");
       return undefined;
     } finally {
       setLoading(false);
@@ -674,12 +675,12 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         setConnectionAvailable(true);
         setSections(result);
         setSectionKey((current) => result.some((section) => section.key === current) ? current : result[0]?.key);
-        if (!result.length) notify("这台服务器没有向当前账号开放音乐资料库。" );
+        if (!result.length) notify("这台服务器没有向当前账号开放音乐资料库。", "warning");
       })
       .catch((reason) => {
         if (cancelled) return;
         setConnectionAvailable(false);
-        notify(String(reason));
+        notify(String(reason), "error");
       })
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
@@ -705,14 +706,14 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           return rightTime - leftTime;
         });
         setPlaylists(ordered);
-        if (announce) notify(result.length ? `歌单已刷新，共 ${result.length} 个。` : "歌单已刷新，当前没有可显示的音乐歌单。");
+        if (announce) notify(result.length ? `歌单已刷新，共 ${result.length} 个。` : "歌单已刷新，当前没有可显示的音乐歌单。", "success");
       }
     } catch (reason) {
       if (playlistListRequestRef.current === requestId) {
         const message = playlistReadErrorMessage(reason);
         setPlaylists([]);
         setPlaylistListError(message);
-        if (announce) notify(message);
+        if (announce) notify(message, "error");
       }
     } finally {
       if (playlistListRequestRef.current === requestId) setPlaylistListLoading(false);
@@ -758,7 +759,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       setSourceRevision((revision) => revision + 1);
     } catch (reason) {
       setConnectionAvailable(false);
-      notify(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason), "error");
     } finally {
       setLoading(false);
       setPlaylistListLoading(false);
@@ -790,7 +791,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       setStatusIconEnabled(await saveStatusIconEnabled(enabled));
     } catch (reason) {
       setStatusIconEnabled(previous);
-      notify(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason), "error");
     } finally {
       setStatusIconSaving(false);
     }
@@ -827,7 +828,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
       setCacheStatusError(message);
-      notify(message);
+      notify(message, "error");
     } finally {
       setCacheBusy(false);
     }
@@ -841,7 +842,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       artworkCache.clear();
       window.location.reload();
     } catch (reason) {
-      notify(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason), "error");
     }
   };
 
@@ -858,13 +859,13 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       }
       const current = item.type === "track" ? item : tracks[0];
       if (!current || !tracks.length) {
-        notify(`“${item.title}”当前没有可播放的歌曲。`);
+        notify(`“${item.title}”当前没有可播放的歌曲。`, "warning");
         return;
       }
       player.playContext(current, tracks);
       player.setShuffle(false);
     } catch (reason) {
-      notify(reason instanceof Error ? reason.message : String(reason));
+      notify(reason instanceof Error ? reason.message : String(reason), "error");
       throw reason;
     }
   }, [notify, player, serverId]);
@@ -874,13 +875,13 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     try {
       const tracks = (await getPlaylistItems(serverId, playlist.ratingKey)).filter((item) => item.type === "track");
       if (!tracks[0]) {
-        notify(`歌单“${playlist.title}”当前没有可播放的歌曲。`);
+        notify(`歌单“${playlist.title}”当前没有可播放的歌曲。`, "warning");
         return;
       }
       player.playContext(tracks[0], tracks);
       player.setShuffle(false);
     } catch (reason) {
-      notify(playlistReadErrorMessage(reason));
+      notify(playlistReadErrorMessage(reason), "error");
       throw reason;
     }
   }, [notify, player, serverId]);
@@ -1180,7 +1181,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
             setPlaylistSelection(undefined);
             notify(result.requested === 1
               ? `已将${playlistSelection.label}添加到“${playlist.title}”。`
-              : `已将 ${result.requested} 首歌曲添加到“${playlist.title}”。`);
+              : `已将 ${result.requested} 首歌曲添加到“${playlist.title}”。`, "success");
             bumpPlaylistMutation();
             void loadPlaylistList();
           }}
@@ -1195,7 +1196,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           onCreated={(playlist) => {
             setPlaylistCreationOpen(false);
             setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
-            notify(`已创建歌单“${playlist.title}”。`);
+            notify(`已创建歌单“${playlist.title}”。`, "success");
             void loadPlaylistList();
           }}
           onError={notify}
@@ -1233,6 +1234,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         }}
       />
 
+      {sourcesSyncing && <SourceSyncOverlay />}
       <GlobalNotificationQueue
         notices={notices}
         onDismiss={dismissNotification}
@@ -1301,7 +1303,7 @@ function MusicRouterLayout() {
     event.preventDefault();
     const query = runtime.searchText.trim();
     if (!query) {
-      runtime.notify("搜索内容不能为空");
+      runtime.notify("搜索内容不能为空", "warning");
       return;
     }
     navigateRoute({ view: "search", query });
@@ -1625,13 +1627,13 @@ function RoutePage() {
       const result = await removeTracksFromPlaylist(runtime.serverId, playlist.ratingKey, [playlistItemId]);
       if (result.removed > 0) {
         setPlaylistItems((current) => current.filter((item) => item.playlistItemID !== playlistItemId));
-        runtime.notify(`已从歌单移除《${track.title}》。`);
+        runtime.notify(`已从歌单移除《${track.title}》。`, "success");
         void runtime.loadPlaylistList();
       } else {
         runtime.notify("没有从歌单移除任何歌曲，请刷新后重试。");
       }
     } catch (reason) {
-      runtime.notify(reason instanceof Error ? reason.message : String(reason));
+      runtime.notify(reason instanceof Error ? reason.message : String(reason), "error");
     }
   }, [playlist, runtime]);
 
@@ -1722,7 +1724,7 @@ function RoutePage() {
           setPlaylistError(message);
           return;
         }
-        runtime.notify(message);
+        runtime.notify(message, "error");
         if (route.detail) {
           onNavigate({ view: route.detail.type === "playlist" ? "home" : route.detail.type === "artist" ? "artists" : "albums" }, { replace: true });
         }
@@ -2460,7 +2462,7 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
     try {
       const collection = await collectAllArtistTracks(getArtistPage, { signal: controller.signal });
       if (!collection.tracks.length) {
-        runtime.notify(`“${detail.source.title}”当前没有可操作的歌曲。`);
+        runtime.notify(`“${detail.source.title}”当前没有可操作的歌曲。`, "warning");
         return;
       }
       if (action === "play") {
@@ -2468,16 +2470,16 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
         runtime.player.setShuffle(false);
       } else if (action === "append") {
         runtime.player.appendTracks(collection.tracks);
-        runtime.notify(`已将 ${collection.tracks.length} 首歌曲添加到播放队列。`);
+        runtime.notify(`已将 ${collection.tracks.length} 首歌曲添加到播放队列。`, "success");
       } else if (action === "next") {
         runtime.player.insertTracksNext(collection.tracks);
-        runtime.notify(`已安排 ${collection.tracks.length} 首歌曲在下一首后播放。`);
+        runtime.notify(`已安排 ${collection.tracks.length} 首歌曲在下一首后播放。`, "success");
       } else {
         runtime.openPlaylistPicker(collection.tracks, `${detail.source.title} · ${collection.tracks.length} 首歌曲`);
       }
     } catch (reason) {
       if (!isArtistTrackCollectionCancelled(reason)) {
-        runtime.notify(reason instanceof Error ? reason.message : String(reason));
+        runtime.notify(reason instanceof Error ? reason.message : String(reason), "error");
       }
     } finally {
       // A rapid second action aborts this collection and takes ownership of
@@ -2984,7 +2986,7 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
   const appendSelectedTracks = () => {
     if (!selectedTracks.length) return;
     runtime.player.appendTracks(selectedTracks);
-    runtime.notify(`已将 ${selectedTracks.length} 首歌曲添加到播放队列。`);
+    runtime.notify(`已将 ${selectedTracks.length} 首歌曲添加到播放队列。`, "success");
     setSelectedRatingKeys(new Set<string>());
   };
 
@@ -3045,14 +3047,12 @@ function SearchResults({ hubs, query, loading, artists, onOpen, onOpenArtist, on
     return titles[hub.type] ?? hub.title;
   };
   if (!query) return <EmptyState title="搜索音乐资料库" description="输入歌曲、专辑或歌手名称。" icon={<Search size={28} />} />;
-  if (loading) return <LoadingState />;
+  if (loading) return <SearchLoadingState query={query} />;
   if (!total) return <EmptyState title={`没有找到“${query}”`} description="尝试更短的关键词，或切换到其他音乐资料库。" icon={<Search size={28} />} />;
   return (
     <div className="search-results">
       <div className="search-results-toolbar">
-        <button type="button" className="secondary-button" onClick={() => navigate(-1)}>
-          <ArrowLeft size={16} />返回
-        </button>
+        <DetailBackButton label="返回" onClick={() => navigate(-1)} />
         <div className="page-heading"><div><h1>“{query}”的搜索结果</h1><p>共找到 {total} 项内容</p></div></div>
       </div>
       {hubs.map((hub, index) => hub.type === "track"
@@ -4240,6 +4240,17 @@ function IconButton({ label, tooltip, className = "", active = false, disabled =
   return <button type="button" className={`icon-button ${active ? "active" : ""} ${className}`.trim()} aria-label={label} data-tooltip={tooltipText} title={tooltipText} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
+function SourceSyncOverlay() {
+  return (
+    <div className="source-sync-overlay" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">
+      <div className="source-sync-overlay-panel">
+        <LoaderCircle className="spin" size={20} aria-hidden="true" />
+        <span>正在同步Plex资料...</span>
+      </div>
+    </div>
+  );
+}
+
 function PlaybackErrorAlert({ failure, trackTitle, onRetry, onOpenSettings, onClose }: {
   failure: PlaybackFailure;
   trackTitle?: string;
@@ -4284,6 +4295,19 @@ function EmptyState({ title, description, icon = <Music2 size={28} /> }: { title
 
 function LoadingState() {
   return <div className="loading-state"><LoaderCircle className="spin" size={24} /><span>正在读取音乐资料库…</span></div>;
+}
+
+function SearchLoadingState({ query }: { query: string }) {
+  return (
+    <div className="search-loading-state" role="status" aria-live="polite" aria-busy="true">
+      <span className="search-loading-orbit" aria-hidden="true">
+        <Search size={32} />
+      </span>
+      <span className="search-loading-bars" aria-hidden="true"><i /><i /><i /><i /><i /></span>
+      <strong>正在搜索“{query}”…</strong>
+      <small>正在查找歌曲、专辑与歌手</small>
+    </div>
+  );
 }
 
 function SplashScreen() {

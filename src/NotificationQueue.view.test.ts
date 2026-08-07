@@ -98,9 +98,9 @@ function findElement(root: ElementNode, predicate: (element: ElementNode) => boo
 
 function notifications() {
   return [
-    createGlobalNotification("notice-1", "第一条", 100, 1),
-    createGlobalNotification("notice-2", "第二条", 101, 2),
-    createGlobalNotification("notice-3", "第三条", 102, 3),
+    createGlobalNotification("notice-1", "第一条", "info", 100, 1),
+    createGlobalNotification("notice-2", "第二条", "info", 101, 2),
+    createGlobalNotification("notice-3", "第三条", "info", 102, 3),
   ].map((notice) => ({ ...notice, phase: "visible" as const }));
 }
 

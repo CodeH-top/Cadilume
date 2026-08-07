@@ -10,9 +10,9 @@ import {
 
 describe("global notification queue state", () => {
   it("keeps every message and orders simultaneous additions by insertion order", () => {
-    const first = createGlobalNotification("notice-1", "第一条", 100, 1);
-    const second = createGlobalNotification("notice-2", "第二条", 100, 2);
-    const third = createGlobalNotification("notice-3", "第三条", 100, 3);
+    const first = createGlobalNotification("notice-1", "第一条", "info", 100, 1);
+    const second = createGlobalNotification("notice-2", "第二条", "info", 100, 2);
+    const third = createGlobalNotification("notice-3", "第三条", "info", 100, 3);
 
     expect(orderedGlobalNotifications([first, second, third]).map((notice) => notice.message)).toEqual([
       "第三条",
@@ -24,10 +24,10 @@ describe("global notification queue state", () => {
 
   it("enters the collapsed stack at three active messages without discarding older entries", () => {
     const notices = [
-      createGlobalNotification("notice-1", "第一条", 100, 1),
-      createGlobalNotification("notice-2", "第二条", 101, 2),
-      createGlobalNotification("notice-3", "第三条", 102, 3),
-      createGlobalNotification("notice-4", "第四条", 103, 4),
+      createGlobalNotification("notice-1", "第一条", "info", 100, 1),
+      createGlobalNotification("notice-2", "第二条", "info", 101, 2),
+      createGlobalNotification("notice-3", "第三条", "info", 102, 3),
+      createGlobalNotification("notice-4", "第四条", "info", 103, 4),
     ];
 
     expect(shouldStackGlobalNotifications(notices.slice(0, 2))).toBe(false);
@@ -36,8 +36,8 @@ describe("global notification queue state", () => {
   });
 
   it("only marks the requested notification as leaving", () => {
-    const first = createGlobalNotification("notice-1", "第一条", 100, 1);
-    const second = createGlobalNotification("notice-2", "第二条", 101, 2);
+    const first = createGlobalNotification("notice-1", "第一条", "info", 100, 1);
+    const second = createGlobalNotification("notice-2", "第二条", "info", 101, 2);
     const next = markGlobalNotificationLeaving([first, second], first.id);
 
     expect(next[0].phase).toBe("leaving");

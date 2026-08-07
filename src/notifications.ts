@@ -5,10 +5,12 @@ export const GLOBAL_NOTIFICATION_STACK_THRESHOLD = 3;
 export const GLOBAL_NOTIFICATION_VISIBLE_STACK_LAYERS = 3;
 
 export type GlobalNotificationPhase = "entering" | "visible" | "leaving";
+export type GlobalNotificationLevel = "info" | "success" | "warning" | "error";
 
 export interface GlobalNotification {
   id: string;
   message: string;
+  level: GlobalNotificationLevel;
   createdAt: number;
   order: number;
   remainingMs: number;
@@ -18,12 +20,14 @@ export interface GlobalNotification {
 export function createGlobalNotification(
   id: string,
   message: string,
+  level: GlobalNotificationLevel,
   createdAt: number,
   order: number,
 ): GlobalNotification {
   return {
     id,
     message,
+    level,
     createdAt,
     order,
     remainingMs: GLOBAL_NOTIFICATION_AUTO_CLOSE_MS,
