@@ -341,6 +341,10 @@ pub struct NativeAudioEngine {
     current_source: Arc<Mutex<Option<CurrentSource>>>,
     artwork_bytes: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
     stopped: Arc<AtomicBool>,
+    /// 真实 PMS 单流限制：同一时刻只允许一条下载，播放优先，预取可被抢占。
+    download_permit: Arc<tokio::sync::Semaphore>,
+    active_download: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    active_precache: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -738,6 +742,9 @@ impl NativeAudioEngine {
             current_source: Arc::new(Mutex::new(None)),
             artwork_bytes: Arc::new(Mutex::new(None)),
             stopped: Arc::new(AtomicBool::new(false)),
+            download_permit: Arc::new(tokio::sync::Semaphore::new(1)),
+            active_download: Arc::new(Mutex::new(None)),
+            active_precache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -906,7 +913,26 @@ impl NativeAudioEngine {
         let final_for_task = final_path.clone();
         let source_for_task = source.to_string();
         let client = reqwest::Client::new();
-        tokio::spawn(async move {
+        // 单流许可：先中止旧的播放下载与预取，再拿许可，避免真实 PMS 并发
+        // 流互相截断（“打架”）。
+        if let Ok(mut active) = self.active_download.lock() {
+            if let Some(handle) = active.take() {
+                handle.abort();
+            }
+        }
+        if let Ok(mut active) = self.active_precache.lock() {
+            if let Some(handle) = active.take() {
+                handle.abort();
+            }
+        }
+        let permit = self
+            .download_permit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "下载并发控制失败".to_string())?;
+        let task = tauri::async_runtime::spawn(async move {
+            let _permit = permit;
             if let Err(error) = download_progressive(
                 &client,
                 &source_for_task,
@@ -923,6 +949,9 @@ impl NativeAudioEngine {
                 eprintln!("[原生] 渐进下载失败：{error}");
             }
         });
+        if let Ok(mut active) = self.active_download.lock() {
+            *active = Some(task);
+        }
 
         // Wait for the head bytes (or terminal state) before decoding.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -999,13 +1028,19 @@ impl NativeAudioEngine {
             return Ok(());
         }
         let _ = std::fs::remove_file(&part_path);
+        // 预取是低优先级：单流许可被占用时本轮跳过，避免与播放下载打架。
+        let Ok(permit) = self.download_permit.clone().try_acquire_owned() else {
+            return Ok(());
+        };
         let progress = DownloadProgress::new();
         let progress_task = Arc::clone(&progress);
         let part_for_task = part_path;
         let final_for_task = final_path;
         let source_for_task = source.to_string();
         let client = reqwest::Client::new();
-        let task = tokio::spawn(async move {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let task = tauri::async_runtime::spawn(async move {
+            let _permit = permit;
             let outcome = download_progressive(
                 &client,
                 &source_for_task,
@@ -1021,10 +1056,16 @@ impl NativeAudioEngine {
                 progress_task.wake();
                 eprintln!("[原生] 预缓存下载失败：{error}");
             }
-            outcome
+            let _ = done_tx.send(outcome);
         });
-        task.await
-            .map_err(|e| format!("预缓存任务中断: {e}"))??;
+        if let Ok(mut active) = self.active_precache.lock() {
+            *active = Some(task);
+        }
+        match done_rx.await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err("预缓存已中止".to_string()),
+        }
         enforce_audio_cache_limit(&self.cache_root);
         Ok(())
     }
