@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioSeek, nativeAudioSetVolume } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
-import { usableDurationSeconds } from "./playerUi";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
 
 export type RepeatMode = "off" | "all" | "one";
@@ -17,7 +16,6 @@ export const PLAYBACK_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const PLAYBACK_SESSION_MAX_QUEUE = 500;
 const NATIVE_ENGINE_STORAGE_KEY = "cadilume-native-engine";
 const PLAYBACK_SESSION_WRITE_THROTTLE_MS = 5_000;
-const PLAYBACK_CLOCK_PUBLISH_INTERVAL_MS = 50;
 export const PLAYBACK_START_TIMEOUT_MS = 12_000;
 /** Keep the transport button visibly busy during quick prebuffered switches. */
 const MIN_LOADING_VISIBLE_MS = 250;
@@ -1046,25 +1044,16 @@ export class DualAudioPool {
 }
 
 export function usePlayer(serverId: string | undefined, quality: StreamQuality) {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioPoolRef = useRef<DualAudioPool | null>(null);
   const queueRef = useRef<PlexItem[]>([]);
   const indexRef = useRef(-1);
-  const endedRef = useRef<() => void>(() => undefined);
   const progressRef = useRef(0);
   const scrobbledRef = useRef(new Set<string>());
-  const playbackFallbackRef = useRef<PlaybackFallbackState>(createPlaybackFallbackState(quality));
-  const playbackFailureHandlerRef = useRef<(diagnostic: string, source: string) => boolean>(() => false);
-  const activePlaybackSourceRef = useRef<{ audio: RoutableAudioElement; requestId: number; source: string } | undefined>(undefined);
   const playbackLoadingRef = useRef(false);
   const playbackLoadingStartedAtRef = useRef(0);
   const playbackLoadingClearTimerRef = useRef<number | undefined>(undefined);
   const streamUrlInflightRef = useRef(new Map<string, Promise<string>>());
   const streamUrlInflightAtRef = useRef(new Map<string, number>());
   const loadRequestRef = useRef(0);
-  const prebufferRequestRef = useRef(0);
-  const outputSinkRequestRef = useRef(0);
-  const outputSinkQueueRef = useRef<Promise<void>>(Promise.resolve());
   const serverIdRef = useRef(serverId);
   const qualityRef = useRef(quality);
   const queueServerIdRef = useRef<string | undefined>(undefined);
@@ -1246,10 +1235,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     if (!track || !serverId) return;
     const requestId = ++loadRequestRef.current;
     playbackLog("info", `加载请求：index=${index} 队列长度=${tracks.length} 自动播放=${autoplay} 质量=${quality} 强制新票据=${forceFreshTicket}`);
-    activePlaybackSourceRef.current = undefined;
     setPlaybackLoading(autoplay);
     setBuffering(false);
-    prebufferRequestRef.current += 1;
     indexRef.current = index;
     setCurrentIndex(index);
     const resumeSeconds = boundedResumeSeconds(requestedResume ?? 0, (track.duration || 0) / 1000);
@@ -1259,7 +1246,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     setDuration((track.duration || 0) / 1000);
     setError(undefined);
     setPlaybackFailure(undefined);
-    playbackFallbackRef.current = createPlaybackFallbackState(quality);
     queueServerIdRef.current = serverId;
     schedulePersistedSession(true);
 
@@ -1269,82 +1255,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       setPlaying(autoplay);
       return;
     }
-    if (nativeEngineEnabled()) {
-      await loadNativeTrack({ index, autoplay, resumeSeconds, requestId });
-      return;
-    }
-
-    const finishCurrentLoad = () => {
-      if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
-      setPlaybackLoading(false);
-      setBuffering(false);
-    };
-
-    const preparation: AudioPreparation = {
-      index,
-      ratingKey: track.ratingKey,
-      serverId,
-      quality,
-    };
-    const pool = audioPoolRef.current;
-
-    let assignedSource = "";
-    try {
-      if (!forceFreshTicket) {
-        const preparedAudio = pool?.takePrepared(preparation);
-        if (preparedAudio) {
-          audioRef.current = preparedAudio;
-          assignedSource = preparedAudio.currentSrc || preparedAudio.src;
-          activePlaybackSourceRef.current = { audio: preparedAudio, requestId, source: assignedSource };
-          await seekAfterMetadata(preparedAudio, () => resumeProgressRef.current ?? progressRef.current);
-          if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
-          resumeProgressRef.current = null;
-          playbackLog("info", `预缓冲命中：index=${index}，准备播放`);
-          if (autoplay) await waitForAudioPlaybackStart(preparedAudio);
-          else setPlaying(false);
-          finishCurrentLoad();
-          return;
-        }
-      }
-
-      pool?.cancelPrepared();
-      const audio = pool?.active ?? audioRef.current;
-      if (!audio) {
-        finishCurrentLoad();
-        return;
-      }
-      audio.pause();
-      if (!autoplay) setPlaying(false);
-
-      const url = await requestStreamUrl(serverId, track, quality);
-      if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
-      playbackLog("info", `流地址已取得：index=${index} 质量=${quality}（仅本机回环票据）`);
-      activePlaybackSourceRef.current = { audio, requestId, source: url };
-      audio.src = url;
-      assignedSource = url;
-      audio.load();
-      await seekAfterMetadata(audio, () => resumeProgressRef.current ?? progressRef.current);
-      if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
-      resumeProgressRef.current = null;
-      if (autoplay) await waitForAudioPlaybackStart(audio);
-      finishCurrentLoad();
-    } catch (reason) {
-      if (requestId !== loadRequestRef.current) return;
-      const audio = audioRef.current;
-      const diagnostic = assignedSource && audio?.error
-        ? formatMediaError(audio.error)
-        : formatPlaybackFailure(reason);
-      playbackLog("error", `加载异常：index=${index} ${diagnostic}`);
-      if (!playbackFailureHandlerRef.current(diagnostic, assignedSource)) {
-        const message = `音频无法播放（${diagnostic}）。`;
-        setPlaybackLoading(false);
-        setBuffering(false);
-        setPlaying(false);
-        setError(message);
-        setPlaybackFailure({ message, technicalDetails: diagnostic, attemptedQualities: [quality] });
-      }
-    }
-  }, [quality, requestStreamUrl, schedulePersistedSession, serverId, setPlaybackLoading]);
+    await loadNativeTrack({ index, autoplay, resumeSeconds, requestId });
+  }, [loadNativeTrack, schedulePersistedSession, serverId, setPlaybackLoading]);
 
   const retryCurrent = useCallback(() => {
     const retry = createPlaybackRetryRequest(
@@ -1392,8 +1304,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     queueServerIdRef.current = serverIdRef.current;
     resumeProgressRef.current = null;
     shuffleNavigationRef.current = createShuffleNavigationState(tracks.length, 0);
-    prebufferRequestRef.current += 1;
-    audioPoolRef.current?.cancelPrepared();
     setQueue(tracks);
     indexRef.current = 0;
     setCurrentIndex(0);
@@ -1410,8 +1320,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     queueServerIdRef.current = serverIdRef.current;
     indexRef.current = transition.currentIndex;
     shuffleNavigationRef.current = createShuffleNavigationState(transition.queue.length, transition.currentIndex);
-    prebufferRequestRef.current += 1;
-    audioPoolRef.current?.cancelPrepared();
     setQueue(transition.queue);
     setCurrentIndex(transition.currentIndex);
     if (transition.shouldStart) {
@@ -1485,25 +1393,12 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [advance]);
 
   const previous = useCallback(() => {
-    if (nativeEngineEnabled()) {
-      if (progressRef.current > 4) {
-        progressRef.current = 0;
-        setProgress(0);
-        resumeProgressRef.current = null;
-        void nativeAudioSeek(0).catch(() => undefined);
-        schedulePersistedSession(false);
-        return;
-      }
-      void advance(false);
-      return;
-    }
-    const audio = audioRef.current;
-    if ((audio && audio.currentTime > 4) || (!audio?.src && progressRef.current > 4)) {
-      const applied = setAudioCurrentTimeSafely(audio, 0);
-      resumeProgressRef.current = applied ? null : 0;
+    if (progressRef.current > 4) {
       progressRef.current = 0;
       setProgress(0);
-      schedulePersistedSession(true);
+      resumeProgressRef.current = null;
+      void nativeAudioSeek(0).catch(() => undefined);
+      schedulePersistedSession(false);
       return;
     }
     if (shuffleRef.current) {
@@ -1529,30 +1424,15 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       schedulePersistedSession(true);
       return;
     }
-    if (nativeEngineEnabled()) {
-      if (playing) {
-        void nativeAudioPause().catch(() => undefined);
-        setPlaying(false);
-      } else {
-        void nativeAudioPlay().catch(() => undefined);
-        setPlaying(true);
-      }
-      schedulePersistedSession(true);
-      return;
+    if (playing) {
+      void nativeAudioPause().catch(() => undefined);
+      setPlaying(false);
+    } else {
+      void nativeAudioPlay().catch(() => undefined);
+      setPlaying(true);
     }
-    const audio = audioRef.current;
-    if (!audio || !audio.src) {
-      void loadAt(indexRef.current >= 0 ? indexRef.current : currentIndex, true, resumeProgressRef.current ?? progressRef.current);
-      return;
-    }
-    if (audio.paused) {
-      if (audio.ended || (duration > 0 && audio.currentTime >= duration)) {
-        void loadAt(indexRef.current >= 0 ? indexRef.current : currentIndex, true, 0);
-      } else {
-        void audio.play();
-      }
-    } else audio.pause();
-  }, [current, currentIndex, duration, loadAt, playing, schedulePersistedSession]);
+    schedulePersistedSession(true);
+  }, [current, playing, schedulePersistedSession]);
 
   const seek = useCallback((seconds: number) => {
     const maximum = duration || (current?.duration || 0) / 1000;
@@ -1563,12 +1443,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     resumeProgressRef.current = bounded;
     progressRef.current = bounded;
     setProgress(bounded);
-    if (nativeEngineEnabled()) {
-      void nativeAudioSeek(bounded).catch(() => undefined);
-      schedulePersistedSession(false);
-      return;
-    }
-    if (setAudioCurrentTimeSafely(audioRef.current, bounded)) resumeProgressRef.current = null;
+    void nativeAudioSeek(bounded).catch(() => undefined);
     schedulePersistedSession(false);
   }, [current?.duration, duration, schedulePersistedSession]);
 
@@ -1577,9 +1452,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     setVolumeState(normalized);
     setMuted(false);
     writeStorage(VOLUME_STORAGE_KEY, String(normalized));
-    if (nativeEngineEnabled()) {
-      void nativeAudioSetVolume(normalized).catch(() => undefined);
-    }
+    void nativeAudioSetVolume(normalized).catch(() => undefined);
   }, []);
 
   const setPrebufferNext = useCallback((enabled: boolean) => {
@@ -1603,21 +1476,13 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [schedulePersistedSession]);
 
   const setOutputSinkId = useCallback((sinkId: string): Promise<boolean> => {
+    // Native output-device selection lands with the SMTC phase; keep the UI
+    // state mirrored until cpal device switching is wired.
     const normalized = sinkId || "";
-    const requestId = ++outputSinkRequestRef.current;
-    const operation = outputSinkQueueRef.current.then(async () => {
-      const pool = audioPoolRef.current;
-      const applied = pool ? await pool.setOutputSinkId(normalized) : normalized === "";
-      if (requestId === outputSinkRequestRef.current) {
-        const selected = applied ? normalized : "";
-        outputSinkIdRef.current = selected;
-        setOutputSinkIdState(selected);
-        writeStorage(OUTPUT_SINK_STORAGE_KEY, selected);
-      }
-      return applied;
-    });
-    outputSinkQueueRef.current = operation.then(() => undefined, () => undefined);
-    return operation;
+    outputSinkIdRef.current = normalized;
+    setOutputSinkIdState(normalized);
+    writeStorage(OUTPUT_SINK_STORAGE_KEY, normalized);
+    return Promise.resolve(false);
   }, []);
 
   const removeFromQueue = useCallback((index: number) => {
@@ -1641,7 +1506,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       // the old session look like it belongs to the newly selected PMS.
       flushPlaybackSession();
       loadRequestRef.current += 1;
-      prebufferRequestRef.current += 1;
       queueRef.current = [];
       queueServerIdRef.current = undefined;
       indexRef.current = -1;
@@ -1649,10 +1513,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       resumeProgressRef.current = null;
       shuffleNavigationRef.current = createShuffleNavigationState(0, -1);
       scrobbledRef.current.clear();
-      playbackFallbackRef.current = createPlaybackFallbackState(qualityRef.current);
-      const pool = audioPoolRef.current;
-      pool?.clearSources();
-      if (pool) audioRef.current = pool.active;
       setQueue([]);
       setCurrentIndex(-1);
       setProgress(0);
@@ -1734,254 +1594,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [flushPlaybackSession]);
 
   useEffect(() => {
-    const pool = new DualAudioPool([new Audio(), new Audio()]);
-    audioPoolRef.current = pool;
-    audioRef.current = pool.active;
-    pool.setGain(volumeRef.current, mutedRef.current);
-    let disposed = false;
-
-    const isRetryCurrent = (
-      audio: RoutableAudioElement,
-      requestId: number,
-      activeServerId: string,
-      ratingKey: string,
-    ) => (
-      !disposed
-      && audioPoolRef.current === pool
-      && pool.isActive(audio)
-      && loadRequestRef.current === requestId
-      && queueServerIdRef.current === activeServerId
-      && queueRef.current[indexRef.current]?.ratingKey === ratingKey
-    );
-
-    const handlePlaybackFailure = (
-      audio: RoutableAudioElement,
-      diagnostic: string,
-      source: string,
-    ): boolean => {
-      if (disposed || audioPoolRef.current !== pool || !pool.isActive(audio)) return false;
-      const track = queueRef.current[indexRef.current];
-      const activeServerId = queueServerIdRef.current;
-      if (!track || !activeServerId) return false;
-
-      const decision = decidePlaybackFallback(playbackFallbackRef.current, source);
-      playbackLog("warn", `播放失败：index=${indexRef.current} ${diagnostic} 决策=${decision.action === "retry" ? `回退到 ${decision.quality} kbps` : decision.action === "wait" ? "等待中" : "停止"}`);
-      playbackFallbackRef.current = decision.state;
-      if (decision.action === "wait") return true;
-
-      if (decision.action === "stop") {
-        const attemptedQualities = decision.state.attemptedQualities;
-        const attemptedLabel = attemptedQualities
-          .map((attemptedQuality) => {
-            if (attemptedQuality === "auto") return "自动源";
-            if (attemptedQuality === "original") return "原始质量";
-            return `${attemptedQuality} kbps`;
-          })
-          .join("、");
-        const message = `音频无法播放（${diagnostic}）。${attemptedLabel ? `已尝试 ${attemptedLabel}；` : ""}请检查远程连接或服务器转码状态。`;
-        setPlaybackLoading(false);
-        setBuffering(false);
-        setPlaying(false);
-        schedulePersistedSession(true);
-        setError(message);
-        setPlaybackFailure({ message, technicalDetails: diagnostic, attemptedQualities });
-        return true;
-      }
-
-      setPlaybackLoading(true);
-      setBuffering(false);
-      setPlaying(false);
-      setPlaybackFailure(undefined);
-      setError(`音频播放失败（${diagnostic}），正在自动切换到 ${decision.quality} kbps 兼容串流…`);
-      const ratingKey = track.ratingKey;
-      const retryLoadRequest = loadRequestRef.current;
-      const fallbackQuality = decision.quality;
-      let fallbackAssigned = false;
-      const isActiveFallback = () => {
-        const fallbackState = playbackFallbackRef.current;
-        return isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)
-          && fallbackState.activeQuality === fallbackQuality
-          && fallbackState.pendingQuality === undefined;
-      };
-      void requestStreamUrl(activeServerId, track, fallbackQuality)
-        .then(async (url) => {
-          if (!isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)) return;
-          if (playbackFallbackRef.current.pendingQuality !== fallbackQuality) return;
-          playbackLog("info", `兼容串流已取得：index=${indexRef.current} 回退质量=${fallbackQuality}`);
-          activePlaybackSourceRef.current = { audio, requestId: retryLoadRequest, source: url };
-          audio.src = url;
-          fallbackAssigned = true;
-          playbackFallbackRef.current = activatePlaybackFallback(playbackFallbackRef.current, fallbackQuality);
-          audio.load();
-          await seekAfterMetadata(audio, () => resumeProgressRef.current ?? progressRef.current);
-          if (!isActiveFallback()) return;
-          resumeProgressRef.current = null;
-          await waitForAudioPlaybackStart(audio);
-          if (!isActiveFallback()) return;
-          playbackLog("info", `兼容串流播放成功：index=${indexRef.current} 回退质量=${fallbackQuality}`);
-          setPlaybackLoading(false);
-          setBuffering(false);
-          setError(undefined);
-          setPlaybackFailure(undefined);
-        })
-        .catch((reason) => {
-          if (!isRetryCurrent(audio, retryLoadRequest, activeServerId, ratingKey)) return;
-          if (!fallbackAssigned) {
-            playbackFallbackRef.current = rejectPendingPlaybackFallback(
-              playbackFallbackRef.current,
-              fallbackQuality,
-            );
-          }
-          const retryDiagnostic = fallbackAssigned && audio.error
-            ? formatMediaError(audio.error)
-            : formatPlaybackFailure(reason);
-          handlePlaybackFailure(
-            audio,
-            retryDiagnostic,
-            fallbackAssigned ? audio.currentSrc || audio.src : "",
-          );
-        });
-      return true;
-    };
-
-    const dispatchPlaybackFailure = (diagnostic: string, source: string): boolean => (
-      handlePlaybackFailure(pool.active, diagnostic, source)
-    );
-    playbackFailureHandlerRef.current = dispatchPlaybackFailure;
-
-    const bindEvents = (audio: RoutableAudioElement) => {
-      const isCurrent = () => audioPoolRef.current === pool && pool.isActive(audio);
-      const updateTime = () => {
-        if (!isCurrent()) return;
-        progressRef.current = audio.currentTime || 0;
-        setProgress(audio.currentTime || 0);
-        setDuration(usableDurationSeconds(
-          audio.duration,
-          (queueRef.current[indexRef.current]?.duration || 0) / 1000,
-        ));
-        schedulePersistedSession(false);
-        const track = queueRef.current[indexRef.current];
-        const activeServerId = queueServerIdRef.current;
-        const scrobbleKey = activeServerId && track ? `${activeServerId}:${track.ratingKey}` : undefined;
-        if (track && activeServerId && scrobbleKey && audio.duration > 0 && audio.currentTime / audio.duration >= 0.9 && !scrobbledRef.current.has(scrobbleKey)) {
-          scrobbledRef.current.add(scrobbleKey);
-          void plexMusicGateway.playback.scrobble(activeServerId, track);
-        }
-      };
-      const onPlay = () => {
-        if (isCurrent()) {
-          setPlaying(true);
-          setError(undefined);
-          setPlaybackFailure(undefined);
-        }
-      };
-      const onPlaying = () => {
-        if (!isCurrent()) return;
-        setPlaybackLoading(false);
-        setBuffering(false);
-      };
-      const onWaiting = () => {
-        if (isCurrent() && !audio.paused && !audio.ended) setBuffering(true);
-      };
-      const onStalled = () => {
-        if (isCurrent() && !audio.paused && !audio.ended && audio.readyState < 3) setBuffering(true);
-      };
-      const onPause = () => {
-        if (isCurrent()) {
-          setBuffering(false);
-          setPlaying(false);
-          schedulePersistedSession(true);
-        }
-      };
-      const onEnded = () => {
-        if (!isCurrent()) return;
-        playbackLog("info", `自然播放结束：index=${indexRef.current}`);
-        setPlaybackLoading(false);
-        setBuffering(false);
-        endedRef.current();
-      };
-      const onError = () => {
-        if (!isCurrent()) {
-          pool.discardPreparedAudio(audio);
-          playbackLog("info", "收到非活动音频错误，忽略（预缓冲或旧槽位）");
-          return;
-        }
-        const source = audio.currentSrc || audio.src;
-        const activeSource = activePlaybackSourceRef.current;
-        if (!activeSource || activeSource.audio !== audio || activeSource.requestId !== loadRequestRef.current) {
-          playbackLog("warn", "忽略过期 source 的媒体错误（加载请求已替换）");
-          return;
-        }
-        if (!isCurrentPlaybackErrorSource(activeSource.source, source)) {
-          playbackLog("warn", "忽略不匹配当前 source 的媒体错误");
-          return;
-        }
-        playbackLog("error", `当前 source 媒体错误：index=${indexRef.current} ${formatMediaError(audio.error)}`);
-        handlePlaybackFailure(audio, formatMediaError(audio.error), source);
-      };
-
-      audio.addEventListener("timeupdate", updateTime);
-      audio.addEventListener("durationchange", updateTime);
-      audio.addEventListener("play", onPlay);
-      audio.addEventListener("playing", onPlaying);
-      audio.addEventListener("waiting", onWaiting);
-      audio.addEventListener("stalled", onStalled);
-      audio.addEventListener("pause", onPause);
-      audio.addEventListener("ended", onEnded);
-      audio.addEventListener("error", onError);
-      return () => {
-        audio.removeEventListener("timeupdate", updateTime);
-        audio.removeEventListener("durationchange", updateTime);
-        audio.removeEventListener("play", onPlay);
-        audio.removeEventListener("playing", onPlaying);
-        audio.removeEventListener("waiting", onWaiting);
-        audio.removeEventListener("stalled", onStalled);
-        audio.removeEventListener("pause", onPause);
-        audio.removeEventListener("ended", onEnded);
-        audio.removeEventListener("error", onError);
-      };
-    };
-
-    const disposeEvents = pool.elements.map(bindEvents);
-    const initialSinkId = outputSinkIdRef.current;
-    const initialSinkOperation = outputSinkQueueRef.current.then(() => pool.setOutputSinkId(initialSinkId));
-    outputSinkQueueRef.current = initialSinkOperation.then(() => undefined, () => undefined);
-    void initialSinkOperation.then((applied) => {
-      if (disposed || applied || outputSinkIdRef.current !== initialSinkId || !initialSinkId) return;
-      outputSinkIdRef.current = "";
-      setOutputSinkIdState("");
-      writeStorage(OUTPUT_SINK_STORAGE_KEY, "");
-    });
-
-    return () => {
-      disposed = true;
-      const pendingLoadingClear = playbackLoadingClearTimerRef.current;
-      if (pendingLoadingClear !== undefined) {
-        window.clearTimeout(pendingLoadingClear);
-        playbackLoadingClearTimerRef.current = undefined;
-      }
-      loadRequestRef.current += 1;
-      prebufferRequestRef.current += 1;
-      outputSinkRequestRef.current += 1;
-      flushPlaybackSession();
-      if (playbackFailureHandlerRef.current === dispatchPlaybackFailure) {
-        playbackFailureHandlerRef.current = () => false;
-      }
-      for (const dispose of disposeEvents) dispose();
-      pool.destroy();
-      if (activePlaybackSourceRef.current && pool.elements.includes(activePlaybackSourceRef.current.audio)) {
-        activePlaybackSourceRef.current = undefined;
-      }
-      if (audioPoolRef.current === pool) audioPoolRef.current = null;
-      if (audioRef.current && pool.elements.includes(audioRef.current as RoutableAudioElement)) audioRef.current = null;
-    };
-  }, [flushPlaybackSession, requestStreamUrl, schedulePersistedSession, setPlaybackLoading]);
-
-  useEffect(() => {
-    endedRef.current = () => { void advance(true); };
-  }, [advance]);
-
-  useEffect(() => {
     if (!isDesktopRuntime()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -2006,92 +1618,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       unlisten?.();
     };
   }, [advance]);
-
-  useEffect(() => {
-    if (!isDesktopRuntime() || nativeEngineEnabled() || !playing || currentIndex < 0) return;
-    let animationFrame = 0;
-    let lastPublishedAt = Number.NEGATIVE_INFINITY;
-    const publishPlaybackClock = (timestamp: number) => {
-      const pool = audioPoolRef.current;
-      const audio = pool?.active;
-      if (audio && pool?.isActive(audio) && timestamp - lastPublishedAt >= PLAYBACK_CLOCK_PUBLISH_INTERVAL_MS) {
-        lastPublishedAt = timestamp;
-        const nextProgress = audio.currentTime;
-        if (Number.isFinite(nextProgress) && Math.abs(nextProgress - progressRef.current) >= 0.01) {
-          progressRef.current = nextProgress;
-          setProgress(nextProgress);
-        }
-      }
-      animationFrame = window.requestAnimationFrame(publishPlaybackClock);
-    };
-    animationFrame = window.requestAnimationFrame(publishPlaybackClock);
-    return () => window.cancelAnimationFrame(animationFrame);
-  }, [currentIndex, playing]);
-
-  useEffect(() => {
-    audioPoolRef.current?.setGain(volume, muted);
-  }, [muted, volume]);
-
   useEffect(() => {
     if (queueRef.current.length && queueServerIdRef.current === serverId) schedulePersistedSession(false);
   }, [quality, schedulePersistedSession, serverId]);
-
-  useEffect(() => {
-    const requestId = ++prebufferRequestRef.current;
-    const pool = audioPoolRef.current;
-    const playbackServerId = queueServerIdRef.current;
-    if (!prebufferNext || nativeEngineEnabled() || !pool || !playbackServerId || playbackServerId !== serverId || !isDesktopRuntime()) {
-      pool?.cancelPrepared();
-      return;
-    }
-
-    let nextIndex: number | null = null;
-    if (shuffle && queue.length > 1) {
-      const preview = previewShuffleNext(
-        shuffleNavigationRef.current,
-        queue.length,
-        currentIndex,
-        repeat,
-      );
-      shuffleNavigationRef.current = preview.state;
-      nextIndex = preview.index;
-    } else {
-      nextIndex = getPrebufferTargetIndex(currentIndex, queue.length, false, repeat);
-    }
-    const nextTrack = nextIndex == null ? undefined : queue[nextIndex];
-
-    if (nextIndex == null || !nextTrack) {
-      pool.cancelPrepared();
-      return;
-    }
-
-    const preparation: AudioPreparation = {
-      index: nextIndex,
-      ratingKey: nextTrack.ratingKey,
-      serverId: playbackServerId,
-      quality,
-    };
-    if (pool.hasPrepared(preparation)) return;
-    pool.cancelPrepared();
-
-    void requestStreamUrl(playbackServerId, nextTrack, quality)
-      .then((url) => {
-        if (
-          prebufferRequestRef.current !== requestId
-          || audioPoolRef.current !== pool
-          || indexRef.current !== currentIndex
-          || queueServerIdRef.current !== playbackServerId
-          || queueRef.current[nextIndex]?.ratingKey !== nextTrack.ratingKey
-        ) return;
-        pool.prepare(preparation, url);
-        pool.setGain(volumeRef.current, mutedRef.current);
-      })
-      .catch(() => undefined);
-
-    return () => {
-      if (prebufferRequestRef.current === requestId) prebufferRequestRef.current += 1;
-    };
-  }, [currentIndex, prebufferNext, quality, queue, repeat, requestStreamUrl, serverId, shuffle]);
 
   useEffect(() => {
     if (isDesktopRuntime() || !playing || !current) return;
@@ -2100,12 +1629,12 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         const nextValue = value + 1;
         progressRef.current = nextValue;
         schedulePersistedSession(false);
-        if (duration && nextValue >= duration) endedRef.current();
+        if (duration && nextValue >= duration) advance(true);
         return nextValue;
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [current, duration, playing, schedulePersistedSession]);
+  }, [advance, current, duration, playing, schedulePersistedSession]);
 
   useEffect(() => {
     if (!current) return;

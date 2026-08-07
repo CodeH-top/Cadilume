@@ -35,8 +35,10 @@ pub fn run() {
                 eprintln!("[播放] {}", event.payload());
             });
             window::set_status_icon_enabled(&app.handle(), status_icon_enabled)?;
+            // Dev builds start with the window hidden (silent background);
+            // the user brings it up via Dock (Reopen) or the tray menu.
             #[cfg(debug_assertions)]
-            window::reveal_main_window_silent(&app.handle())?;
+            let _ = &app;
             #[cfg(not(debug_assertions))]
             window::reveal_main_window(&app.handle())?;
             Ok(())
