@@ -1173,6 +1173,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           tracks={playlistSelection.tracks}
           label={playlistSelection.label}
           onClose={() => setPlaylistSelection(undefined)}
+          onNotify={notify}
           onPlaylistCreated={(playlist) => {
             setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
             void loadPlaylistList();
@@ -1530,7 +1531,7 @@ function KeepAliveRoutePage({ cacheKey, children }: { cacheKey: string; children
   return <>
     <div ref={pageRef} className={`route-page-scroll ${route.view === "tracks" ? "is-track-workspace" : ""}`.trim()} data-route-entry={cacheKey}>{children}</div>
     {active && showBackToTop && (
-      <button className="route-back-to-top" type="button" aria-label="回到顶部" data-tooltip="回到顶部" title="回到顶部" onClick={scrollToRouteTop}>
+      <button className="route-back-to-top" type="button" aria-label="回到顶部" data-tooltip="回到顶部" onClick={scrollToRouteTop}>
         <ArrowUp size={18} strokeWidth={2.2} aria-hidden="true" />
       </button>
     )}
@@ -1899,7 +1900,7 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
           <span>歌单</span>
           <ChevronDown size={15} strokeWidth={2} aria-hidden="true" />
         </button>
-        <button className="sidebar-playlists-create" type="button" aria-label="新建歌单" data-tooltip="新建歌单" title="新建歌单" onClick={onCreate}>
+        <button className="sidebar-playlists-create" type="button" aria-label="新建歌单" data-tooltip="新建歌单" onClick={onCreate}>
           <Plus size={16} strokeWidth={2} aria-hidden="true" />
         </button>
       </div>
@@ -3267,7 +3268,7 @@ function DeviceNameDialog({ deviceName, onClose, onSave }: { deviceName: string;
             <h2 id="device-name-dialog-title">修改设备名称</h2>
             <small>确认后用于后续 Plex 请求。</small>
           </div>
-          <IconButton label="关闭修改设备名称" disabled={busy} onClick={onClose}><X size={18} /></IconButton>
+          <IconButton label="关闭修改设备名称" tooltip={null} disabled={busy} onClick={onClose}><X size={18} /></IconButton>
         </header>
         <form onSubmit={(event) => void submit(event)}>
           <div className="device-name-dialog-content">
@@ -3346,7 +3347,7 @@ function ThemeCycleButton({ resolvedTheme, onChange }: { resolvedTheme: Resolved
     const bounds = triggerRef.current?.getBoundingClientRect();
     onChange(nextMode, bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : undefined);
   };
-  return <button ref={triggerRef} className="icon-button theme-cycle-button" type="button" aria-label={`切换为${nextLabel}`} data-tooltip={nextLabel} title={nextLabel} onClick={cycle}><CurrentIcon size={18} strokeWidth={1.9} aria-hidden="true" /></button>;
+  return <button ref={triggerRef} className="icon-button theme-cycle-button" type="button" aria-label={`切换为${nextLabel}`} data-tooltip={nextLabel} onClick={cycle}><CurrentIcon size={18} strokeWidth={1.9} aria-hidden="true" /></button>;
 }
 
 const QueueItem = memo(function QueueItem({ track, index, active, onSelect, onRemove }: {
@@ -3490,7 +3491,7 @@ function DevicesPanel({ output, onClose }: {
 
   return (
     <aside className="devices-panel" role="dialog" aria-label="播放设备">
-      <header><h2>播放设备</h2><IconButton label="关闭播放设备" onClick={onClose}><X size={18} /></IconButton></header>
+      <header><h2>播放设备</h2><IconButton label="关闭播放设备" tooltip={null} onClick={onClose}><X size={18} /></IconButton></header>
       <div className="devices-content">
         {output.platform === "windows" ? (
           <>
@@ -3643,7 +3644,7 @@ function CreatePlaylistDialog({ serverId, sectionKey, onClose, onCreated, onErro
             <h2 id="playlist-create-title">新建歌单</h2>
             <small>在当前 Plex 账号中创建</small>
           </div>
-          <IconButton label="关闭新建歌单" disabled={busy} onClick={cancel}><X size={18} /></IconButton>
+          <IconButton label="关闭新建歌单" tooltip={null} disabled={busy} onClick={cancel}><X size={18} /></IconButton>
         </header>
         <form onSubmit={(event) => void submit(event)}>
           <div className="playlist-create-content">
@@ -3677,13 +3678,14 @@ function CreatePlaylistDialog({ serverId, sectionKey, onClose, onCreated, onErro
   );
 }
 
-function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, onAdded }: {
+function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, onAdded, onNotify }: {
   serverId: string;
   tracks: readonly PlexItem[];
   label: string;
   onClose: () => void;
   onPlaylistCreated: (playlist: PlexPlaylist) => void;
   onAdded: (playlist: PlexPlaylist, result: { requested: number; added: number; failedRatingKeys: string[] }) => void;
+  onNotify: (message: string, level?: GlobalNotificationLevel) => void;
 }) {
   const [playlists, setPlaylists] = useState<PlexPlaylist[]>([]);
   const [loading, setLoading] = useState(true);
@@ -3693,7 +3695,6 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
   const [createOpen, setCreateOpen] = useState(false);
   const [newPlaylistTitle, setNewPlaylistTitle] = useState("");
   const [createError, setCreateError] = useState<string>();
-  const [duplicateConfirm, setDuplicateConfirm] = useState<{ playlist: PlexPlaylist; count: number }>();
   const [remainingTracks, setRemainingTracks] = useState<PlexItem[]>(() => appendUniqueArtistTracks([], tracks));
   const dialogRef = useRef<HTMLElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -3817,7 +3818,12 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
       const duplicates = remainingTracks.filter((track) => existingKeys.has(track.ratingKey));
       setBusyId(undefined);
       if (duplicates.length) {
-        setDuplicateConfirm({ playlist, count: duplicates.length });
+        const names = duplicates
+          .slice(0, 3)
+          .map((track) => `《${track.title}》`)
+          .join("、");
+        const suffix = duplicates.length > 3 ? ` 等 ${duplicates.length} 首` : "";
+        onNotify(`歌单“${playlist.title}”已存在歌曲${names}${suffix}`, "warning");
         return;
       }
       await performAdd(playlist);
@@ -3896,35 +3902,8 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
             <h2 id="playlist-picker-title" ref={titleRef} tabIndex={-1}>添加到歌单</h2>
             <small>{label}{remainingTracks.length !== tracks.length ? ` · 剩余 ${remainingTracks.length} 首` : ""}</small>
           </div>
-          <IconButton label="关闭歌单选择" disabled={busy} onClick={onClose}><X size={18} /></IconButton>
+          <IconButton label="关闭歌单选择" tooltip={null} disabled={busy} onClick={onClose}><X size={18} /></IconButton>
         </header>
-        {duplicateConfirm && (
-          <div className="playlist-picker-duplicate" role="alert">
-            <span>“{duplicateConfirm.playlist.title}”已有 {duplicateConfirm.count} 首相同歌曲，仍要添加吗？</span>
-            <span className="playlist-picker-duplicate-actions">
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={busy}
-                onClick={() => setDuplicateConfirm(undefined)}
-              >
-                取消
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  const playlist = duplicateConfirm.playlist;
-                  setDuplicateConfirm(undefined);
-                  void performAdd(playlist);
-                }}
-              >
-                继续添加
-              </button>
-            </span>
-          </div>
-        )}
         <div className="playlist-picker-list" aria-busy={loading || undefined}>
           {createOpen && (
             <form className="playlist-picker-create-inline" onSubmit={(event) => void createAndAdd(event)}>
@@ -4237,7 +4216,7 @@ function Avatar({ account }: { account: PlexAccount }) {
 
 function IconButton({ label, tooltip, className = "", active = false, disabled = false, onClick, children }: { label: string; tooltip?: string | null; className?: string; active?: boolean; disabled?: boolean; onClick?: () => void; children: ReactNode }) {
   const tooltipText = tooltip === null ? undefined : tooltip ?? label;
-  return <button type="button" className={`icon-button ${active ? "active" : ""} ${className}`.trim()} aria-label={label} data-tooltip={tooltipText} title={tooltipText} disabled={disabled} onClick={onClick}>{children}</button>;
+  return <button type="button" className={`icon-button ${active ? "active" : ""} ${className}`.trim()} aria-label={label} data-tooltip={tooltipText} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
 function SourceSyncOverlay() {
@@ -4284,7 +4263,7 @@ function PlaybackErrorAlert({ failure, trackTitle, onRetry, onOpenSettings, onCl
           {attempted && <small>已尝试：{attempted}</small>}
         </details>
       </div>
-      <IconButton label="关闭播放失败提醒" onClick={onClose}><X size={17} /></IconButton>
+      <IconButton label="关闭播放失败提醒" tooltip={null} onClick={onClose}><X size={17} /></IconButton>
     </section>
   );
 }
@@ -4301,7 +4280,7 @@ function SearchLoadingState({ query }: { query: string }) {
   return (
     <div className="search-loading-state" role="status" aria-live="polite" aria-busy="true">
       <span className="search-loading-orbit" aria-hidden="true">
-        <Search size={32} />
+        <Search size={36} />
       </span>
       <span className="search-loading-bars" aria-hidden="true"><i /><i /><i /><i /><i /></span>
       <strong>正在搜索“{query}”…</strong>

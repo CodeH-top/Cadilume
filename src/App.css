@@ -689,10 +689,8 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .device-name-dialog-content > .device-name-dialog-error { color: var(--danger); }
 .device-name-dialog form > footer { display: flex; align-items: center; justify-content: flex-end; gap: 9px; border-top: 1px solid var(--border); padding: 13px 20px 15px; }
 .device-name-dialog form > footer .primary-button { min-width: 96px; margin-top: 0; }
-.playlist-picker { width: min(460px, 100%); max-width: 100%; max-height: min(620px, calc(100vh - 48px)); display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--panel); box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42); }
+.playlist-picker { width: min(460px, 100%); max-width: 100%; max-height: min(620px, calc(100vh - 48px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--panel); box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42); }
 .playlist-picker > header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px; border-bottom: 1px solid var(--border); }
-.playlist-picker-duplicate { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-strong); padding: 10px 16px; color: var(--text); background: color-mix(in srgb, var(--accent-soft) 22%, transparent); font-size: 12px; line-height: 1.4; }
-.playlist-picker-duplicate-actions { display: inline-flex; flex: 0 0 auto; gap: 8px; }
 .playlist-picker > header > div { min-width: 0; }
 .playlist-picker h2 { margin: 0 0 5px; font-size: 23px; letter-spacing: -0.035em; }
 .playlist-picker header small { display: block; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -802,8 +800,10 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .settings-account-identity strong { color: var(--text); font-size: 13px; }
 .settings-account-identity small { color: var(--muted); font-size: 12px; }
 .empty-state, .loading-state { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted-faint); text-align: center; }
-.search-loading-state { min-height: 380px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted-strong); text-align: center; }
-.search-loading-orbit { width: 76px; height: 76px; display: grid; place-items: center; border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent); border-top-color: var(--accent); border-radius: 50%; color: var(--accent); animation: spin 900ms linear infinite; }
+.search-loading-state { min-height: 480px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--muted-strong); text-align: center; }
+.search-loading-orbit { position: relative; width: 84px; height: 84px; display: grid; place-items: center; color: var(--accent); }
+.search-loading-orbit::before { position: absolute; inset: 0; content: ""; border: 3px solid color-mix(in srgb, var(--accent) 26%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: spin 900ms linear infinite; }
+.search-loading-orbit svg { position: relative; }
 .search-loading-bars { display: flex; align-items: flex-end; gap: 4px; height: 20px; }
 .search-loading-bars i { width: 4px; height: 7px; border-radius: 2px; background: var(--accent); animation: search-bar-pulse 850ms ease-in-out infinite; }
 .search-loading-bars i:nth-child(2) { animation-delay: 110ms; }

@@ -319,8 +319,6 @@ export function NowPlayingView({
               className="now-playing-icon-button now-playing-close-button"
               type="button"
               aria-label="关闭正在播放"
-              data-tooltip="关闭正在播放"
-              title="关闭正在播放"
               onClick={onClose}
             >
               <ChevronDown size={22} strokeWidth={1.8} aria-hidden="true" />

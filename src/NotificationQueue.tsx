@@ -325,8 +325,6 @@ export function GlobalNotificationQueue({
                     className="global-notification-close"
                     type="button"
                     aria-label={`关闭提示：${notice.message}`}
-                    data-tooltip="关闭提示"
-                    title="关闭提示"
                     tabIndex={hiddenInStack ? -1 : undefined}
                     onClick={() => onDismiss(notice.id)}
                   >

@@ -91,9 +91,11 @@ describe("expanded player controller layout", () => {
     for (const label of ["随机播放当前列表", "上一首", "播放", "下一首", "顺序播放，列表结束后停止"]) {
       expect(transportMarkup).toContain(`aria-label="${label}"`);
     }
-    for (const label of ["关闭正在播放", "添加到歌单", "显示播放队列"]) {
+    for (const label of ["添加到歌单", "显示播放队列"]) {
       expect(markup).toContain(`data-tooltip="${label}"`);
     }
+    expect(markup).not.toContain("data-tooltip=\"关闭正在播放\"");
+    expect(markup).not.toContain("title=\"关闭正在播放\"");
   });
 
   it("falls back to track metadata when a stream reports an infinite duration", () => {
