@@ -799,6 +799,11 @@ export async function nativeAudioSetVolume(volume: number): Promise<void> {
   await invoke("native_audio_set_volume", { volume });
 }
 
+export async function nativeAudioPrecache(source: string, cacheKey?: string): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_precache", { source, cacheKey });
+}
+
 export interface NativeAudioCacheStatus {
   size_bytes: number;
   file_count: number;

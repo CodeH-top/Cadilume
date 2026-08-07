@@ -72,6 +72,7 @@ pub fn run() {
             plex::report_timeline,
             plex::scrobble,
             audio_engine::native_audio_load,
+            audio_engine::native_audio_precache,
             audio_engine::native_audio_play,
             audio_engine::native_audio_pause,
             audio_engine::native_audio_stop,

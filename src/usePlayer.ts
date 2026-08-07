@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioSeek, nativeAudioSetVolume, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
+import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioSeek, nativeAudioSetVolume, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
@@ -618,6 +618,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const streamUrlInflightRef = useRef(new Map<string, Promise<string>>());
   const streamUrlInflightAtRef = useRef(new Map<string, number>());
   const loadRequestRef = useRef(0);
+  const precacheRequestRef = useRef(0);
   const serverIdRef = useRef(serverId);
   const qualityRef = useRef(quality);
   const queueServerIdRef = useRef<string | undefined>(undefined);
@@ -1213,6 +1214,38 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       unlisten?.();
     };
   }, [loadAt, next, playing, previous, schedulePersistedSession, seek, toggle]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime() || !prebufferNext) return;
+    const tracks = queueRef.current;
+    if (!tracks.length || currentIndex < 0) return;
+    let nextIndex: number | null = null;
+    if (shuffle && tracks.length > 1) {
+      const preview = previewShuffleNext(
+        shuffleNavigationRef.current,
+        tracks.length,
+        currentIndex,
+        repeat,
+      );
+      shuffleNavigationRef.current = preview.state;
+      nextIndex = preview.index;
+    } else {
+      nextIndex = getSequentialNextIndex(currentIndex, tracks.length, repeat === "one" ? "all" : repeat);
+    }
+    const nextTrack = nextIndex == null ? undefined : tracks[nextIndex];
+    if (!nextTrack || !serverId) return;
+    const requestId = ++precacheRequestRef.current;
+    void requestStreamUrl(serverId, nextTrack, quality)
+      .then((url) => {
+        if (precacheRequestRef.current !== requestId) return undefined;
+        return nativeAudioPrecache(url, nextTrack.ratingKey);
+      })
+      .catch(() => undefined);
+    return () => {
+      if (precacheRequestRef.current === requestId) precacheRequestRef.current += 1;
+    };
+  }, [currentIndex, prebufferNext, quality, queue, repeat, requestStreamUrl, serverId, shuffle]);
+
   useEffect(() => {
     if (queueRef.current.length && queueServerIdRef.current === serverId) schedulePersistedSession(false);
   }, [quality, schedulePersistedSession, serverId]);

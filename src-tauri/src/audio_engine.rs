@@ -370,6 +370,22 @@ impl NativeAudioEngine {
         self.player.as_ref()
     }
 
+    fn resolve_cache_paths(&self, cache_key: Option<String>) -> Result<(String, PathBuf, PathBuf), String> {
+        let key = cache_key
+            .filter(|value| {
+                !value.is_empty()
+                    && value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+            })
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let dir = self.cache_root.join("downloads");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("缓存目录创建失败: {e}"))?;
+        let final_path = dir.join(format!("{key}.audio"));
+        let part_path = dir.join(format!("{key}.audio.part"));
+        Ok((key, final_path, part_path))
+    }
+
     /// Load a local media file and start playing it.
     pub fn load_and_play(&self, path: &str) -> Result<usize, String> {
         let file = std::fs::File::open(path).map_err(|e| format!("打开媒体文件失败: {e}"))?;
@@ -404,17 +420,7 @@ impl NativeAudioEngine {
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return self.load_and_play(source);
         }
-        let key = cache_key
-            .filter(|value| {
-                !value.is_empty()
-                    && value
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-            })
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let dir = self.cache_root.join("downloads");
-        std::fs::create_dir_all(&dir).map_err(|e| format!("缓存目录创建失败: {e}"))?;
-        let final_path = dir.join(format!("{key}.audio"));
+        let (key, final_path, part_path) = self.resolve_cache_paths(cache_key)?;
         let final_ready = std::fs::metadata(&final_path)
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false);
@@ -425,7 +431,6 @@ impl NativeAudioEngine {
             return self.load_and_play(final_path.to_str().unwrap());
         }
 
-        let part_path = dir.join(format!("{key}.audio.part"));
         let _ = std::fs::remove_file(&part_path);
         let progress = DownloadProgress::new();
         let progress_task = Arc::clone(&progress);
@@ -486,6 +491,44 @@ impl NativeAudioEngine {
             enforce_audio_cache_limit(&cache_root);
         });
         Ok(self.player.len())
+    }
+
+    /// Pre-download a future track into the cache without playing it, so the
+    /// next switch can start from the local file (reduces cross-track gap).
+    pub async fn precache(&self, source: &str, cache_key: Option<String>) -> Result<(), String> {
+        if !(source.starts_with("http://") || source.starts_with("https://")) {
+            return Ok(());
+        }
+        let (_, final_path, part_path) = self.resolve_cache_paths(cache_key)?;
+        if std::fs::metadata(&final_path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(&part_path);
+        let progress = DownloadProgress::new();
+        let progress_task = Arc::clone(&progress);
+        let part_for_task = part_path;
+        let final_for_task = final_path;
+        let source_for_task = source.to_string();
+        let client = reqwest::Client::new();
+        tokio::spawn(async move {
+            if let Err(error) = download_progressive(
+                &client,
+                &source_for_task,
+                &part_for_task,
+                &final_for_task,
+                &progress_task,
+            )
+            .await
+            {
+                progress_task.failed.store(true, Ordering::SeqCst);
+                progress_task.wake();
+                eprintln!("[原生] 预缓存下载失败：{error}");
+            }
+        });
+        Ok(())
     }
 
     /// Publish sanitized playback progress/ended events to the WebView.
@@ -711,6 +754,17 @@ pub async fn native_audio_load(
 ) -> Result<usize, String> {
     let engine = state.ensure(&app)?;
     engine.load_cached_and_play(&source, cache_key, metadata).await
+}
+
+#[tauri::command]
+pub async fn native_audio_precache(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+    source: String,
+    cache_key: Option<String>,
+) -> Result<(), String> {
+    let engine = state.ensure(&app)?;
+    engine.precache(&source, cache_key).await
 }
 
 #[tauri::command]
