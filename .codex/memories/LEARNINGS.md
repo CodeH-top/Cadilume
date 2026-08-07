@@ -19,6 +19,11 @@
   处理，FLAC 天然无缝。
 - 缓存完整性（290b93a）：`download_progressive` 按 Content-Length 校验，
   静默截断不再提交为完整缓存。
+- 预取增强（ad7e679）：顺序模式下 prebuffer 额外预热第二首 ahead，远前置下载
+  限速 5 Mbps（`PRECACHE_RATE_LIMIT_BYTES_PER_SEC`），即时下一首（gapless 预排）
+  保持全速；`native_audio_precache` 新增 `rate_limit` 参数（前端
+  `nativeAudioPrecache(url, key, true)`），`download_progressive` 用按字节
+  期望耗时做 pacing，测试用小 WAV 验证限速生效且文件完整。
 - 真实 PMS 自动化回归（290b93a，`cargo test -- --ignored
   real_pms_engine_regression`）：真实资料库两首 FLAC 串行下载→缓存→渐进播放→
   预排→自然结束无缝交接→seek→暂停/恢复，本机已通过。
