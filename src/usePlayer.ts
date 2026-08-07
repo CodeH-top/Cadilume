@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioSeek, nativeAudioSetVolume } from "./api";
+import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioSeek, nativeAudioSetVolume, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
@@ -753,12 +753,28 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     }, PLAYBACK_SESSION_WRITE_THROTTLE_MS);
   }, [flushPlaybackSession]);
 
+  const syncNativeQueue = useCallback(() => {
+    if (!isDesktopRuntime()) return;
+    void nativeQueueSet(
+      queueRef.current.map((track) => ({
+        rating_key: track.ratingKey,
+        title: track.title || "",
+        artist: trackArtist(track),
+        album: trackAlbum(track),
+      })),
+      indexRef.current,
+      repeatRef.current,
+      shuffleRef.current,
+    ).catch(() => undefined);
+  }, []);
+
   const loadNativeTrack = useCallback(async (params: { index: number; autoplay: boolean; resumeSeconds: number; requestId: number }) => {
     const { index, autoplay, resumeSeconds, requestId } = params;
     const tracks = queueRef.current;
     const track = tracks[index];
     if (!track || !serverId) return;
     try {
+      syncNativeQueue();
       const url = await requestStreamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       playbackLog("info", `原生流地址已取得：index=${index} 质量=${quality}`);
@@ -790,7 +806,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       setError(`音频无法播放（${diagnostic}）。`);
       setPlaybackFailure({ message: `音频无法播放（${diagnostic}）。`, technicalDetails: diagnostic, attemptedQualities: [quality] });
     }
-  }, [quality, requestStreamUrl, serverId]);
+  }, [quality, requestStreamUrl, serverId, syncNativeQueue]);
 
   const loadAt = useCallback(async (
     index: number,
@@ -949,10 +965,22 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [loadAt, schedulePersistedSession]);
 
   const next = useCallback(() => {
-    void advance(false);
-  }, [advance]);
+    if (!isDesktopRuntime()) {
+      void advance(false);
+      return;
+    }
+    void nativeQueueNext()
+      .then((index) => {
+        if (index >= 0) void loadAt(index, true);
+      })
+      .catch(() => void advance(false));
+  }, [advance, loadAt]);
 
   const previous = useCallback(() => {
+    if (!isDesktopRuntime()) {
+      void advance(false);
+      return;
+    }
     if (progressRef.current > 4) {
       progressRef.current = 0;
       setProgress(0);
@@ -961,20 +989,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       schedulePersistedSession(false);
       return;
     }
-    if (shuffleRef.current) {
-      const previousSelection = moveShufflePrevious(
-        shuffleNavigationRef.current,
-        queueRef.current.length,
-        indexRef.current,
-      );
-      shuffleNavigationRef.current = previousSelection.state;
-      if (previousSelection.index != null) void loadAt(previousSelection.index, true);
-      return;
-    }
-    if (indexRef.current > 0) void loadAt(indexRef.current - 1, true);
-    else if ((repeatRef.current === "all" || repeatRef.current === "one") && queueRef.current.length) {
-      void loadAt(queueRef.current.length - 1, true);
-    }
+    void nativeQueuePrevious()
+      .then((index) => {
+        if (index >= 0) void loadAt(index, true);
+      })
+      .catch(() => undefined);
   }, [loadAt, schedulePersistedSession]);
 
   const toggle = useCallback(() => {
@@ -1025,6 +1044,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     shuffleRef.current = normalized;
     setShuffleState(normalized);
     shuffleNavigationRef.current = createShuffleNavigationState(queueRef.current.length, indexRef.current);
+    if (isDesktopRuntime()) void nativeQueueSetShuffle(normalized).catch(() => undefined);
     schedulePersistedSession(false);
   }, [schedulePersistedSession]);
 
@@ -1032,6 +1052,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const normalized: RepeatMode = mode === "one" || mode === "all" ? mode : "off";
     repeatRef.current = normalized;
     setRepeatState(normalized);
+    if (isDesktopRuntime()) void nativeQueueSetRepeat(normalized).catch(() => undefined);
     schedulePersistedSession(false);
   }, [schedulePersistedSession]);
 
@@ -1158,7 +1179,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("native-audio://event", (event) => {
-      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string } | null;
+      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number } | null;
       if (!payload) return;
       if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
         progressRef.current = payload.position;
@@ -1167,7 +1188,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           setDuration(payload.duration);
         }
       } else if (payload.type === "ended") {
-        void advance(true);
+        // Queue authority lives in Rust: it already decided the next item and
+        // emits `queue-item` when one exists; here we only settle local state.
+        setPlaying(false);
+        setPlaybackLoading(false);
+        setBuffering(false);
+        schedulePersistedSession(true);
+      } else if (payload.type === "queue-item" && typeof payload.index === "number") {
+        void loadAt(payload.index, true);
       } else if (payload.type === "remote") {
         const command = typeof payload.command === "string" ? payload.command : "";
         if (command === "play" || command === "toggle") toggle();
@@ -1184,7 +1212,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       disposed = true;
       unlisten?.();
     };
-  }, [advance, next, playing, previous, seek, toggle]);
+  }, [loadAt, next, playing, previous, schedulePersistedSession, seek, toggle]);
   useEffect(() => {
     if (queueRef.current.length && queueServerIdRef.current === serverId) schedulePersistedSession(false);
   }, [quality, schedulePersistedSession, serverId]);

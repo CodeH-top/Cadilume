@@ -814,6 +814,45 @@ export async function nativeAudioClearCache(): Promise<void> {
   await invoke("native_audio_clear_cache");
 }
 
+export interface NativeQueueTrack {
+  rating_key: string;
+  title: string;
+  artist: string;
+  album: string;
+}
+
+export type NativeRepeatMode = "off" | "all" | "one";
+
+export async function nativeQueueSet(
+  tracks: NativeQueueTrack[],
+  currentIndex: number,
+  repeat: NativeRepeatMode,
+  shuffle: boolean,
+): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_queue_set", { tracks, currentIndex, repeat, shuffle });
+}
+
+export async function nativeQueueNext(): Promise<number> {
+  if (!isDesktopRuntime()) return -1;
+  return invoke("native_queue_next");
+}
+
+export async function nativeQueuePrevious(): Promise<number> {
+  if (!isDesktopRuntime()) return -1;
+  return invoke("native_queue_previous");
+}
+
+export async function nativeQueueSetRepeat(repeat: NativeRepeatMode): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_queue_set_repeat", { repeat });
+}
+
+export async function nativeQueueSetShuffle(shuffle: boolean): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_queue_set_shuffle", { shuffle });
+}
+
 /** Update a regular playlist's title/summary through the scoped Rust command. */
 export async function updatePlaylist(
   serverId: string,

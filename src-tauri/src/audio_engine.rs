@@ -215,6 +215,93 @@ pub struct NativeAudioEngine {
     loaded: Arc<AtomicBool>,
     ended_sent: Arc<AtomicBool>,
     metadata: Arc<Mutex<Option<NowPlayingMetadata>>>,
+    queue: Arc<Mutex<QueueState>>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct QueueTrack {
+    pub rating_key: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NativeRepeatMode {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
+#[derive(Debug, Default)]
+pub struct QueueState {
+    tracks: Vec<QueueTrack>,
+    current_index: i64,
+    repeat: NativeRepeatMode,
+    shuffle: bool,
+    bag: Vec<usize>,
+}
+
+impl QueueState {
+    fn next_index(&mut self, natural_ended: bool) -> Option<usize> {
+        if self.tracks.is_empty() {
+            return None;
+        }
+        let current = self.current_index.max(0) as usize;
+        if natural_ended && self.repeat == NativeRepeatMode::One {
+            return Some(current);
+        }
+        if self.shuffle {
+            let mut available: Vec<usize> = (0..self.tracks.len())
+                .filter(|index| *index != current)
+                .collect();
+            if !available.is_empty() {
+                if let Some(last) = self.bag.last() {
+                    if available.len() > 1 {
+                        available.retain(|index| index != last);
+                    }
+                }
+                let index = available[0];
+                self.bag.push(index);
+                if self.bag.len() > self.tracks.len() {
+                    self.bag.remove(0);
+                }
+                return Some(index);
+            }
+            return None;
+        }
+        let next = current + 1;
+        if next < self.tracks.len() {
+            Some(next)
+        } else if self.repeat == NativeRepeatMode::All {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    fn previous_index(&self) -> Option<usize> {
+        if self.tracks.is_empty() {
+            return None;
+        }
+        let current = self.current_index.max(0) as usize;
+        if self.shuffle {
+            let mut used: Vec<usize> = self.bag.iter().rev().copied().collect();
+            if let Some(found) = used.iter().position(|index| *index == current) {
+                used.remove(found);
+            }
+            return used.first().copied();
+        }
+        if current > 0 {
+            Some(current - 1)
+        } else if self.repeat != NativeRepeatMode::Off {
+            Some(self.tracks.len() - 1)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -275,6 +362,7 @@ impl NativeAudioEngine {
             loaded: Arc::new(AtomicBool::new(false)),
             ended_sent: Arc::new(AtomicBool::new(false)),
             metadata: Arc::new(Mutex::new(None)),
+            queue: Arc::new(Mutex::new(QueueState::default())),
         })
     }
 
@@ -407,6 +495,7 @@ impl NativeAudioEngine {
         let loaded = Arc::clone(&self.loaded);
         let ended_sent = Arc::clone(&self.ended_sent);
         let metadata = Arc::clone(&self.metadata);
+        let queue = Arc::clone(&self.queue);
         let app_for_task = app.clone();
         let mut last_position = -1.0f64;
         tokio::spawn(async move {
@@ -435,10 +524,26 @@ impl NativeAudioEngine {
                     && position > 0.05;
                 if ended {
                     ended_sent.store(true, Ordering::SeqCst);
+                    let next_index = queue
+                        .lock()
+                        .map(|mut state| {
+                            let next = state.next_index(true);
+                            if let Some(index) = next {
+                                state.current_index = index as i64;
+                            }
+                            next
+                        })
+                        .unwrap_or(None);
                     let _ = app_for_task.emit(
                         "native-audio://event",
                         serde_json::json!({ "type": "ended" }),
                     );
+                    if let Some(index) = next_index {
+                        let _ = app_for_task.emit(
+                            "native-audio://event",
+                            serde_json::json!({ "type": "queue-item", "index": index }),
+                        );
+                    }
                     continue;
                 }
                 if (position - last_position).abs() >= 0.05 {
@@ -680,6 +785,83 @@ pub fn native_audio_status(
         item_count: player.len(),
         current_index: None,
     }
+}
+
+#[tauri::command]
+pub fn native_queue_set(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+    tracks: Vec<QueueTrack>,
+    current_index: i64,
+    repeat: NativeRepeatMode,
+    shuffle: bool,
+) -> Result<(), String> {
+    let engine = state.ensure(&app)?;
+    let mut queue = engine
+        .queue
+        .lock()
+        .map_err(|_| "队列状态锁失败".to_string())?;
+    queue.tracks = tracks;
+    queue.current_index = current_index;
+    queue.repeat = repeat;
+    queue.shuffle = shuffle;
+    queue.bag.clear();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn native_queue_next(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) -> Result<usize, String> {
+    let engine = state.ensure(&app)?;
+    let mut queue = engine
+        .queue
+        .lock()
+        .map_err(|_| "队列状态锁失败".to_string())?;
+    let next = queue.next_index(false).ok_or_else(|| "队列已结束".to_string())?;
+    queue.current_index = next as i64;
+    Ok(next)
+}
+
+#[tauri::command]
+pub fn native_queue_previous(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) -> Result<usize, String> {
+    let engine = state.ensure(&app)?;
+    let mut queue = engine
+        .queue
+        .lock()
+        .map_err(|_| "队列状态锁失败".to_string())?;
+    let previous = queue.previous_index().ok_or_else(|| "没有上一首".to_string())?;
+    queue.current_index = previous as i64;
+    Ok(previous)
+}
+
+#[tauri::command]
+pub fn native_queue_set_repeat(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+    repeat: NativeRepeatMode,
+) -> Result<(), String> {
+    let engine = state.ensure(&app)?;
+    engine
+        .queue
+        .lock()
+        .map_err(|_| "队列状态锁失败".to_string())?
+        .repeat = repeat;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn native_queue_set_shuffle(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+    shuffle: bool,
+) -> Result<(), String> {
+    let engine = state.ensure(&app)?;
+    let mut queue = engine
+        .queue
+        .lock()
+        .map_err(|_| "队列状态锁失败".to_string())?;
+    queue.shuffle = shuffle;
+    queue.bag.clear();
+    Ok(())
 }
 
 #[cfg(test)]
