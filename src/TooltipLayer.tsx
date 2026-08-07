@@ -8,7 +8,7 @@ interface TooltipState {
 }
 
 const TOOLTIP_GAP = 8;
-const TOOLTIP_SHOW_DELAY_MS = 120;
+const TOOLTIP_SHOW_DELAY_MS = 60;
 const TOOLTIP_MARGIN = 8;
 
 /**
@@ -117,7 +117,7 @@ export function TooltipLayer() {
       ref={bubbleRef}
       className="auto-tooltip"
       role="tooltip"
-      style={{ left: tip.left, top: tip.top, visibility: tip.visible ? "visible" : "hidden" }}
+      style={{ left: tip.left, top: tip.top, visibility: tip.visible ? "visible" : "hidden", opacity: tip.visible ? 1 : 0 }}
     >
       {tip.text}
     </div>

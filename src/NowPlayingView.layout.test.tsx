@@ -96,6 +96,9 @@ describe("expanded player controller layout", () => {
     }
     expect(markup).not.toContain("data-tooltip=\"关闭正在播放\"");
     expect(markup).not.toContain("title=\"关闭正在播放\"");
+    expect(markup).not.toContain("data-tooltip=\"静音\"");
+    expect(markup).not.toContain("title=\"静音\"");
+    expect(markup).not.toContain("title=\"音量");
   });
 
   it("falls back to track metadata when a stream reports an infinite duration", () => {

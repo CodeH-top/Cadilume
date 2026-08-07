@@ -63,9 +63,7 @@ export function SharedVolumeControl({
         type="button"
         disabled={disabled || !onMutedChange}
         aria-label={muteLabel}
-        data-tooltip={muteLabel}
         aria-pressed={muted}
-        title={muteLabel}
         onClick={() => onMutedChange?.(!muted)}
       >
         <VolumeIcon volume={volume} muted={muted} />
@@ -77,7 +75,6 @@ export function SharedVolumeControl({
             aria-label="播放器独立音量"
             aria-orientation="vertical"
             aria-valuetext={`${percent}%`}
-            title={`音量 ${percent}%`}
             type="range"
             min="0"
             max="1"
