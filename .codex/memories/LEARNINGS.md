@@ -1,5 +1,19 @@
 # LEARNINGS
 
+## 2026-08-07 — UI/业务修复要点（dev 44e1b9d）
+
+- 歌单内删除歌曲报“请至少选择一首歌曲”根因：PMS `/playlists/{id}/items` 返回的
+  `playlistItemID` 是**数字**，`normalizePlexItems` 未转字符串，删除命令的
+  `isCleanPlexIdentifier`（依赖 `value.length`）把数字过滤成空数组。修复：
+  `optionalString` 支持数字转字符串，`removeTracksFromPlaylist` 先 `String()` 再校验。
+- `SourceSyncOverlay` 是全屏黑透遮罩（`inset:0` + 68% 背景 + blur），与右上角通知
+  同时出现时会被误认为“消息提醒自带 mask”；已改为无遮罩顶部小卡片。
+- 新建歌单插入左侧列表时三处 `setPlaylists` 都用了头部插入，用户要求追加到底部；
+  新增歌曲到歌单后需 `loadPlaylistList()` 刷新数量。
+- 搜索页：PMS `/hubs/search` 的 hub 标题是英文，前端按 `hub.type` 映射
+  artist→歌手 / album→专辑 / track→歌曲；空 items 的 hub 需过滤；搜索 loading
+  之前被 `view !== "search"` 条件排除；返回按钮用 `navigate(-1)`。
+
 ## 2026-08-07 — 原生播放 spike：kithara 失败、rodio 验证通过（决策更新）
 
 - kithara-play/firewheel 在 Tauri 进程里播放**本地文件或真实 PMS 流都会卡死**：
