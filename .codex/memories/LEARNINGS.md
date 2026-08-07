@@ -23,6 +23,10 @@
 - BASS（Un4seen）许可结论：闭源，非商业个人免费，商业产品约 $120 起且插件另算；
   Plexamp 由 Plex 公司商业使用（付费许可）。Cadilume 是 MIT 开源并要分发，
   不采用 BASS；rodio/cpal/symphonia（MIT/Apache + MPL）无此负担。
+- 2026-08-07 分支策略：`main`（稳定基线）与 `webview`（WebView 播放基线）都指向
+  `d77f732`；后续开发全部在 `dev` 分支。用户要求先修基础 bug/UI，完成后再按
+  `docs/NATIVE_AUDIO_ENGINE_UPGRADE_PLAN_2026-08-07.md` 的 Phase 1→6 落盘内核。
+  spike 测试按钮与 DevTools 钩子已删除（Rust AudioEngine 命令骨架保留待用）。
 
 ## 2026-08-06 — 原生播放引擎选型：许可与体积事实（用户要求独立可用，禁系统依赖）
 

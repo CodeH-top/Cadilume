@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad } from "./api";
+import { acknowledgeQuit, isDesktopRuntime } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
 import { usableDurationSeconds } from "./playerUi";
@@ -1144,18 +1144,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
   const current = currentIndex >= 0 ? queue[currentIndex] : undefined;
 
-  /**
-   * Spike only: play the current queue item through the kithara native
-   * engine (same PMS stream ticket the WebView player would use).
-   */
-  const spikePlayNative = useCallback(async (): Promise<string> => {
-    if (!isDesktopRuntime()) return "no-desktop";
-    if (!serverId || !current) return "no-current-track";
-    const url = await requestStreamUrl(serverId, current, quality);
-    const index = await nativeAudioLoad(url, String(current.ratingKey));
-    return `native-loaded:${index}`;
-  }, [current, quality, requestStreamUrl, serverId]);
-
   const flushPlaybackSession = useCallback(() => {
     const timer = persistedSessionTimerRef.current;
     if (timer !== undefined) {
@@ -2123,6 +2111,5 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     removeFromQueue,
     flushPlaybackSession,
     discardPlaybackSession,
-    spikePlayNative,
   }), [appendTracks, buffering, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, insertTracksNext, loading, muted, next, outputSinkId, playContext, playTracks, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
 }
