@@ -1,4 +1,6 @@
 mod audio_engine;
+#[cfg(target_os = "macos")]
+mod now_playing;
 mod plex;
 mod stream_proxy;
 mod window;
@@ -25,6 +27,8 @@ pub fn run() {
             let native_cache = app.path().app_cache_dir()?.join("native-audio");
             fs::create_dir_all(&native_cache)?;
             app.manage(NativeAudioEngineSlot::new(native_cache));
+            #[cfg(target_os = "macos")]
+            now_playing::install(app.handle().clone());
             app.manage(StreamProxy::start(app.handle().clone())?);
             app.manage(window::QuitCoordinator::default());
             app.listen("playback://log", |event| {

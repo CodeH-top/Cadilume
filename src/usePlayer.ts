@@ -762,7 +762,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       const url = await requestStreamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       playbackLog("info", `原生流地址已取得：index=${index} 质量=${quality}`);
-      await nativeAudioLoad(url, track.ratingKey);
+      await nativeAudioLoad(url, track.ratingKey, {
+        title: track.title,
+        artist: trackArtist(track),
+        album: trackAlbum(track),
+      });
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       if (resumeSeconds > 0.5) {
         try {
@@ -1154,7 +1158,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("native-audio://event", (event) => {
-      const payload = event.payload as { type?: string; position?: number; duration?: number } | null;
+      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string } | null;
       if (!payload) return;
       if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
         progressRef.current = payload.position;
@@ -1164,6 +1168,13 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         }
       } else if (payload.type === "ended") {
         void advance(true);
+      } else if (payload.type === "remote") {
+        const command = typeof payload.command === "string" ? payload.command : "";
+        if (command === "play" || command === "toggle") toggle();
+        else if (command === "pause") { if (playing) toggle(); }
+        else if (command === "next") next();
+        else if (command === "previous") previous();
+        else if (command === "seek" && typeof payload.position === "number") seek(payload.position);
       }
     }).then((disposeFn) => {
       if (disposed) disposeFn();
@@ -1173,7 +1184,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       disposed = true;
       unlisten?.();
     };
-  }, [advance]);
+  }, [advance, next, playing, previous, seek, toggle]);
   useEffect(() => {
     if (queueRef.current.length && queueServerIdRef.current === serverId) schedulePersistedSession(false);
   }, [quality, schedulePersistedSession, serverId]);

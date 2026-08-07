@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 /// Minimum bytes downloaded before progressive playback may start.
@@ -214,6 +214,14 @@ pub struct NativeAudioEngine {
     duration_seconds: Arc<Mutex<Option<f64>>>,
     loaded: Arc<AtomicBool>,
     ended_sent: Arc<AtomicBool>,
+    metadata: Arc<Mutex<Option<NowPlayingMetadata>>>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct NowPlayingMetadata {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
 }
 
 /// Lazy engine slot so the device stream opens on first use.
@@ -266,6 +274,7 @@ impl NativeAudioEngine {
             duration_seconds: Arc::new(Mutex::new(None)),
             loaded: Arc::new(AtomicBool::new(false)),
             ended_sent: Arc::new(AtomicBool::new(false)),
+            metadata: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -299,7 +308,11 @@ impl NativeAudioEngine {
         &self,
         source: &str,
         cache_key: Option<String>,
+        metadata: Option<NowPlayingMetadata>,
     ) -> Result<usize, String> {
+        if let Some(metadata) = metadata {
+            *self.metadata.lock().map_err(|_| "元数据状态锁失败".to_string())? = Some(metadata);
+        }
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return self.load_and_play(source);
         }
@@ -393,12 +406,29 @@ impl NativeAudioEngine {
         let duration = Arc::clone(&self.duration_seconds);
         let loaded = Arc::clone(&self.loaded);
         let ended_sent = Arc::clone(&self.ended_sent);
+        let metadata = Arc::clone(&self.metadata);
         let app_for_task = app.clone();
         let mut last_position = -1.0f64;
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let position = player.get_pos().as_secs_f64();
+                let duration_value = duration.lock().map(|guard| *guard).unwrap_or(None);
+                #[cfg(target_os = "macos")]
+                {
+                    let playing = !player.is_paused() && !player.empty();
+                    let meta = metadata.lock().map(|guard| guard.clone()).unwrap_or(None);
+                    if let Some(meta) = meta {
+                        crate::now_playing::update_metadata(
+                            meta.title.as_deref().unwrap_or(""),
+                            meta.artist.as_deref().unwrap_or(""),
+                            meta.album.as_deref().unwrap_or(""),
+                            duration_value,
+                            position,
+                            playing,
+                        );
+                    }
+                }
                 let ended = loaded.load(Ordering::SeqCst)
                     && !ended_sent.load(Ordering::SeqCst)
                     && player.empty()
@@ -413,7 +443,6 @@ impl NativeAudioEngine {
                 }
                 if (position - last_position).abs() >= 0.05 {
                     last_position = position;
-                    let duration_value = duration.lock().map(|guard| *guard).unwrap_or(None);
                     let _ = app_for_task.emit(
                         "native-audio://event",
                         serde_json::json!({
@@ -573,9 +602,10 @@ pub async fn native_audio_load(
     state: tauri::State<'_, NativeAudioEngineSlot>,
     source: String,
     cache_key: Option<String>,
+    metadata: Option<NowPlayingMetadata>,
 ) -> Result<usize, String> {
     let engine = state.ensure(&app)?;
-    engine.load_cached_and_play(&source, cache_key).await
+    engine.load_cached_and_play(&source, cache_key, metadata).await
 }
 
 #[tauri::command]
@@ -761,7 +791,10 @@ mod tests {
         let url = format!("http://127.0.0.1:{}/sample.flac", addr.port());
         let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-http");
         let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
-        engine.load_cached_and_play(&url, Some("sample-cache-test".into())).await.unwrap();
+        engine
+            .load_cached_and_play(&url, Some("sample-cache-test".into()), None)
+            .await
+            .unwrap();
         engine.player().set_volume(0.0);
         tokio::time::sleep(Duration::from_millis(1_200)).await;
         let position = engine.player().get_pos().as_secs_f64();

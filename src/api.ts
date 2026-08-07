@@ -764,9 +764,19 @@ export interface PlaylistChanges {
 }
 
 /** Native engine commands (rodio-backed playback in Rust). */
-export async function nativeAudioLoad(source: string, cacheKey?: string): Promise<number> {
+export interface NativeNowPlayingMetadata {
+  title?: string;
+  artist?: string;
+  album?: string;
+}
+
+export async function nativeAudioLoad(
+  source: string,
+  cacheKey?: string,
+  metadata?: NativeNowPlayingMetadata,
+): Promise<number> {
   if (!isDesktopRuntime()) return -1;
-  return invoke("native_audio_load", { source, cacheKey });
+  return invoke("native_audio_load", { source, cacheKey, metadata });
 }
 
 export async function nativeAudioPlay(): Promise<void> {
