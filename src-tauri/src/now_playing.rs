@@ -126,6 +126,25 @@ mod macos {
         playing: bool,
         artwork: Option<&[u8]>,
     ) {
+        // 变更时输出脱敏诊断：确认系统更新确实被调用并带上了内容。
+        static LAST_LOGGED: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+        let log_key = format!(
+            "{title}|{artist}|{album}|artwork={}",
+            artwork.map(|bytes| bytes.len()).unwrap_or(0)
+        );
+        {
+            let mut last = LAST_LOGGED
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap();
+            if last.as_deref() != Some(&log_key) {
+                eprintln!(
+                    "[播放] NowPlaying 更新：title={title} artist={artist} album={album} artwork_bytes={}",
+                    artwork.map(|bytes| bytes.len()).unwrap_or(0),
+                );
+                *last = Some(log_key);
+            }
+        }
         let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
         let mut keys: Vec<Retained<NSString>> = Vec::new();
         let mut values: Vec<Retained<AnyObject>> = Vec::new();
