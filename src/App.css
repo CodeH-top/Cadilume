@@ -528,8 +528,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .duration-cell { width: 100%; min-width: 0; display: grid; place-items: center; padding: 0; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
 .duration-cell .duration-label { display: inline-grid; place-items: center; }
 .track-remove-button { width: 28px; height: 28px; display: none; grid-area: 1 / 1; place-items: center; border: 0; border-radius: 6px; padding: 0; background: transparent; color: var(--danger); transition: color 140ms ease, background 140ms ease, box-shadow 140ms ease; }
-.track-data-row:hover .track-remove-button, .track-remove-button:focus-visible { display: grid; }
-.track-data-row:hover .duration-label { display: none; }
+.track-data-row.has-remove:hover .track-remove-button, .track-remove-button:focus-visible { display: grid; }
+.track-data-row.has-remove:hover .duration-label { display: none; }
 .track-remove-button:hover, .track-remove-button:focus-visible { background: color-mix(in srgb, var(--danger) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 34%, transparent); }
 .popconfirm { position: fixed; z-index: 500; width: max-content; min-width: 232px; max-width: min(340px, calc(100vw - 16px)); display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 14px rgba(0, 0, 0, 0.10); }
 .popconfirm::before { content: ""; position: absolute; left: 50%; bottom: -5px; width: 9px; height: 9px; border-right: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); background: var(--panel); transform: translateX(-50%) rotate(45deg); }

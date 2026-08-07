@@ -2937,7 +2937,7 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
         </div>
         {tracks.map((track, index) => (
           <div
-            className="track-row track-data-row"
+            className={`track-row track-data-row ${onRemoveTrack ? "has-remove" : ""}`.trim()}
             role="row"
             aria-rowindex={index + 2}
             key={`${track.ratingKey}-${index}`}
@@ -2960,7 +2960,6 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
                   type="button"
                   aria-label={`从歌单移除《${track.title}》`}
                   data-tooltip="从歌单移除"
-                  title="从歌单移除"
                   onClick={(event) => {
                     removeAnchorRef.current = event.currentTarget;
                     setPendingRemove(track);
