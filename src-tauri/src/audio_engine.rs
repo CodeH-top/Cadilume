@@ -414,7 +414,7 @@ impl NativeAudioEngine {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let position = player.get_pos().as_secs_f64();
                 let duration_value = duration.lock().map(|guard| *guard).unwrap_or(None);
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
                     let playing = !player.is_paused() && !player.empty();
                     let meta = metadata.lock().map(|guard| guard.clone()).unwrap_or(None);

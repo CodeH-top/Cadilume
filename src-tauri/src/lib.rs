@@ -1,5 +1,5 @@
 mod audio_engine;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod now_playing;
 mod plex;
 mod stream_proxy;
@@ -28,6 +28,8 @@ pub fn run() {
             fs::create_dir_all(&native_cache)?;
             app.manage(NativeAudioEngineSlot::new(native_cache));
             #[cfg(target_os = "macos")]
+            now_playing::install(app.handle().clone());
+            #[cfg(target_os = "windows")]
             now_playing::install(app.handle().clone());
             app.manage(StreamProxy::start(app.handle().clone())?);
             app.manage(window::QuitCoordinator::default());
