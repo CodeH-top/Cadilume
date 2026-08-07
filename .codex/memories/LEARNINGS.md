@@ -61,6 +61,16 @@
 - macOS 上 `cargo check --target x86_64-pc-windows-msvc` 会被 aws-lc-sys 的
   C 构建挡住（缺 windows.h/SDK），不是 Rust 代码问题；Windows 侧验证必须在
   Windows 机器上完成，验收清单已写入升级计划文档。
+- Windows 真实编译已打通（dev 分支后续提交）：`cargo-xwin 0.22` 已安装且
+  `~/.xwin` 有 CRT，`cargo xwin build --target x86_64-pc-windows-msvc` 可完整
+  编译链接出 `Cadilume.exe`（此前记录“必须 Windows 机器”只对完整 Tauri 打包
+  成立，纯 Rust 构建可用 xwin 提前验证）。
+- 踩坑：`block2` 必须放 `[target.'cfg(target_os = "macos")'.dependencies]`，
+  放全平台依赖会在 Windows 目标拉入 objc2 编译失败；windows crate 0.58 的
+  SMTC API 是 PascalCase（`GetForCurrentView`/`SetIsEnabled`/`DisplayUpdater`/
+  `ButtonPressed`），播放状态与时间线在 `SystemMediaTransportControls` 本体
+  （`SetPlaybackStatus` + `UpdateTimelineProperties`），DisplayUpdater 只管
+  类型/属性/Update；`args.Button()` 返回 Result，需先 unwrap。
 
 ## 2026-08-07 — 开发态“来回弹窗抢焦点”根因与修复（dev 0cf767a）
 

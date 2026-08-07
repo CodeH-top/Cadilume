@@ -138,11 +138,12 @@ mod windows {
     use std::sync::{Mutex, OnceLock};
 
     use tauri::{AppHandle, Emitter};
-    use windows::core::{HSTRING, Result};
+    use windows::core::HSTRING;
     use windows::Foundation::{TimeSpan, TypedEventHandler};
     use windows::Media::{
         MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls,
-        SystemMediaTransportControlsButton,
+        SystemMediaTransportControlsButton, SystemMediaTransportControlsButtonPressedEventArgs,
+        SystemMediaTransportControlsTimelineProperties,
     };
 
     static CONTROLS: OnceLock<SystemMediaTransportControls> = OnceLock::new();
@@ -177,19 +178,24 @@ mod windows {
             .get_or_init(|| Mutex::new(None))
             .lock()
             .unwrap() = Some(app);
-        let Ok(controls) = SystemMediaTransportControls::get_for_current_view() else {
+        let Ok(controls) = SystemMediaTransportControls::GetForCurrentView() else {
             return;
         };
-        let _ = controls.set_is_play_enabled(true);
-        let _ = controls.set_is_pause_enabled(true);
-        let _ = controls.set_is_next_enabled(true);
-        let _ = controls.set_is_previous_enabled(true);
-        let _ = controls.set_is_enabled(true);
+        let _ = controls.SetIsPlayEnabled(true);
+        let _ = controls.SetIsPauseEnabled(true);
+        let _ = controls.SetIsNextEnabled(true);
+        let _ = controls.SetIsPreviousEnabled(true);
+        let _ = controls.SetIsEnabled(true);
         let _ = CONTROLS.set(controls.clone());
 
-        let handler = TypedEventHandler::new(move |_sender, args| {
+        let handler = TypedEventHandler::<
+            SystemMediaTransportControls,
+            SystemMediaTransportControlsButtonPressedEventArgs,
+        >::new(move |_sender, args| {
             if let Some(args) = args {
-                let button = args.button();
+                let Ok(button) = args.Button() else {
+                    return Ok(());
+                };
                 match button {
                     SystemMediaTransportControlsButton::Play => emit_remote("play", None),
                     SystemMediaTransportControlsButton::Pause => emit_remote("pause", None),
@@ -200,7 +206,7 @@ mod windows {
             }
             Ok(())
         });
-        let _ = controls.button_pressed(&handler);
+        let _ = controls.ButtonPressed(&handler);
     }
 
     pub fn update_metadata(
@@ -214,28 +220,39 @@ mod windows {
         let Some(controls) = CONTROLS.get() else {
             return;
         };
-        let updater = controls.display_updater();
-        let _ = updater.set_type(MediaPlaybackType::Music);
-        let music = updater.music_properties();
+        let Ok(updater) = controls.DisplayUpdater() else {
+            return;
+        };
+        let _ = updater.SetType(MediaPlaybackType::Music);
+        let Ok(music) = updater.MusicProperties() else {
+            return;
+        };
         if !title.is_empty() {
-            let _ = music.set_title(&HSTRING::from(title));
+            let _ = music.SetTitle(&HSTRING::from(title));
         }
         if !artist.is_empty() {
-            let _ = music.set_artist(&HSTRING::from(artist));
+            let _ = music.SetArtist(&HSTRING::from(artist));
         }
         if !album.is_empty() {
-            let _ = music.set_album_title(&HSTRING::from(album));
+            let _ = music.SetAlbumTitle(&HSTRING::from(album));
         }
-        let _ = updater.set_playback_status(if playing {
+        let _ = controls.SetPlaybackStatus(if playing {
             MediaPlaybackStatus::Playing
         } else {
             MediaPlaybackStatus::Paused
         });
+        let Ok(timeline) = SystemMediaTransportControlsTimelineProperties::new() else {
+            return;
+        };
+        let _ = timeline.SetStartTime(seconds_to_timespan(0.0));
+        let _ = timeline.SetMinSeekTime(seconds_to_timespan(0.0));
         if let Some(duration) = duration_seconds {
-            let _ = updater.set_duration(seconds_to_timespan(duration));
+            let _ = timeline.SetEndTime(seconds_to_timespan(duration));
+            let _ = timeline.SetMaxSeekTime(seconds_to_timespan(duration));
         }
-        let _ = updater.set_position(seconds_to_timespan(position_seconds));
-        let _ = updater.update();
+        let _ = timeline.SetPosition(seconds_to_timespan(position_seconds));
+        let _ = controls.UpdateTimelineProperties(&timeline);
+        let _ = updater.Update();
     }
 }
 

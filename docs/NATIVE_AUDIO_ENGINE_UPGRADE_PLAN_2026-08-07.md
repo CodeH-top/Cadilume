@@ -36,7 +36,9 @@
   连续快速加载/切换两轮共 20 次，第二轮穿插 seek/暂停/恢复，全部无失败，
   覆盖历史上 WebView 高频切歌 error4/卡顿场景。
 - Phase 5 ✅ 完成：macOS Now Playing/Remote Command Center + Windows SMTC
-  （Windows 代码已跨 target 类型检查，完整构建与实机验证待 Windows 环境）；
+  （Windows 目标已用 `cargo xwin build --target x86_64-pc-windows-msvc`
+  真实编译并链接出 `Cadilume.exe`，期间修复 block2 未按 macOS 目标隔离、
+  windows 0.58 PascalCase API 等编译问题；运行时交互验收待 Windows 实机）；
   输出设备选择已补完——cpal 枚举设备、`native_audio_set_output_device` 重建
   播放器并从原进度恢复（缓存命中优先，否则重新渐进下载），前端
   `setOutputSinkId` 与设备列表走原生通道，旧事件线程干净退出。
@@ -44,7 +46,7 @@
   删除 DualAudioPool/预缓冲/媒体错误回退等约 1400 行及对应单测）。
 
 剩余事项：真实 PMS 听感回归（用户实听：主观无间隙、歌词对时与 UI 层高频操作）、
-Windows 实机 SMTC 验收、Windows 隐藏窗口后台播放验证。
+Windows 实机运行时验收（SMTC 交互、隐藏窗口后台播放；编译与链接已通过）。
 
 ### Windows 实机验收清单（待 Windows 环境执行）
 
