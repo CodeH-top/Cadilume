@@ -237,6 +237,7 @@ async fn download_progressive(
     if !response.status().is_success() {
         return Err(format!("下载返回 HTTP {}", response.status()));
     }
+    let expected_total = response.content_length();
     let mut file = std::fs::File::create(part_path).map_err(|e| format!("创建缓存文件失败: {e}"))?;
     let mut stream = response.bytes_stream();
     let mut total = 0u64;
@@ -246,6 +247,16 @@ async fn download_progressive(
         total += chunk.len() as u64;
         progress.downloaded.store(total, Ordering::SeqCst);
         progress.wake();
+    }
+    if let Some(expected) = expected_total {
+        if total != expected {
+            progress.failed.store(true, Ordering::SeqCst);
+            progress.wake();
+            let _ = std::fs::remove_file(part_path);
+            return Err(format!(
+                "下载不完整：期望 {expected} 字节，实际 {total} 字节"
+            ));
+        }
     }
     file.flush().map_err(|e| format!("缓存刷新失败: {e}"))?;
     progress.finished.store(true, Ordering::SeqCst);
@@ -1524,5 +1535,329 @@ mod tests {
         engine.player().clear();
         let _ = std::fs::remove_file(&wav_a);
         let _ = std::fs::remove_file(&wav_b);
+    }
+
+    #[tokio::test]
+    async fn gapless_queue_next_handoff_mp3_with_encoder_padding() {
+        let mp3_a = PathBuf::from("/tmp/cadilume-gapless-a.mp3");
+        let mp3_b = PathBuf::from("/tmp/cadilume-gapless-b.mp3");
+        if !mp3_a.exists() || !mp3_b.exists() {
+            eprintln!("跳过：/tmp/cadilume-gapless-*.mp3 不存在");
+            return;
+        }
+        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-gapless-mp3");
+        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
+        engine.player().set_volume(0.0);
+        engine.load_and_play(mp3_a.to_str().unwrap()).unwrap();
+        {
+            let mut queue = engine.queue.lock().unwrap();
+            queue.tracks = vec![queue_track("a"), queue_track("b")];
+            queue.current_index = 0;
+            queue.repeat = NativeRepeatMode::All;
+            queue.shuffle = false;
+        }
+        let downloads = cache_root.join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::copy(&mp3_b, downloads.join("gapless-b.mp3.audio")).unwrap();
+        engine
+            .queue_next_source(1, Some("gapless-b.mp3".into()))
+            .unwrap();
+
+        // MP3 带编码 padding（约 2 秒曲目）：等 A 结束、B 的握手标记翻转。
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let started = loop {
+            let started = engine
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|queued| queued.started.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            if started || std::time::Instant::now() >= deadline {
+                break started;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert!(started, "MP3 A 结束后 B 的握手标记应翻转");
+        let queued = engine.consume_started_handoff().expect("应能消费 MP3 预排交接");
+        assert_eq!(queued.index, 1);
+        assert_eq!(engine.queue.lock().unwrap().current_index, 1);
+        assert!(!engine.player().empty(), "MP3 B 应继续播放");
+        engine.player().clear();
+    }
+
+    /// 真实 PMS 端到端回归（默认忽略，显式运行：
+    /// `cargo test -- --ignored real_pms_engine_regression --nocapture`）。
+    /// 使用开发态明文 token，从真实资料库取两首小曲目，静音走完整链路：
+    /// 真实下载 → 磁盘缓存 → 渐进播放 → 预排下一首 → 无缝交接 → seek → 暂停/恢复。
+    #[tokio::test]
+    #[ignore = "需要真实 PMS 与开发 token"]
+    async fn real_pms_engine_regression() {
+        let Some(home) = std::env::var("HOME").ok() else {
+            eprintln!("跳过：无 HOME");
+            return;
+        };
+        let token_path = PathBuf::from(home).join(".cadilume-dev-token");
+        let Ok(raw_token) = std::fs::read_to_string(&token_path) else {
+            eprintln!("跳过：{} 不存在", token_path.display());
+            return;
+        };
+        let token = raw_token.trim().to_string();
+        if token.is_empty() {
+            eprintln!("跳过：开发 token 为空");
+            return;
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("构建 HTTP 客户端失败");
+        fn plex_headers(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+            request
+                .header("X-Plex-Token", token)
+                .header("X-Plex-Client-Identifier", "cadilume-pms-regression-test")
+                .header("X-Plex-Product", "Cadilume")
+                .header("X-Plex-Version", env!("CARGO_PKG_VERSION"))
+                .header("X-Plex-Platform", std::env::consts::OS)
+                .header("X-Plex-Device-Name", "Cadilume 回归测试")
+                .header("X-Plex-Device", "Mac")
+                .header(reqwest::header::ACCEPT, "application/json")
+        }
+
+        let resources: serde_json::Value = plex_headers(
+            client.get("https://plex.tv/api/v2/resources"),
+            &token,
+        )
+            .query(&[("includeHttps", "1"), ("includeRelay", "1"), ("includeIPv6", "1")])
+            .send()
+            .await
+            .expect("获取 Plex 资源失败")
+            .json()
+            .await
+            .expect("解析 Plex 资源失败");
+        let mut server = None;
+        for resource in resources.as_array().into_iter().flatten() {
+            let provides = resource["provides"].as_str().unwrap_or("");
+            if !provides.split(',').any(|item| item == "server") {
+                continue;
+            }
+            let Some(access_token) = resource["accessToken"].as_str() else {
+                continue;
+            };
+            // 与应用一致：逐个探测连接，选第一个能确认服务器身份的可用项。
+            let mut reachable = None;
+            for connection in resource["connections"].as_array().into_iter().flatten() {
+                let Some(uri) = connection["uri"].as_str() else {
+                    continue;
+                };
+                let identity = plex_headers(
+                    client.get(format!("{uri}/identity")),
+                    access_token,
+                )
+                .send()
+                .await
+                .map(|response| response.status().is_success())
+                .unwrap_or(false);
+                if identity {
+                    reachable = Some(uri.to_string());
+                    break;
+                }
+            }
+            if let Some(uri) = reachable {
+                server = Some((
+                    resource["clientIdentifier"].as_str().unwrap_or("").to_string(),
+                    uri,
+                    access_token.to_string(),
+                ));
+                break;
+            }
+        }
+        let Some((_server_id, server_uri, server_token)) = server else {
+            eprintln!("跳过：没有可用的 Plex 服务器");
+            return;
+        };
+
+        let sections: serde_json::Value = plex_headers(
+            client.get(format!("{server_uri}/library/sections")),
+            &server_token,
+        )
+            .send()
+            .await
+            .expect("读取媒体库失败")
+            .json()
+            .await
+            .expect("解析媒体库失败");
+        let Some(section_key) = sections["MediaContainer"]["Directory"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|directory| directory["type"].as_str() == Some("artist"))
+            .and_then(|directory| directory["key"].as_str())
+            .map(str::to_string)
+        else {
+            eprintln!("跳过：没有音乐媒体库");
+            return;
+        };
+
+        let tracks: serde_json::Value = plex_headers(
+            client.get(format!("{server_uri}/library/sections/{section_key}/all")),
+            &server_token,
+        )
+            .query(&[("type", "10"), ("limit", "40")])
+            .send()
+            .await
+            .expect("读取曲目失败")
+            .json()
+            .await
+            .expect("解析曲目失败");
+        let mut candidates: Vec<(u64, u64, String, String, String)> =
+            tracks["MediaContainer"]["Metadata"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|track| {
+                let rating_key = track.get("ratingKey")?.as_str()?.to_string();
+                let title = track.get("title").and_then(|value| value.as_str()).unwrap_or("").to_string();
+                let duration_ms = track.get("duration").and_then(|value| value.as_u64()).unwrap_or(u64::MAX);
+                let part = track.get("Media")?.as_array()?.first()?;
+                let part = part.get("Part")?.as_array()?.first()?;
+                let part_key = part.get("key")?.as_str()?.to_string();
+                let size = part.get("size").and_then(|value| value.as_u64()).unwrap_or(u64::MAX);
+                let short_enough = (15_000..=240_000).contains(&duration_ms);
+                (short_enough && (500_000..=30_000_000).contains(&size))
+                    .then_some((duration_ms, size, rating_key, title, part_key))
+            })
+            .collect();
+        candidates.sort_by_key(|candidate| (candidate.0, candidate.1));
+        if candidates.len() < 2 {
+            eprintln!("跳过：可用曲目不足两首");
+            return;
+        }
+
+        let track_a = &candidates[0];
+        let track_b = &candidates[1];
+        let stream_url = |part_key: &str| format!("{server_uri}{part_key}?X-Plex-Token={server_token}");
+        let cache_root = std::env::temp_dir().join(format!(
+            "cadilume-pms-regression-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let downloads_dir = cache_root.join("downloads");
+        std::fs::create_dir_all(&downloads_dir).expect("创建回归缓存目录失败");
+        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
+        engine.player().set_volume(0.0);
+        // 先串行预缓存 B（引擎每次新建下载客户端、单条活跃流），
+        // 避免真实服务器（尤其免费/共享账号）的单流限制打断并发下载。
+        engine
+            .precache(&stream_url(&track_b.4), Some(track_b.2.clone()))
+            .await
+            .expect("真实 PMS 曲目 B 应完整预缓存");
+        engine
+            .load_cached_and_play(
+                &stream_url(&track_a.4),
+                Some(track_a.2.clone()),
+                Some(NowPlayingMetadata {
+                    title: Some(track_a.3.clone()),
+                    artist: None,
+                    album: None,
+                }),
+            )
+            .await
+            .expect("真实 PMS 曲目 A 应能载入并开始播放");
+        {
+            let mut queue = engine.queue.lock().unwrap();
+            queue.tracks = vec![
+                QueueTrack {
+                    rating_key: track_a.2.clone(),
+                    title: track_a.3.clone(),
+                    artist: String::new(),
+                    album: String::new(),
+                },
+                QueueTrack {
+                    rating_key: track_b.2.clone(),
+                    title: track_b.3.clone(),
+                    artist: String::new(),
+                    album: String::new(),
+                },
+            ];
+            queue.current_index = 0;
+            queue.repeat = NativeRepeatMode::All;
+            queue.shuffle = false;
+        }
+        engine
+            .queue_next_source(1, Some(track_b.2.clone()))
+            .expect("真实 PMS 曲目 B 应能预排");
+
+        // A 完整落盘后 seek 到结尾附近，让真实曲目在几秒内自然结束。
+        let a_final = downloads_dir.join(format!("{}.audio", track_a.2));
+        let download_deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !a_final.exists() && std::time::Instant::now() < download_deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(a_final.exists(), "真实 PMS 曲目 A 应完整落盘");
+        let a_duration = engine
+            .duration_seconds
+            .lock()
+            .unwrap()
+            .unwrap_or(0.0);
+        assert!(a_duration > 10.0, "真实 PMS 曲目 A 时长应有效");
+        engine
+            .player()
+            .try_seek(Duration::from_secs_f64((a_duration - 3.0).max(1.0)))
+            .expect("真实 PMS 曲目 A 接近结尾 seek 应成功");
+
+        // 等 A 结束、B 无缝交接（seek 后最坏等 30 秒）。
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let started = loop {
+            let started = engine
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|queued| queued.started.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            if started || std::time::Instant::now() >= deadline {
+                break started;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        assert!(started, "真实 PMS 曲目 A 结束后 B 应无缝交接");
+        let queued = engine
+            .consume_started_handoff()
+            .expect("应能消费真实 PMS 预排交接");
+        assert_eq!(queued.index, 1);
+        assert_eq!(engine.queue.lock().unwrap().current_index, 1);
+        assert!(!engine.player().empty(), "真实 PMS 曲目 B 应继续播放");
+
+        // B 上做 seek 与暂停/恢复验证。
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        engine
+            .player()
+            .try_seek(Duration::from_secs_f64(1.0))
+            .expect("真实 PMS 曲目 B seek 应成功");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            engine.player().get_pos().as_secs_f64() >= 0.8,
+            "seek 后进度应接近 1 秒"
+        );
+        engine.player().pause();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(engine.player().is_paused(), "真实 PMS 暂停应生效");
+        engine.player().play();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!engine.player().is_paused(), "真实 PMS 恢复应生效");
+
+        // 两首曲目都应落入缓存。
+        let downloads = cache_root.join("downloads");
+        let cache_files = std::fs::read_dir(&downloads)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".audio"))
+            .count();
+        assert!(cache_files >= 2, "真实 PMS 回归后缓存应有至少两首曲目");
+        eprintln!("真实 PMS 引擎回归通过：下载/缓存/渐进播放/预排/无缝交接/seek/暂停恢复均正常");
+
+        engine.player().clear();
+        let _ = std::fs::remove_dir_all(&cache_root);
     }
 }

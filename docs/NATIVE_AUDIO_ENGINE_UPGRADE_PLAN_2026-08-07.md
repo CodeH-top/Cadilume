@@ -26,13 +26,18 @@
   下一首解码器直接挂入 rodio 顺序队列（`HandoffMarker` 在样本级交接时翻转），
   当前曲目结束即无间隙 PCM 衔接；MP3 编码延迟由 rodio 队列的帧对齐处理，
   FLAC 天然无缝。重复一首/队列不一致时自动降级为普通顺序播放。
+- 真实 PMS 自动化回归 ✅（`cargo test -- --ignored real_pms_engine_regression`）：
+  用开发态明文 token 从真实资料库取两首 FLAC，串行下载 → 磁盘缓存 → 渐进播放 →
+  预排下一首 → 自然结束无缝交接 → seek → 暂停/恢复，已在本机通过。
+  同时给 `download_progressive` 增加 Content-Length 完整性校验：静默截断的下载
+  不再被当作完整缓存提交（修复缓存命中半截文件的风险）。
 - Phase 5 ✅ 完成：macOS Now Playing/Remote Command Center + Windows SMTC
   （Windows 代码已跨 target 类型检查，完整构建与实机验证待 Windows 环境）。
 - Phase 6 ✅ 完成：WebView/HTMLAudio 播放路径全部移除（usePlayer native-only，
   删除 DualAudioPool/预缓冲/媒体错误回退等约 1400 行及对应单测）。
 
-剩余事项：Windows 实机 SMTC 验收、真实 PMS 听感回归（高频切歌 20+ 次、歌词对时、
-seek/暂停恢复）、Windows 隐藏窗口后台播放验证。
+剩余事项：真实 PMS 听感回归（用户实听：高频切歌 20+ 次、歌词对时、主观无间隙）、
+Windows 实机 SMTC 验收、Windows 隐藏窗口后台播放验证。
 
 ## 2. 现状盘点（dev 分支起点）
 
