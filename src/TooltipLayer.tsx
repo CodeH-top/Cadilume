@@ -67,7 +67,7 @@ export function TooltipLayer() {
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
-      const target = (event.target as Element | null)?.closest<HTMLElement>("[data-tooltip]");
+      const target = (event.target as Element | null)?.closest<HTMLElement>("[data-tooltip]") ?? null;
       if (target === currentTargetRef.current) return;
       currentTargetRef.current = target;
       if (!target) {
@@ -77,7 +77,7 @@ export function TooltipLayer() {
       show(target);
     };
     const onFocusIn = (event: FocusEvent) => {
-      const target = (event.target as Element | null)?.closest<HTMLElement>("[data-tooltip]");
+      const target = (event.target as Element | null)?.closest<HTMLElement>("[data-tooltip]") ?? null;
       if (target && target !== currentTargetRef.current) {
         currentTargetRef.current = target;
         show(target);
