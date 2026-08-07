@@ -5,6 +5,7 @@ interface TooltipState {
   left: number;
   top: number;
   visible: boolean;
+  request: number;
 }
 
 const TOOLTIP_GAP = 8;
@@ -17,10 +18,11 @@ const TOOLTIP_MARGIN = 8;
  * never clipped by scroll containers or window edges.
  */
 export function TooltipLayer() {
-  const [tip, setTip] = useState<TooltipState>({ text: "", left: 0, top: 0, visible: false });
+  const [tip, setTip] = useState<TooltipState>({ text: "", left: 0, top: 0, visible: false, request: 0 });
   const bubbleRef = useRef<HTMLDivElement>(null);
   const pendingTargetRef = useRef<HTMLElement | null>(null);
   const currentTargetRef = useRef<HTMLElement | null>(null);
+  const requestRef = useRef(0);
   const showTimerRef = useRef<number | undefined>(undefined);
   const hide = useCallback(() => {
     window.clearTimeout(showTimerRef.current);
@@ -39,7 +41,7 @@ export function TooltipLayer() {
     showTimerRef.current = window.setTimeout(() => {
       if (!document.contains(target)) return;
       pendingTargetRef.current = target;
-      setTip({ text, left: 0, top: 0, visible: false });
+      setTip({ text, left: 0, top: 0, visible: false, request: ++requestRef.current });
     }, TOOLTIP_SHOW_DELAY_MS);
   }, [hide]);
 
@@ -60,8 +62,8 @@ export function TooltipLayer() {
       TOOLTIP_MARGIN,
       Math.min(window.innerWidth - width - TOOLTIP_MARGIN, rect.left + rect.width / 2 - width / 2),
     );
-    setTip({ text: tip.text, left, top, visible: true });
-  }, [tip.text, tip.visible]);
+    setTip({ text: tip.text, left, top, visible: true, request: tip.request });
+  }, [tip.request, tip.text, tip.visible]);
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
