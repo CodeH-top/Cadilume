@@ -375,6 +375,7 @@ mod tests {
         let engine = NativeAudioEngine::new(std::env::temp_dir().join("cadilume-rodio-cache")).unwrap();
 
         engine.load_and_play(wav.to_str().unwrap()).unwrap();
+        engine.player().set_volume(0.0);
         tokio::time::sleep(Duration::from_millis(600)).await;
         let player = engine.player();
         assert!(!player.empty() && !player.is_paused(), "播放应处于进行中");
@@ -405,6 +406,7 @@ mod tests {
         }
         let engine = NativeAudioEngine::new(std::env::temp_dir().join("cadilume-rodio-cache-flac")).unwrap();
         engine.load_and_play(flac.to_str().unwrap()).unwrap();
+        engine.player().set_volume(0.0);
         tokio::time::sleep(Duration::from_millis(2_000)).await;
         let player = engine.player();
         assert!(!player.empty() && !player.is_paused(), "FLAC 应处于播放中");
@@ -441,6 +443,7 @@ mod tests {
         let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-http");
         let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
         engine.load_cached_and_play(&url, Some("sample-cache-test".into())).await.unwrap();
+        engine.player().set_volume(0.0);
         tokio::time::sleep(Duration::from_millis(1_200)).await;
         let position = engine.player().get_pos().as_secs_f64();
         assert!(position > 0.2, "缓存下载后播放进度应前进，实际 {position}");
