@@ -367,6 +367,9 @@ pub struct QueueState {
     repeat: NativeRepeatMode,
     shuffle: bool,
     bag: Vec<usize>,
+    /// Shuffle playback history (origins), so Previous works even after the
+    /// WebView re-syncs the queue on every load.
+    history: Vec<usize>,
 }
 
 impl QueueState {
@@ -379,6 +382,12 @@ impl QueueState {
             return Some(current);
         }
         if self.shuffle {
+            if self.history.last() != Some(&current) {
+                self.history.push(current);
+            }
+            if self.history.len() > self.tracks.len() {
+                self.history.remove(0);
+            }
             let mut available: Vec<usize> = (0..self.tracks.len())
                 .filter(|index| *index != current)
                 .collect();
@@ -413,7 +422,7 @@ impl QueueState {
         }
         let current = self.current_index.max(0) as usize;
         if self.shuffle {
-            let mut used: Vec<usize> = self.bag.iter().rev().copied().collect();
+            let mut used: Vec<usize> = self.history.iter().rev().copied().collect();
             if let Some(found) = used.iter().position(|index| *index == current) {
                 used.remove(found);
             }
@@ -470,12 +479,45 @@ impl QueueState {
         if index >= self.tracks.len() {
             return;
         }
+        let origin = self.current_index.max(0) as usize;
         self.current_index = index as i64;
         if self.shuffle && self.tracks.len() > 1 {
+            if self.history.last() != Some(&origin) {
+                self.history.push(origin);
+            }
+            if self.history.len() > self.tracks.len() {
+                self.history.remove(0);
+            }
             self.bag.push(index);
             if self.bag.len() > self.tracks.len() {
                 self.bag.remove(0);
             }
+        }
+    }
+
+    /// Re-sync the queue snapshot from the WebView. The shuffle history bag is
+    /// only reset when the track list actually changed; keeping it across
+    /// ordinary load-time resyncs lets Previous work in shuffle mode.
+    pub fn resync(
+        &mut self,
+        tracks: Vec<QueueTrack>,
+        current_index: i64,
+        repeat: NativeRepeatMode,
+        shuffle: bool,
+    ) {
+        let tracks_changed = self.tracks.len() != tracks.len()
+            || self
+                .tracks
+                .iter()
+                .zip(&tracks)
+                .any(|(current, next)| current.rating_key != next.rating_key);
+        self.tracks = tracks;
+        self.current_index = current_index;
+        self.repeat = repeat;
+        self.shuffle = shuffle;
+        if tracks_changed {
+            self.bag.clear();
+            self.history.clear();
         }
     }
 }
@@ -758,6 +800,13 @@ impl NativeAudioEngine {
 
     /// Load a local media file and start playing it.
     pub fn load_and_play(&self, path: &str) -> Result<usize, String> {
+        // 切换即停旧歌：先清空播放器并抑制误判 ended，再打开/解码新文件。
+        self.loaded.store(false, Ordering::SeqCst);
+        self.ended_sent.store(true, Ordering::SeqCst);
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = None;
+        }
+        self.player.clear();
         let file = std::fs::File::open(path).map_err(|e| format!("打开媒体文件失败: {e}"))?;
         let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
         // 必须提供 byte_len（同时开启 seekable）：rodio 默认解码器不能向后
@@ -789,10 +838,6 @@ impl NativeAudioEngine {
             }
         }
         *self.duration_seconds.lock().map_err(|_| "时长状态锁失败".to_string())? = total;
-        self.player.clear();
-        if let Ok(mut pending) = self.pending.lock() {
-            *pending = None;
-        }
         self.player.append(decoder);
         self.player.play();
         self.loaded.store(true, Ordering::SeqCst);
@@ -823,6 +868,14 @@ impl NativeAudioEngine {
                 self.start_artwork_fetch(url);
             }
         }
+        // 切换即停旧歌：立即清空播放器并抑制误判 ended，新歌下载/解码期间
+        // 旧歌不再继续出声。
+        self.loaded.store(false, Ordering::SeqCst);
+        self.ended_sent.store(true, Ordering::SeqCst);
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = None;
+        }
+        self.player.clear();
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return self.load_and_play(source);
         }
@@ -908,10 +961,6 @@ impl NativeAudioEngine {
             });
         }
         *self.duration_seconds.lock().map_err(|_| "时长状态锁失败".to_string())? = total;
-        self.player.clear();
-        if let Ok(mut pending) = self.pending.lock() {
-            *pending = None;
-        }
         self.player.append(decoder);
         self.player.play();
         self.loaded.store(true, Ordering::SeqCst);
@@ -1634,11 +1683,7 @@ pub fn native_queue_set(
         .queue
         .lock()
         .map_err(|_| "队列状态锁失败".to_string())?;
-    queue.tracks = tracks;
-    queue.current_index = current_index;
-    queue.repeat = repeat;
-    queue.shuffle = shuffle;
-    queue.bag.clear();
+    queue.resync(tracks, current_index, repeat, shuffle);
     Ok(())
 }
 
@@ -1694,6 +1739,7 @@ pub fn native_queue_set_shuffle(
         .map_err(|_| "队列状态锁失败".to_string())?;
     queue.shuffle = shuffle;
     queue.bag.clear();
+    queue.history.clear();
     Ok(())
 }
 
@@ -2055,6 +2101,7 @@ mod tests {
             repeat: NativeRepeatMode::All,
             shuffle: false,
             bag: vec![],
+            history: vec![],
         };
         assert_eq!(queue.peek_next_index(true), Some(1));
         assert_eq!(queue.next_index(true), Some(1));
@@ -2079,6 +2126,7 @@ mod tests {
             repeat: NativeRepeatMode::All,
             shuffle: true,
             bag: vec![2],
+            history: vec![],
         };
         let first = queue.peek_next_index(true).unwrap();
         let second = queue.peek_next_index(true).unwrap();
@@ -2090,6 +2138,62 @@ mod tests {
         queue.commit_index(first);
         assert_eq!(queue.current_index, first as i64);
         assert_eq!(queue.bag, vec![2, first], "提交后 bag 应记录实际播放的曲目");
+    }
+
+    #[test]
+    fn shuffle_previous_survives_queue_resync() {
+        let mut queue = QueueState {
+            tracks: vec![
+                queue_track("a"),
+                queue_track("b"),
+                queue_track("c"),
+                queue_track("d"),
+            ],
+            current_index: 0,
+            repeat: NativeRepeatMode::All,
+            shuffle: true,
+            bag: vec![],
+            history: vec![],
+        };
+        let next = queue.next_index(false).expect("随机下一首应存在");
+        queue.current_index = next as i64;
+        assert_eq!(
+            queue.previous_index(),
+            Some(0),
+            "切到下一首后应能回到上一首"
+        );
+        // 前端每次加载都会 nativeQueueSet 同一队列：bag 不能被清掉。
+        let tracks = queue.tracks.clone();
+        queue.resync(tracks, queue.current_index, NativeRepeatMode::All, true);
+        assert_eq!(
+            queue.previous_index(),
+            Some(0),
+            "队列重同步后上一首仍可用"
+        );
+        // 队列内容真正变化时才清空历史。
+        let mut changed = queue.tracks.clone();
+        changed[3].rating_key = "z".to_string();
+        queue.resync(changed, queue.current_index, NativeRepeatMode::All, true);
+        assert!(
+            queue.bag.is_empty() && queue.history.is_empty(),
+            "队列变化后应清空 shuffle 历史"
+        );
+        assert_eq!(queue.previous_index(), None, "历史清空后没有上一首");
+    }
+
+    #[test]
+    fn sequential_previous_wraps_with_repeat() {
+        let mut queue = QueueState {
+            tracks: vec![queue_track("a"), queue_track("b"), queue_track("c")],
+            current_index: 0,
+            repeat: NativeRepeatMode::All,
+            shuffle: false,
+            bag: vec![],
+            history: vec![],
+        };
+        assert_eq!(queue.previous_index(), Some(2), "repeat-all 首曲上一首应回绕");
+        queue.current_index = 1;
+        assert_eq!(queue.previous_index(), Some(0));
     }
 
     #[tokio::test]
