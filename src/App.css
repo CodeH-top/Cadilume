@@ -662,6 +662,16 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .player-action-tooltip-anchor:hover .player-action-tooltip, .player-action-tooltip-anchor:focus-within .player-action-tooltip { opacity: 1; visibility: visible; transform: translate(-50%, 0); }
 .volume-control { position: relative; width: 28px; display: grid; place-items: center; }
 .volume-control .icon-button { width: 28px; height: 28px; }
+.volume-control::before {
+  /* 透明 hover 桥：覆盖按钮与弹层之间的 9px 空隙，鼠标上移时 :hover 不断开 */
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  width: 48px;
+  height: 9px;
+  transform: translateX(-50%);
+}
 .volume-popover { position: absolute; left: 50%; bottom: calc(100% + 9px); width: 48px; height: 132px; display: grid; grid-template-rows: minmax(0, 1fr) 18px; justify-items: center; gap: 4px; border: 1px solid var(--border-strong); border-radius: 10px; padding: 10px 8px 8px; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 10px 30px rgba(0, 0, 0, 0.28); backdrop-filter: saturate(160%) blur(16px); opacity: 0; visibility: hidden; pointer-events: none; transform: translate(-50%, 6px) scale(0.98); transform-origin: bottom center; transition: opacity 160ms ease, visibility 160ms ease, transform 160ms ease; }
 .volume-control:hover .volume-popover, .volume-control:focus-within .volume-popover { opacity: 1; visibility: visible; pointer-events: auto; transform: translate(-50%, 0) scale(1); }
 .volume-popover .shared-volume-range-wrap { --shared-volume-range-length: 88px; position: relative; width: 18px; height: var(--shared-volume-range-length); align-self: center; }
