@@ -850,6 +850,9 @@ fn build_stream_client() -> Result<Client> {
     let mut builder = Client::builder()
         .connect_timeout(STREAM_CLIENT_TIMEOUTS.connect)
         .redirect(Policy::none())
+        // 远程 PMS 经反向代理时，复用 keep-alive 连接的大文件流会被截断
+        // （IncompleteBody）；每次请求新开连接与 curl 行为一致，最稳。
+        .pool_max_idle_per_host(0)
         .user_agent(format!("Cadilume/{}", env!("CARGO_PKG_VERSION")));
     if let Some(timeout) = STREAM_CLIENT_TIMEOUTS.total {
         builder = builder.timeout(timeout);

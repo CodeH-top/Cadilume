@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
+import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
@@ -794,11 +794,16 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       const url = await requestStreamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       playbackLog("info", `原生流地址已取得：index=${index} 质量=${quality}`);
+      // 真实曲目没有预置 imageUrl：用服务器相对路径向代理申请封面票据。
+      const artworkTicket = track.imageUrl
+        ?? (track.thumb
+          ? await artworkUrl(serverId, track.thumb, 512, 512).catch(() => undefined)
+          : undefined);
       await nativeAudioLoad(url, track.ratingKey, {
         title: track.title,
         artist: trackArtist(track),
         album: trackAlbum(track),
-        artworkUrl: track.imageUrl,
+        artworkUrl: artworkTicket,
       });
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       if (resumeSeconds > 0.5) {

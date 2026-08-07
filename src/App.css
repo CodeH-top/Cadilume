@@ -648,6 +648,7 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .play-button .play-icon { transform: translate(0.5px, -0.5px); }
 .play-button .pause-icon { transform: translate(-0.25px, -0.5px); }
 .play-button .playback-spinner { transform: translateY(-0.5px); }
+.play-button .playback-spinner, .now-playing-play-button .playback-spinner { animation: playback-spin 800ms linear infinite !important; }
 .progress-row { width: 100%; display: grid; grid-template-columns: 33px minmax(100px, 1fr) 33px; align-items: center; gap: 7px; color: var(--muted-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
 .player-bar input[type="range"] { --range-progress: 0%; width: 100%; height: 14px; margin: 0; appearance: none; background: transparent; cursor: pointer; }
 .player-bar input[type="range"]::-webkit-slider-runnable-track { height: 3px; border-radius: 3px; background: linear-gradient(90deg, var(--accent) 0 var(--range-progress), var(--range-track) var(--range-progress) 100%); }
@@ -930,6 +931,7 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .fatal-screen p { color: var(--muted); font-size: 13px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes playback-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes mini-vinyl-spin { to { transform: rotate(360deg); } }
 @keyframes global-notification-in { from { opacity: 0; transform: translateY(-8px) scale(0.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes global-notification-out { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(14px); } }
@@ -967,7 +969,7 @@ button.device-option:hover { border-color: var(--border-strong); background: var
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 1ms !important; transition-duration: 1ms !important; }
   .play-button { transition: none; }
   .mini-vinyl.is-playing { animation: none; }
-  .playback-spinner { animation: spin 900ms linear infinite !important; }
+  .playback-spinner { animation: playback-spin 800ms linear infinite !important; }
   .media-card strong, .media-card small, .artwork-large { transition: none; }
   .media-card:hover .artwork-large, .media-card:focus-visible .artwork-large { transform: none; }
   .route-page-scroll, .recommendation-play-indicator, .queue-panel, .lyrics-panel { animation: none; transition: none; }
