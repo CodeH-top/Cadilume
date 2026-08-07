@@ -183,6 +183,8 @@ interface MusicShellRuntime {
   playlistListError?: string;
   loadPlaylistList: (announce?: boolean) => Promise<void>;
   sourceRevision: number;
+  playlistMutationRevision: number;
+  bumpPlaylistMutation: () => void;
   routeAliveRef: RefObject<KeepAliveRef | null>;
   statusIconEnabled: boolean;
   statusIconPlatform?: BootstrapResponse["statusIconPlatform"];
@@ -481,6 +483,10 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const routeAliveRef = useKeepAliveRef();
   const [routeCacheEpoch, setRouteCacheEpoch] = useState(0);
   const [sourcesSyncing, setSourcesSyncing] = useState(false);
+  const [playlistMutationRevision, setPlaylistMutationRevision] = useState(0);
+  const bumpPlaylistMutation = useCallback(() => {
+    setPlaylistMutationRevision((revision) => revision + 1);
+  }, []);
   const [connectionAvailable, setConnectionAvailable] = useState(false);
   const [playbackSettingsRequest, setPlaybackSettingsRequest] = useState(0);
   const [playbackFailurePreview, setPlaybackFailurePreview] = useState<PlaybackFailure>();
@@ -693,7 +699,12 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     try {
       const result = await getPlaylists(serverId);
       if (playlistListRequestRef.current === requestId) {
-        setPlaylists(result);
+        const ordered = [...result].sort((left, right) => {
+          const leftTime = left.addedAt ?? left.updatedAt ?? 0;
+          const rightTime = right.addedAt ?? right.updatedAt ?? 0;
+          return rightTime - leftTime;
+        });
+        setPlaylists(ordered);
         if (announce) notify(result.length ? `歌单已刷新，共 ${result.length} 个。` : "歌单已刷新，当前没有可显示的音乐歌单。");
       }
     } catch (reason) {
@@ -1016,6 +1027,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     playlistListError,
     loadPlaylistList,
     sourceRevision,
+    playlistMutationRevision,
+    bumpPlaylistMutation,
     routeAliveRef,
     statusIconEnabled,
     statusIconPlatform: initialSession.statusIconPlatform,
@@ -1160,7 +1173,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           label={playlistSelection.label}
           onClose={() => setPlaylistSelection(undefined)}
           onPlaylistCreated={(playlist) => {
-            setPlaylists((current) => [...current.filter((item) => item.ratingKey !== playlist.ratingKey), playlist]);
+            setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
             void loadPlaylistList();
           }}
           onAdded={(playlist, result) => {
@@ -1168,6 +1181,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
             notify(result.requested === 1
               ? `已将${playlistSelection.label}添加到“${playlist.title}”。`
               : `已将 ${result.requested} 首歌曲添加到“${playlist.title}”。`);
+            bumpPlaylistMutation();
             void loadPlaylistList();
           }}
         />
@@ -1180,7 +1194,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           onClose={() => setPlaylistCreationOpen(false)}
           onCreated={(playlist) => {
             setPlaylistCreationOpen(false);
-            setPlaylists((current) => [...current.filter((item) => item.ratingKey !== playlist.ratingKey), playlist]);
+            setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
             notify(`已创建歌单“${playlist.title}”。`);
             void loadPlaylistList();
           }}
@@ -1219,7 +1233,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         }}
       />
 
-      {sourcesSyncing && <SourceSyncOverlay />}
       <GlobalNotificationQueue
         notices={notices}
         onDismiss={dismissNotification}
@@ -1613,6 +1626,7 @@ function RoutePage() {
       if (result.removed > 0) {
         setPlaylistItems((current) => current.filter((item) => item.playlistItemID !== playlistItemId));
         runtime.notify(`已从歌单移除《${track.title}》。`);
+        void runtime.loadPlaylistList();
       } else {
         runtime.notify("没有从歌单移除任何歌曲，请刷新后重试。");
       }
@@ -1724,7 +1738,7 @@ function RoutePage() {
     };
     void load();
     return () => { requestRef.current += 1; };
-  }, [onNavigate, playlistRetryRequest, query, route.detail, runtime.notify, runtime.refreshCacheStatus, runtime.sectionKey, runtime.serverId, runtime.sourceRevision, view]);
+  }, [onNavigate, playlistRetryRequest, query, route.detail, runtime.notify, runtime.playlistMutationRevision, runtime.refreshCacheStatus, runtime.sectionKey, runtime.serverId, runtime.sourceRevision, view]);
 
   const content = playlist ? (
     <PlaylistDetailView
@@ -3679,6 +3693,7 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
   const [createOpen, setCreateOpen] = useState(false);
   const [newPlaylistTitle, setNewPlaylistTitle] = useState("");
   const [createError, setCreateError] = useState<string>();
+  const [duplicateConfirm, setDuplicateConfirm] = useState<{ playlist: PlexPlaylist; count: number }>();
   const [remainingTracks, setRemainingTracks] = useState<PlexItem[]>(() => appendUniqueArtistTracks([], tracks));
   const dialogRef = useRef<HTMLElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -3767,7 +3782,7 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [busy, closeInlineCreate, createOpen, onClose]);
 
-  const add = async (playlist: PlexPlaylist) => {
+  const performAdd = async (playlist: PlexPlaylist) => {
     if (!remainingTracks.length) return;
     setBusyId(playlist.ratingKey);
     setError(undefined);
@@ -3789,6 +3804,27 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
     } catch (reason) {
       setError(playlistErrorMessage(reason));
       setBusyId(undefined);
+    }
+  };
+
+  const add = async (playlist: PlexPlaylist) => {
+    if (!remainingTracks.length) return;
+    setBusyId(playlist.ratingKey);
+    setError(undefined);
+    try {
+      const existing = await getPlaylistItems(serverId, playlist.ratingKey);
+      const existingKeys = new Set(existing.map((item) => item.ratingKey));
+      const duplicates = remainingTracks.filter((track) => existingKeys.has(track.ratingKey));
+      setBusyId(undefined);
+      if (duplicates.length) {
+        setDuplicateConfirm({ playlist, count: duplicates.length });
+        return;
+      }
+      await performAdd(playlist);
+    } catch {
+      // 读取歌单现有内容失败时不阻断添加，直接执行。
+      setBusyId(undefined);
+      await performAdd(playlist);
     }
   };
 
@@ -3814,7 +3850,7 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
     let playlist: PlexPlaylist;
     try {
       playlist = await createPlaylist(serverId, newPlaylistTitle, "", { seedRatingKey: seedTrack.ratingKey });
-      setPlaylists((current) => [...current.filter((item) => item.ratingKey !== playlist.ratingKey), playlist]);
+      setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
       onPlaylistCreated(playlist);
       setNewPlaylistTitle("");
       setCreateOpen(false);
@@ -3862,6 +3898,33 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
           </div>
           <IconButton label="关闭歌单选择" disabled={busy} onClick={onClose}><X size={18} /></IconButton>
         </header>
+        {duplicateConfirm && (
+          <div className="playlist-picker-duplicate" role="alert">
+            <span>“{duplicateConfirm.playlist.title}”已有 {duplicateConfirm.count} 首相同歌曲，仍要添加吗？</span>
+            <span className="playlist-picker-duplicate-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy}
+                onClick={() => setDuplicateConfirm(undefined)}
+              >
+                取消
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  const playlist = duplicateConfirm.playlist;
+                  setDuplicateConfirm(undefined);
+                  void performAdd(playlist);
+                }}
+              >
+                继续添加
+              </button>
+            </span>
+          </div>
+        )}
         <div className="playlist-picker-list" aria-busy={loading || undefined}>
           {createOpen && (
             <form className="playlist-picker-create-inline" onSubmit={(event) => void createAndAdd(event)}>
@@ -4175,17 +4238,6 @@ function Avatar({ account }: { account: PlexAccount }) {
 function IconButton({ label, tooltip, className = "", active = false, disabled = false, onClick, children }: { label: string; tooltip?: string | null; className?: string; active?: boolean; disabled?: boolean; onClick?: () => void; children: ReactNode }) {
   const tooltipText = tooltip === null ? undefined : tooltip ?? label;
   return <button type="button" className={`icon-button ${active ? "active" : ""} ${className}`.trim()} aria-label={label} data-tooltip={tooltipText} title={tooltipText} disabled={disabled} onClick={onClick}>{children}</button>;
-}
-
-function SourceSyncOverlay() {
-  return (
-    <div className="source-sync-overlay" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">
-      <div className="source-sync-overlay-panel">
-        <LoaderCircle className="spin" size={20} aria-hidden="true" />
-        <span>正在同步Plex资料...</span>
-      </div>
-    </div>
-  );
 }
 
 function PlaybackErrorAlert({ failure, trackTitle, onRetry, onOpenSettings, onClose }: {
