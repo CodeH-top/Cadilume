@@ -3,6 +3,7 @@ export const GLOBAL_NOTIFICATION_EXIT_MS = 220;
 export const GLOBAL_NOTIFICATION_REDUCED_MOTION_EXIT_MS = 120;
 export const GLOBAL_NOTIFICATION_STACK_THRESHOLD = 3;
 export const GLOBAL_NOTIFICATION_VISIBLE_STACK_LAYERS = 3;
+export const GLOBAL_NOTIFICATION_MAX_COUNT = 5;
 
 export type GlobalNotificationPhase = "entering" | "visible" | "leaving";
 export type GlobalNotificationLevel = "info" | "success" | "warning" | "error";

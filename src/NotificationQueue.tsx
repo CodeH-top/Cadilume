@@ -2,6 +2,7 @@ import { CircleCheck, CircleX, Info, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FocusEvent } from "react";
 import {
   GLOBAL_NOTIFICATION_EXIT_MS,
+  GLOBAL_NOTIFICATION_MAX_COUNT,
   GLOBAL_NOTIFICATION_REDUCED_MOTION_EXIT_MS,
   createGlobalNotification,
   isActiveGlobalNotification,
@@ -74,10 +75,17 @@ export function useGlobalNotificationQueue(): GlobalNotificationQueueController 
     if (!normalizedMessage) return;
     const order = ++noticeSequenceRef.current;
     const createdAt = Date.now();
-    setNotices((current) => [
-      ...current,
-      createGlobalNotification(`notice-${createdAt}-${order}`, normalizedMessage, level, createdAt, order),
-    ]);
+    setNotices((current) => {
+      const next = [
+        ...current,
+        createGlobalNotification(`notice-${createdAt}-${order}`, normalizedMessage, level, createdAt, order),
+      ];
+      const active = next.filter(isActiveGlobalNotification);
+      if (active.length <= GLOBAL_NOTIFICATION_MAX_COUNT) return next;
+      // 超过上限时直接关闭最旧的一条，保持队列最多 5 条。
+      const oldestId = active[0].id;
+      return next.filter((notice) => notice.id !== oldestId);
+    });
   }, []);
 
   const clear = useCallback(() => {
@@ -219,6 +227,13 @@ export function GlobalNotificationQueue({
     const updateHeight = () => {
       const nextHeight = Math.max(56, Math.ceil(item.getBoundingClientRect().height));
       setFrontHeight((current) => current === nextHeight ? current : nextHeight);
+      const card = item.querySelector<HTMLElement>(".global-notification-card");
+      if (card && listRef.current) {
+        listRef.current.style.setProperty(
+          "--global-notification-stack-width",
+          `${Math.ceil(card.getBoundingClientRect().width)}px`,
+        );
+      }
     };
     updateHeight();
     if (typeof ResizeObserver === "undefined") return;
