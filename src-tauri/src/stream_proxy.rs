@@ -867,59 +867,65 @@ fn build_upstream_urls(
 ) -> Result<Vec<Url>> {
     let base = validated_connection_base(&connection.uri)?;
     let effective_quality = effective_quality(&target.quality, connection);
-    if effective_quality == "original" {
+    let mut candidates = Vec::new();
+    // 自动源/原始质量：每条连接先试原始直连（Plex 的 directPlay），失败后再
+    // 在同一连接上降级转码。避免“本地直连不通、远程只试转码”导致整体失败。
+    if target.quality == "auto" || target.quality == "original" {
         let endpoint = base.join(&target.part_key)?;
         if !same_origin(&base, &endpoint) || !endpoint.path().starts_with("/library/parts/") {
             return Err(anyhow!("音频路径越过了 Plex 服务器边界"));
         }
-        return Ok(vec![endpoint]);
+        candidates.push(endpoint);
     }
 
-    let bitrate = effective_quality
-        .parse::<u16>()
-        .map_err(|_| anyhow!("无效的转码码率"))?
-        .clamp(64, 320)
-        .to_string();
-    [
-        // Plex Web's own music transcoder uses `/music/:/transcode/universal/start`
-        // for `protocol=http` (no extension is appended for http). Keep it first
-        // and retain the explicit `.mp3` form as a compatibility fallback.
-        "/music/:/transcode/universal/start",
-        "/music/:/transcode/universal/start.mp3",
-    ]
-    .into_iter()
-    .map(|path| {
-        let mut endpoint = base.join(path)?;
-        if !same_origin(&base, &endpoint) {
-            return Err(anyhow!("转码路径越过了 Plex 服务器边界"));
+    if effective_quality != "original" {
+        let bitrate = effective_quality
+            .parse::<u16>()
+            .map_err(|_| anyhow!("无效的转码码率"))?
+            .clamp(64, 320)
+            .to_string();
+        for path in [
+            // Plex Web's own music transcoder uses `/music/:/transcode/universal/start`
+            // for `protocol=http` (no extension is appended for http). Keep it first
+            // and retain the explicit `.mp3` form as a compatibility fallback.
+            "/music/:/transcode/universal/start",
+            "/music/:/transcode/universal/start.mp3",
+        ] {
+            let mut endpoint = base.join(path)?;
+            if !same_origin(&base, &endpoint) {
+                return Err(anyhow!("转码路径越过了 Plex 服务器边界"));
+            }
+            endpoint
+                .query_pairs_mut()
+                .append_pair("hasMDE", "1")
+                .append_pair("path", &target.metadata_key)
+                .append_pair("mediaIndex", "0")
+                .append_pair("partIndex", "0")
+                .append_pair("protocol", "http")
+                .append_pair("fastSeek", "1")
+                .append_pair("directPlay", "0")
+                .append_pair("directStream", "0")
+                .append_pair("directStreamAudio", "1")
+                .append_pair("container", "mp3")
+                .append_pair("audioCodec", "mp3")
+                .append_pair("audioChannels", "2")
+                .append_pair("location", if connection.local { "lan" } else { "wan" })
+                .append_pair("musicBitrate", &bitrate)
+                .append_pair("maxAudioBitrate", &bitrate)
+                .append_pair("session", &target.session_id)
+                .append_pair("offset", "0")
+                .append_pair("copyts", "1")
+                .append_pair("X-Plex-Session-Identifier", &target.session_id)
+                .append_pair("X-Plex-Chunked", "1")
+                .append_pair("X-Plex-Client-Identifier", client_identifier)
+                .append_pair("X-Plex-Client-Profile-Extra", TRANSCODE_PROFILE);
+            candidates.push(endpoint);
         }
-        endpoint
-            .query_pairs_mut()
-            .append_pair("hasMDE", "1")
-            .append_pair("path", &target.metadata_key)
-            .append_pair("mediaIndex", "0")
-            .append_pair("partIndex", "0")
-            .append_pair("protocol", "http")
-            .append_pair("fastSeek", "1")
-            .append_pair("directPlay", "0")
-            .append_pair("directStream", "0")
-            .append_pair("directStreamAudio", "1")
-            .append_pair("container", "mp3")
-            .append_pair("audioCodec", "mp3")
-            .append_pair("audioChannels", "2")
-            .append_pair("location", if connection.local { "lan" } else { "wan" })
-            .append_pair("musicBitrate", &bitrate)
-            .append_pair("maxAudioBitrate", &bitrate)
-            .append_pair("session", &target.session_id)
-            .append_pair("offset", "0")
-            .append_pair("copyts", "1")
-            .append_pair("X-Plex-Session-Identifier", &target.session_id)
-            .append_pair("X-Plex-Chunked", "1")
-            .append_pair("X-Plex-Client-Identifier", client_identifier)
-            .append_pair("X-Plex-Client-Profile-Extra", TRANSCODE_PROFILE);
-        Ok(endpoint)
-    })
-    .collect()
+    }
+    if candidates.is_empty() {
+        return Err(anyhow!("没有可用的上游端点"));
+    }
+    Ok(candidates)
 }
 
 fn validated_connection_base(uri: &str) -> Result<Url> {
@@ -1177,6 +1183,35 @@ mod tests {
         assert!(registry.resolve_at(&first, now).is_none());
         assert!(registry.resolve_at(&second, now).is_none());
         assert!(registry.entries.is_empty());
+    }
+
+    #[test]
+    fn auto_quality_tries_direct_before_transcode() {
+        let auto = target("auto");
+        let local = connection("http://192.168.1.5:32400", true, false);
+        let urls = build_upstream_urls(&auto, &local, "client-1").unwrap();
+        assert!(
+            urls.first().unwrap().path().starts_with("/library/parts/"),
+            "自动源本地连接应先试原始直连"
+        );
+
+        let remote = connection("http://media.example.com:10324", false, false);
+        let urls = build_upstream_urls(&auto, &remote, "client-1").unwrap();
+        assert!(
+            urls.first().unwrap().path().starts_with("/library/parts/"),
+            "自动源远程连接也先试原始直连"
+        );
+        assert!(
+            urls.iter().any(|url| url.path().contains("transcode")),
+            "直连之后应保留转码兜底"
+        );
+
+        let explicit = target("320");
+        let urls = build_upstream_urls(&explicit, &remote, "client-1").unwrap();
+        assert!(
+            urls.iter().all(|url| url.path().contains("transcode")),
+            "显式码率只走转码"
+        );
     }
 
     #[test]
