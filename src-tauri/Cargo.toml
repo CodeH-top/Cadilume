@@ -48,7 +48,8 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSImage"] }
 objc2-foundation = { version = "0.3.2", features = ["NSData"] }
-objc2-media-player = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-media-player = { version = "0.3.2", features = ["block2", "objc2-app-kit", "objc2-core-foundation"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }

@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
+import { acknowledgeQuit, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeQueueNext, nativeQueuePrevious, nativeQueueSet, nativeQueueSetRepeat, nativeQueueSetShuffle } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { playbackLog } from "./playbackLog";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
@@ -776,6 +776,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     if (!track || !serverId) return;
     try {
       syncNativeQueue();
+      // 引擎可能刚创建（默认 20%），把前端实际音量同步过去，避免
+      // UI 显示与真实输出不一致。
+      void nativeAudioSetVolume(volumeRef.current).catch(() => undefined);
       const url = await requestStreamUrl(serverId, track, quality);
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       playbackLog("info", `原生流地址已取得：index=${index} 质量=${quality}`);
@@ -783,6 +786,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         title: track.title,
         artist: trackArtist(track),
         album: trackAlbum(track),
+        artworkUrl: track.imageUrl,
       });
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       if (resumeSeconds > 0.5) {
@@ -1008,11 +1012,23 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       void nativeAudioPause().catch(() => undefined);
       setPlaying(false);
     } else {
-      void nativeAudioPlay().catch(() => undefined);
-      setPlaying(true);
+      void (async () => {
+        try {
+          const status = await nativeAudioStatus();
+          if (!status || status.item_count === 0) {
+            // 恢复会话/队列结束等引擎没有源的情况：先加载再播放。
+            await loadAt(indexRef.current, true, resumeProgressRef.current ?? progressRef.current);
+          } else {
+            await nativeAudioPlay();
+            setPlaying(true);
+          }
+        } catch {
+          setPlaying(false);
+        }
+      })();
     }
     schedulePersistedSession(true);
-  }, [current, playing, schedulePersistedSession]);
+  }, [current, loadAt, playing, schedulePersistedSession]);
 
   const seek = useCallback((seconds: number) => {
     const maximum = duration || (current?.duration || 0) / 1000;

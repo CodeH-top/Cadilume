@@ -8,12 +8,15 @@ mod macos {
     use std::sync::{Mutex, OnceLock};
 
     use block2::RcBlock;
+    use objc2_core_foundation::CGSize;
     use objc2::rc::Retained;
+    use objc2::AnyThread;
     use objc2::runtime::AnyObject;
-    use objc2_foundation::{NSDictionary, NSNumber, NSString};
+    use objc2_app_kit::NSImage;
+    use objc2_foundation::{NSData, NSDictionary, NSNumber, NSString};
     use objc2_media_player::{
-        MPChangePlaybackPositionCommandEvent, MPNowPlayingInfoCenter, MPRemoteCommand,
-        MPRemoteCommandCenter, MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
+        MPChangePlaybackPositionCommandEvent, MPMediaItemArtwork, MPNowPlayingInfoCenter,
+        MPRemoteCommand, MPRemoteCommandCenter, MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
     };
     use tauri::{AppHandle, Emitter};
 
@@ -25,6 +28,7 @@ mod macos {
     const KEY_DURATION: &str = "MPMediaItemPropertyPlaybackDuration";
     const KEY_POSITION: &str = "MPNowPlayingInfoPropertyElapsedPlaybackTime";
     const KEY_RATE: &str = "MPNowPlayingInfoPropertyPlaybackRate";
+    const KEY_ARTWORK: &str = "MPMediaItemPropertyArtwork";
 
     fn app_handle() -> Option<AppHandle> {
         COMMAND_APP
@@ -93,13 +97,34 @@ mod macos {
         });
     }
 
-    pub fn update_metadata(
+    /// Build an `MPMediaItemArtwork` from image bytes. AppKit classes are
+    /// main-thread-only, so callers must run this on the main thread.
+    fn make_artwork(bytes: &[u8]) -> Option<Retained<MPMediaItemArtwork>> {
+        let data = NSData::with_bytes(bytes);
+        let image = NSImage::initWithData(NSImage::alloc(), &data)?;
+        let block = RcBlock::new(move |_size: CGSize| -> NonNull<NSImage> {
+            NonNull::from(&*image)
+        });
+        Some(unsafe {
+            MPMediaItemArtwork::initWithBoundsSize_requestHandler(
+                MPMediaItemArtwork::alloc(),
+                CGSize::new(512.0, 512.0),
+                &block,
+            )
+        })
+    }
+
+    /// Build and publish the now-playing dictionary on the current thread.
+    /// `update_metadata` dispatches this to the main thread; tests call it
+    /// directly to verify the dictionary content.
+    fn build_and_set_now_playing(
         title: &str,
         artist: &str,
         album: &str,
         duration_seconds: Option<f64>,
         position_seconds: f64,
         playing: bool,
+        artwork: Option<&[u8]>,
     ) {
         let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
         let mut keys: Vec<Retained<NSString>> = Vec::new();
@@ -124,11 +149,79 @@ mod macos {
         }
         push_number(KEY_POSITION, position_seconds);
         push_number(KEY_RATE, if playing { 1.0 } else { 0.0 });
+        if let Some(bytes) = artwork {
+            if let Some(artwork_object) = make_artwork(bytes) {
+                keys.push(NSString::from_str(KEY_ARTWORK));
+                values.push(artwork_object.into_super().into_super());
+            }
+        }
 
         let key_refs: Vec<&NSString> = keys.iter().map(|key| key.as_ref()).collect();
         let dictionary = NSDictionary::from_retained_objects(&key_refs, &values);
         unsafe {
             center.setNowPlayingInfo(Some(&dictionary));
+        }
+    }
+
+    pub fn update_metadata(
+        title: &str,
+        artist: &str,
+        album: &str,
+        duration_seconds: Option<f64>,
+        position_seconds: f64,
+        playing: bool,
+        artwork: Option<&[u8]>,
+    ) {
+        let Some(app) = app_handle() else {
+            return;
+        };
+        let title = title.to_string();
+        let artist = artist.to_string();
+        let album = album.to_string();
+        let artwork = artwork.map(|bytes| bytes.to_vec());
+        let _ = app.run_on_main_thread(move || {
+            build_and_set_now_playing(
+                &title,
+                &artist,
+                &album,
+                duration_seconds,
+                position_seconds,
+                playing,
+                artwork.as_deref(),
+            );
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn now_playing_info_dictionary_roundtrips() {
+            build_and_set_now_playing(
+                "测试歌名",
+                "测试歌手",
+                "测试专辑",
+                Some(180.0),
+                12.5,
+                true,
+                None,
+            );
+            let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
+            let info = unsafe { center.nowPlayingInfo() };
+            let info = info.expect("设置后应能读回 now playing 信息");
+            let title = info.objectForKey(&NSString::from_str(KEY_TITLE));
+            let title = title.expect("应有标题键");
+            let title_string = title
+                .downcast::<objc2_foundation::NSString>()
+                .expect("标题应为 NSString");
+            assert_eq!(title_string.to_string(), "测试歌名");
+            let rate = info.objectForKey(&NSString::from_str(KEY_RATE));
+            assert!(rate.is_some(), "应有播放速率键");
+            // 清掉，避免影响真实运行时的控制中心。
+            unsafe {
+                center.setNowPlayingInfo(None);
+            }
         }
     }
 }
@@ -216,6 +309,7 @@ mod windows {
         duration_seconds: Option<f64>,
         position_seconds: f64,
         playing: bool,
+        _artwork: Option<&[u8]>,
     ) {
         let Some(controls) = CONTROLS.get() else {
             return;

@@ -339,6 +339,7 @@ pub struct NativeAudioEngine {
     queue: Arc<Mutex<QueueState>>,
     pending: Arc<Mutex<Option<PendingTrack>>>,
     current_source: Arc<Mutex<Option<CurrentSource>>>,
+    artwork_bytes: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
     stopped: Arc<AtomicBool>,
 }
 
@@ -484,6 +485,8 @@ pub struct NowPlayingMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
+    #[serde(default)]
+    pub artwork_url: Option<String>,
 }
 
 /// A fully-downloaded next track already appended to the rodio queue.
@@ -503,6 +506,7 @@ impl PendingTrack {
             title: Some(self.title.clone()),
             artist: Some(self.artist.clone()),
             album: Some(self.album.clone()),
+            artwork_url: None,
         }
     }
 }
@@ -690,6 +694,7 @@ impl NativeAudioEngine {
             queue: Arc::new(Mutex::new(QueueState::default())),
             pending: Arc::new(Mutex::new(None)),
             current_source: Arc::new(Mutex::new(None)),
+            artwork_bytes: Arc::new(Mutex::new(None)),
             stopped: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -712,6 +717,43 @@ impl NativeAudioEngine {
         let final_path = dir.join(format!("{key}.audio"));
         let part_path = dir.join(format!("{key}.audio.part"));
         Ok((key, final_path, part_path))
+    }
+
+    /// Background-fetch the album artwork bytes from the loopback artwork
+    /// ticket and cache them for the system now-playing update. The URL never
+    /// reaches PMS directly; the proxy validates the ticket.
+    fn start_artwork_fetch(&self, artwork_url: &str) {
+        if artwork_url.is_empty() {
+            return;
+        }
+        if let Ok(mut artwork) = self.artwork_bytes.lock() {
+            *artwork = None;
+        }
+        let artwork_bytes = Arc::clone(&self.artwork_bytes);
+        let url = artwork_url.to_string();
+        tokio::spawn(async move {
+            let Ok(client) = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+            else {
+                return;
+            };
+            let Ok(response) = client.get(&url).send().await else {
+                return;
+            };
+            if !response.status().is_success() {
+                return;
+            }
+            let Ok(data) = response.bytes().await else {
+                return;
+            };
+            if data.len() > 2 * 1024 * 1024 {
+                return;
+            }
+            if let Ok(mut artwork) = artwork_bytes.lock() {
+                *artwork = Some(Arc::new(data.to_vec()));
+            }
+        });
     }
 
     /// Load a local media file and start playing it.
@@ -738,6 +780,13 @@ impl NativeAudioEngine {
                 cache_key: None,
                 metadata,
             });
+        }
+        if let Ok(metadata_guard) = self.metadata.lock() {
+            if let Some(meta) = metadata_guard.as_ref() {
+                if let Some(url) = meta.artwork_url.as_deref() {
+                    self.start_artwork_fetch(url);
+                }
+            }
         }
         *self.duration_seconds.lock().map_err(|_| "时长状态锁失败".to_string())? = total;
         self.player.clear();
@@ -768,6 +817,11 @@ impl NativeAudioEngine {
         let metadata_for_source = metadata.clone();
         if let Some(metadata) = metadata {
             *self.metadata.lock().map_err(|_| "元数据状态锁失败".to_string())? = Some(metadata);
+        }
+        if let Some(meta) = metadata_for_source.as_ref() {
+            if let Some(url) = meta.artwork_url.as_deref() {
+                self.start_artwork_fetch(url);
+            }
         }
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return self.load_and_play(source);
@@ -1158,6 +1212,11 @@ impl NativeAudioEngine {
                         .map(|guard| guard.clone())
                         .unwrap_or(None);
                     if let Some(meta) = meta {
+                        let artwork = engine
+                            .artwork_bytes
+                            .lock()
+                            .map(|guard| guard.clone())
+                            .unwrap_or(None);
                         crate::now_playing::update_metadata(
                             meta.title.as_deref().unwrap_or(""),
                             meta.artist.as_deref().unwrap_or(""),
@@ -1165,6 +1224,7 @@ impl NativeAudioEngine {
                             duration_value,
                             position,
                             playing,
+                            artwork.as_ref().map(|bytes| bytes.as_slice()),
                         );
                     }
                 }
@@ -2420,6 +2480,7 @@ mod tests {
                     title: Some(track_a.3.clone()),
                     artist: None,
                     album: None,
+                    artwork_url: None,
                 }),
             )
             .await
@@ -2573,6 +2634,7 @@ mod tests {
                             title: Some(title.clone()),
                             artist: None,
                             album: None,
+                            artwork_url: None,
                         }),
                     )
                     .await
