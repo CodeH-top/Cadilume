@@ -628,13 +628,25 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const persistedSessionTimerRef = useRef<number | undefined>(undefined);
   const playbackSessionDiscardedRef = useRef(false);
   const [initialPersistedSession] = useState<PersistedPlaybackSession | null>(() => readPersistedPlaybackSession());
-  const [queue, setQueue] = useState<PlexItem[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(-1);
+  // 首帧就从持久化会话渲染队列/进度/时长，避免恢复 effect 等待
+  // serverId/bootstrap 期间播放器显示空白；恢复 effect 仍会复核并刷新元数据。
+  const [queue, setQueue] = useState<PlexItem[]>(() => (
+    initialPersistedSession?.queue?.map((item) => ({ ...item })) as PlexItem[] ?? []
+  ));
+  const [currentIndex, setCurrentIndex] = useState(() => initialPersistedSession?.currentIndex ?? -1);
   const [playing, setPlaying] = useState(false);
   const [loading, setLoadingState] = useState(false);
   const [buffering, setBuffering] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [progress, setProgress] = useState(() => {
+    const session = initialPersistedSession;
+    const track = session && session.currentIndex >= 0 ? session.queue[session.currentIndex] : undefined;
+    return track ? normalizeRestoredProgress(session!.progress, (track.duration || 0) / 1000) : 0;
+  });
+  const [duration, setDuration] = useState(() => {
+    const session = initialPersistedSession;
+    const track = session && session.currentIndex >= 0 ? session.queue[session.currentIndex] : undefined;
+    return track ? (track.duration || 0) / 1000 : 0;
+  });
   const [volume, setVolumeState] = useState(storedVolume);
   const [muted, setMuted] = useState(false);
   // A resumed playlist loops by default so ending it cannot unexpectedly
