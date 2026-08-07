@@ -156,6 +156,16 @@ button[data-tooltip]::after { position: absolute; z-index: 300; left: 50%; botto
 button[data-tooltip]:is(:hover, :focus-visible)::after { opacity: 1; transform: translate(-50%, 0); }
 .topbar-actions button[data-tooltip]::after { top: calc(100% + 8px); bottom: auto; transform: translate(-50%, -4px); }
 .topbar-actions button[data-tooltip]:is(:hover, :focus-visible)::after { transform: translate(-50%, 0); }
+.search-results-toolbar button[data-tooltip]::after,
+.page-heading button[data-tooltip]::after,
+.section-heading button[data-tooltip]::after,
+.detail-hero button[data-tooltip]::after,
+.detail-back-button[data-tooltip]::after { top: calc(100% + 8px); bottom: auto; transform: translate(-50%, -4px); }
+.search-results-toolbar button[data-tooltip]:is(:hover, :focus-visible)::after,
+.page-heading button[data-tooltip]:is(:hover, :focus-visible)::after,
+.section-heading button[data-tooltip]:is(:hover, :focus-visible)::after,
+.detail-hero button[data-tooltip]:is(:hover, :focus-visible)::after,
+.detail-back-button[data-tooltip]:is(:hover, :focus-visible)::after { transform: translate(-50%, 0); }
 .theme-transition-snapshot { position: fixed; z-index: 1000; inset: 0; width: 100vw; height: 100vh; overflow: clip; contain: layout paint style; visibility: hidden; pointer-events: none; user-select: none; -webkit-user-select: none; color: var(--text); background: var(--bg); backface-visibility: hidden; transform: translateZ(0); will-change: clip-path; }
 .theme-transition-snapshot.is-ready { visibility: visible; }
 .theme-transition-snapshot,
