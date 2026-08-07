@@ -99,3 +99,12 @@
 - The Codex command safety layer can reject an otherwise narrowly scoped cleanup trap when its command text contains `rm -rf`. Preserve the build exit code in a task-specific variable, delete files with `find <fresh-dir> -depth -type f -delete`, then delete only empty directories with a second depth-first `find`; verify that no matching temporary target or `.app` remains.
 - A real DMG build is different from an external-target compile check because the packaging script and final artifact paths intentionally live under the repository's default `src-tauri/target`. If that target fails while reading generated permissions from a pre-rename absolute path such as `.../plex-music/...`, run `cargo clean --manifest-path src-tauri/Cargo.toml` against this explicit regenerable build directory, then rerun `pnpm bundle:macos:dmg`. The dedicated script must still remove `bundle/macos/Cadilume.app` on completion, and packaging acceptance must verify both project-local `find` and project-scoped Spotlight results are empty.
 - 本轮再次确认：包含 `rm -rf` 的临时 target 清理 trap 会被命令安全层拒绝；改用已核对的 `mktemp` 绝对目录，再以 `find <目录> -depth -delete` 清理并验证路径不存在。
+
+## 2026-08-07 — Cadilume 开发态 UI 自动化边界
+
+- System Events 读取 Cadilume 主页可访问性树可用（播放器按钮/进度条/歌词按钮
+  都有 description），但搜索结果页（大虚拟列表）会让 `entire contents of
+  window` 长时间挂起（20s+ 超时），`click` 歌单卡片也未必触发播放；不要依赖
+  AX 做 Cadilume 的 UI 播放回归。
+- 机械播放验证以引擎层真实 PMS 回归为准（无缝交接 + 20 次高频切歌），
+  UI 层主观听感留给用户按计划文档清单执行。
