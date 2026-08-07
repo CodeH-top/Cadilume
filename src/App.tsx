@@ -86,7 +86,6 @@ import {
   setStatusIconEnabled as saveStatusIconEnabled,
   setBrandPreset as saveBrandPreset,
   setDeviceName as saveDeviceName,
-  showMainWindow,
   updatePlaylist,
   type PlaylistChanges,
   type NativeAudioCacheStatus,
@@ -321,11 +320,6 @@ function MainApplication({
   const uiPreview = requestedUiPreview === "login" || requestedUiPreview === "splash" || requestedUiPreview === "notifications"
     ? requestedUiPreview
     : null;
-
-  useEffect(() => {
-    if (uiPreview) return;
-    void showMainWindow().catch(() => undefined);
-  }, [uiPreview]);
 
   const load = useCallback(async () => {
     setError(undefined);
