@@ -575,8 +575,8 @@ function writeStorage(key: string, value: string): void {
 }
 
 const storedVolume = (): number => {
-  const value = Number.parseFloat(readStorage(VOLUME_STORAGE_KEY, "0.72"));
-  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0.72;
+  const value = Number.parseFloat(readStorage(VOLUME_STORAGE_KEY, "0.5"));
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0.5;
 };
 
 const storedPrebufferNext = (): boolean => readStorage(PREBUFFER_STORAGE_KEY, "true") !== "false";

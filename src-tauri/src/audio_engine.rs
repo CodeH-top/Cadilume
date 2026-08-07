@@ -681,8 +681,8 @@ impl NativeAudioEngine {
             .open_stream()
             .map_err(|e| anyhow::anyhow!("音频流启动失败: {e}"))?;
         let player = Arc::new(Player::connect_new(sink.mixer()));
-        // 原生引擎默认音量取 20%，避免比 WebView 播放明显更响。
-        player.set_volume(0.2);
+        // 引擎不做默认音量：rodio Player 默认 1.0（100%），实际音量由前端
+        // 缓存记录并在加载时同步（见 loadNativeTrack 的 nativeAudioSetVolume）。
         Ok(Self {
             sink,
             player,
