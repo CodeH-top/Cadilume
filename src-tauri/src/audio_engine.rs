@@ -18,6 +18,62 @@ use tauri::{AppHandle, Emitter};
 
 /// Minimum bytes downloaded before progressive playback may start.
 const MIN_PROGRESSIVE_PRELOAD_BYTES: u64 = 256 * 1024;
+/// Disk cache cap for native audio files (Plexamp desktop default 256MB;
+/// Cadilume keeps 512MB to cover FLAC originals).
+const AUDIO_CACHE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
+
+fn audio_cache_dir(cache_root: &Path) -> PathBuf {
+    cache_root.join("downloads")
+}
+
+fn touch_cache_file(path: &Path) {
+    let _ = filetime::set_file_mtime(path, filetime::FileTime::now());
+}
+
+/// LRU eviction: when total cached audio exceeds the cap, delete oldest
+/// `.audio` files until under the limit. `.part` files are transient and
+/// always removed first.
+fn enforce_audio_cache_limit(cache_root: &Path) {
+    let dir = audio_cache_dir(cache_root);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            if name.ends_with(".part") {
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+            if !name.ends_with(".audio") {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            Some((path, metadata.len()))
+        })
+        .collect();
+    files.sort_by_key(|(path, _)| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::UNIX_EPOCH)
+    });
+    let total: u64 = files.iter().map(|(_, len)| *len).sum();
+    if total <= AUDIO_CACHE_LIMIT_BYTES {
+        return;
+    }
+    let mut freed = 0u64;
+    for (path, len) in files {
+        if total - freed <= AUDIO_CACHE_LIMIT_BYTES {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            freed += len;
+            eprintln!("[原生] 缓存淘汰：{}", path.file_name().unwrap_or_default().to_string_lossy());
+        }
+    }
+}
 
 /// Shared download state between the background downloader and the
 /// progressive reader (pull-driven, kithara-stream style).
@@ -174,6 +230,10 @@ impl NativeAudioEngineSlot {
         }
     }
 
+    pub fn cache_root(&self) -> &PathBuf {
+        &self.cache_root
+    }
+
     pub fn ensure(&self, app: &AppHandle) -> Result<Arc<NativeAudioEngine>, String> {
         let mut guard = self.inner.lock().map_err(|_| "原生引擎状态锁失败".to_string())?;
         if let Some(engine) = guard.as_ref() {
@@ -259,6 +319,8 @@ impl NativeAudioEngine {
             .unwrap_or(false);
         if final_ready {
             eprintln!("[原生] 命中完整缓存 key={key}");
+            touch_cache_file(&final_path);
+            enforce_audio_cache_limit(&self.cache_root);
             return self.load_and_play(final_path.to_str().unwrap());
         }
 
@@ -317,6 +379,11 @@ impl NativeAudioEngine {
             progress.downloaded.load(Ordering::SeqCst),
             total,
         );
+        let cache_root = self.cache_root.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            enforce_audio_cache_limit(&cache_root);
+        });
         Ok(self.player.len())
     }
 
@@ -454,6 +521,50 @@ pub fn native_audio_device_check() -> serde_json::Value {
     let value = serde_json::Value::Object(result);
     eprintln!("[原生] 设备自检：{}", serde_json::to_string(&value).unwrap_or_default());
     value
+}
+
+#[derive(Serialize)]
+pub struct NativeCacheStatus {
+    pub size_bytes: u64,
+    pub file_count: usize,
+}
+
+#[tauri::command]
+pub fn native_audio_cache_status(
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+) -> NativeCacheStatus {
+    let dir = audio_cache_dir(state.cache_root());
+    let mut size_bytes = 0u64;
+    let mut file_count = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".audio") {
+                continue;
+            }
+            if let Ok(metadata) = entry.metadata() {
+                size_bytes += metadata.len();
+                file_count += 1;
+            }
+        }
+    }
+    NativeCacheStatus { size_bytes, file_count }
+}
+
+#[tauri::command]
+pub fn native_audio_clear_cache(
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+) -> Result<(), String> {
+    let dir = audio_cache_dir(state.cache_root());
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".audio") || name.ends_with(".part") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

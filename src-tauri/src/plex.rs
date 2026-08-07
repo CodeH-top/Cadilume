@@ -278,9 +278,10 @@ impl PlexState {
             write_persisted_config(&config_path, &config)?;
         }
 
-        let token = keyring_entry()
-            .ok()
-            .and_then(|entry| entry.get_password().ok());
+        // Plaintext file first avoids the Keychain authorization prompt during
+        // development restarts; Keychain remains the production store.
+        let token = read_dev_token_fallback()
+            .or_else(|| keyring_entry().ok().and_then(|entry| entry.get_password().ok()));
         let protected_client = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
@@ -2623,6 +2624,32 @@ fn string_field(value: &Value, key: &str) -> String {
 
 fn keyring_entry() -> Result<keyring::Entry> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(Into::into)
+}
+
+/// Development-only plaintext fallback: read the Plex account token from a
+/// local file outside the repository (default `~/.cadilume-dev-token`, or
+/// `CADILUME_DEV_TOKEN_FILE`). It must never be committed or logged; deleting
+/// the file restores Keychain-only mode.
+fn dev_token_fallback_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("CADILUME_DEV_TOKEN_FILE") {
+        return PathBuf::from(path);
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .unwrap_or_else(|| std::env::temp_dir().into_os_string());
+    PathBuf::from(home).join(".cadilume-dev-token")
+}
+
+fn read_dev_token_fallback() -> Option<String> {
+    let token = fs::read_to_string(dev_token_fallback_path())
+        .ok()?
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
 }
 
 async fn ensure_success(response: Response, context: &str) -> Result<Response> {

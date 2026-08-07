@@ -68,6 +68,8 @@ pub fn run() {
             audio_engine::native_audio_set_volume,
             audio_engine::native_audio_status,
             audio_engine::native_audio_device_check,
+            audio_engine::native_audio_cache_status,
+            audio_engine::native_audio_clear_cache,
             plex::set_status_icon_enabled,
             plex::set_device_name,
             plex::set_brand_preset,
