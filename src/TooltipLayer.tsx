@@ -20,10 +20,12 @@ export function TooltipLayer() {
   const [tip, setTip] = useState<TooltipState>({ text: "", left: 0, top: 0, visible: false });
   const bubbleRef = useRef<HTMLDivElement>(null);
   const pendingTargetRef = useRef<HTMLElement | null>(null);
+  const currentTargetRef = useRef<HTMLElement | null>(null);
   const showTimerRef = useRef<number | undefined>(undefined);
   const hide = useCallback(() => {
     window.clearTimeout(showTimerRef.current);
     setTip((current) => (current.visible ? { ...current, visible: false } : current));
+    if (currentTargetRef.current) currentTargetRef.current = null;
   }, []);
 
   const show = useCallback((target: HTMLElement) => {
@@ -64,44 +66,45 @@ export function TooltipLayer() {
   }, [tip.text, tip.visible]);
 
   useEffect(() => {
-    const onMouseOver = (event: MouseEvent) => {
+    const onPointerMove = (event: PointerEvent) => {
       const target = (event.target as Element | null)?.closest<HTMLElement>("[data-tooltip]");
+      if (target === currentTargetRef.current) return;
+      currentTargetRef.current = target;
       if (!target) {
         hide();
         return;
       }
       show(target);
     };
-    const onMouseOut = (event: MouseEvent) => {
-      const target = (event.target as Element | null)?.closest<HTMLElement>("[data-tooltip]");
-      const related = (event.relatedTarget as Element | null)?.closest<HTMLElement>("[data-tooltip]");
-      if (target && target !== related) hide();
-    };
     const onFocusIn = (event: FocusEvent) => {
       const target = (event.target as Element | null)?.closest<HTMLElement>("[data-tooltip]");
-      if (target) show(target);
+      if (target && target !== currentTargetRef.current) {
+        currentTargetRef.current = target;
+        show(target);
+      }
     };
-    const onHide = () => hide();
+    const onHide = () => {
+      currentTargetRef.current = null;
+      hide();
+    };
     const onVisibilityChange = () => {
       if (document.hidden) hide();
     };
-    document.addEventListener("mouseover", onMouseOver);
-    document.addEventListener("mouseout", onMouseOut);
+    document.addEventListener("pointermove", onPointerMove);
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", onHide);
     document.addEventListener("scroll", onHide, true);
-    document.addEventListener("mouseleave", onHide);
+    document.addEventListener("pointerleave", onHide);
     window.addEventListener("blur", onHide);
     window.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("resize", onHide);
     return () => {
       window.clearTimeout(showTimerRef.current);
-      document.removeEventListener("mouseover", onMouseOver);
-      document.removeEventListener("mouseout", onMouseOut);
+      document.removeEventListener("pointermove", onPointerMove);
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onHide);
       document.removeEventListener("scroll", onHide, true);
-      document.removeEventListener("mouseleave", onHide);
+      document.removeEventListener("pointerleave", onHide);
       window.removeEventListener("blur", onHide);
       window.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("resize", onHide);
