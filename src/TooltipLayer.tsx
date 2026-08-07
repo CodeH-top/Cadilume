@@ -24,6 +24,7 @@ export function TooltipLayer() {
   const showTimerRef = useRef<number | undefined>(undefined);
   const hide = useCallback(() => {
     window.clearTimeout(showTimerRef.current);
+    pendingTargetRef.current = null;
     setTip((current) => (current.visible ? { ...current, visible: false } : current));
     if (currentTargetRef.current) currentTargetRef.current = null;
   }, []);
@@ -46,11 +47,8 @@ export function TooltipLayer() {
     const bubble = bubbleRef.current;
     if (!bubble || tip.visible) return;
     const target = pendingTargetRef.current;
-    const rect = target?.isConnected ? target.getBoundingClientRect() : undefined;
-    if (!rect) {
-      setTip((current) => (current.text ? { ...current, visible: true } : current));
-      return;
-    }
+    if (!target || !target.isConnected) return;
+    const rect = target.getBoundingClientRect();
     const width = bubble.offsetWidth;
     const height = bubble.offsetHeight;
     let top = rect.top - height - TOOLTIP_GAP;
