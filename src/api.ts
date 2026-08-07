@@ -50,7 +50,9 @@ function playlistRecords(value: unknown): Array<Record<string, unknown>> {
 }
 
 function optionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+  if (typeof value === "string") return value.length > 0 ? value : undefined;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return undefined;
 }
 
 function optionalNumber(value: unknown): number | undefined {
@@ -140,7 +142,11 @@ function normalizePlexItems(value: unknown): PlexItem[] {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((item) => {
     const trackArtists = item.type === "track" ? normalizePlexTrackArtists(item) : undefined;
-    return trackArtists ? { ...item, trackArtists } as unknown as PlexItem : item as unknown as PlexItem;
+    const playlistItemID = optionalString(item.playlistItemID);
+    const normalized = playlistItemID
+      ? { ...item, playlistItemID } as unknown as PlexItem
+      : item as unknown as PlexItem;
+    return trackArtists ? { ...normalized, trackArtists } : normalized;
   });
 }
 
@@ -647,11 +653,16 @@ export async function searchLibrary(serverId: string, sectionKey: string, queryT
   const response = await serverGet(serverId, "/hubs/search", { query: queryText, sectionId: sectionKey, limit: "40" });
   const root = container(response);
   const hubs = Array.isArray(root.Hub) ? root.Hub as Array<Record<string, unknown>> : [];
-  return Promise.all(hubs.filter((hub) => ["artist", "album", "track"].includes(String(hub.type))).map(async (hub) => ({
-    title: String(hub.title || "搜索结果"),
-    type: String(hub.type || "mixed"),
-    items: normalizePlexItems(hub.Metadata),
-  })));
+  const result = await Promise.all(
+    hubs
+      .filter((hub) => ["artist", "album", "track"].includes(String(hub.type)))
+      .map(async (hub) => ({
+        title: String(hub.title || "搜索结果"),
+        type: String(hub.type || "mixed"),
+        items: normalizePlexItems(hub.Metadata),
+      })),
+  );
+  return result.filter((hub) => hub.items.length > 0);
 }
 
 export async function streamUrl(serverId: string, track: PlexItem, quality: StreamQuality): Promise<string> {
@@ -721,7 +732,9 @@ export async function removeTracksFromPlaylist(
     throw new Error("无效的 Plex 歌单标识");
   }
   const uniqueItemIds = [...new Set(
-    playlistItemIds.filter((itemId) => itemId && isCleanPlexIdentifier(itemId)),
+    playlistItemIds
+      .map((itemId) => String(itemId))
+      .filter((itemId) => itemId && isCleanPlexIdentifier(itemId)),
   )];
   if (!uniqueItemIds.length) throw new Error("请至少选择一首歌曲");
   if (!isDesktopRuntime()) {

@@ -647,6 +647,19 @@ describe("Plex audio playlists", () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
+  it("accepts numeric playlist item ids returned by PMS as strings", async () => {
+    invokeMock.mockResolvedValueOnce({ requested: 1, removed: 1, failedItemIds: [] });
+
+    const result = await removeTracksFromPlaylist("server-a", "playlist-99", [123 as unknown as string]);
+
+    expect(result).toEqual({ requested: 1, removed: 1, failedItemIds: [] });
+    expect(invokeMock).toHaveBeenCalledWith("remove_playlist_items", {
+      serverId: "server-a",
+      playlistId: "playlist-99",
+      playlistItemIds: ["123"],
+    });
+  });
+
   it("provides scroll-sized regular, smart, and read-only demo playlists without invoking Tauri", async () => {
     Object.defineProperty(globalThis, "window", {
       configurable: true,

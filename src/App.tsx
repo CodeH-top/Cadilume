@@ -1160,7 +1160,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           label={playlistSelection.label}
           onClose={() => setPlaylistSelection(undefined)}
           onPlaylistCreated={(playlist) => {
-            setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
+            setPlaylists((current) => [...current.filter((item) => item.ratingKey !== playlist.ratingKey), playlist]);
             void loadPlaylistList();
           }}
           onAdded={(playlist, result) => {
@@ -1168,6 +1168,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
             notify(result.requested === 1
               ? `已将${playlistSelection.label}添加到“${playlist.title}”。`
               : `已将 ${result.requested} 首歌曲添加到“${playlist.title}”。`);
+            void loadPlaylistList();
           }}
         />
       )}
@@ -1179,7 +1180,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
           onClose={() => setPlaylistCreationOpen(false)}
           onCreated={(playlist) => {
             setPlaylistCreationOpen(false);
-            setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
+            setPlaylists((current) => [...current.filter((item) => item.ratingKey !== playlist.ratingKey), playlist]);
             notify(`已创建歌单“${playlist.title}”。`);
             void loadPlaylistList();
           }}
@@ -1287,7 +1288,7 @@ function MusicRouterLayout() {
     event.preventDefault();
     const query = runtime.searchText.trim();
     if (!query) {
-      navigateRoute({ view: "search" });
+      runtime.notify("搜索内容不能为空");
       return;
     }
     navigateRoute({ view: "search", query });
@@ -1307,6 +1308,11 @@ function MusicRouterLayout() {
         <form className="searchbox" onSubmit={submitSearch} role="search">
           <Search size={17} />
           <input value={runtime.searchText} onChange={(event) => runtime.setSearchText(event.target.value)} placeholder="搜索歌曲、专辑或歌手" aria-label="搜索资料库" />
+          {runtime.searchText && (
+            <button type="button" className="searchbox-clear" aria-label="清除搜索" onClick={() => runtime.setSearchText("")}>
+              <X size={15} />
+            </button>
+          )}
         </form>
         <div className="topbar-actions">
           <div className="topbar-account" aria-label={`${runtime.account.title || runtime.account.username} 的 Plex 用户信息`}>
@@ -1739,6 +1745,7 @@ function RoutePage() {
     <ContentView
       view={view}
       route={route}
+      loading={loading}
       items={items}
       artists={runtime.libraryArtists}
       homeHubs={homeHubs}
@@ -1794,6 +1801,7 @@ function RoutePage() {
 interface ContentViewProps {
   view: LibraryView;
   route: LibraryRoute;
+  loading: boolean;
   items: PlexItem[];
   artists: PlexItem[];
   homeHubs: PlexHub[];
@@ -1916,7 +1924,7 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
 function ContentView(props: ContentViewProps) {
   if (props.view === "settings") return <SettingsView {...props} />;
   if (props.detail) return <DetailView detail={props.detail} serverId={props.serverId} artists={props.artists} onBack={props.onBack} onPlay={props.onPlayDetail} onShuffle={props.onShuffleDetail} onOpen={props.onOpen} onOpenArtist={props.onOpenArtist} onOpenAlbum={props.onOpenAlbum} onPlayTrack={props.onPlayTrack} />;
-  if (props.view === "search") return <SearchResults hubs={props.hubs} query={props.searchText} artists={props.artists} onOpen={props.onOpen} onOpenArtist={props.onOpenArtist} onOpenAlbum={props.onOpenAlbum} onPlayTrack={props.onPlayTrack} />;
+  if (props.view === "search") return <SearchResults hubs={props.hubs} query={props.searchText} loading={props.loading} artists={props.artists} onOpen={props.onOpen} onOpenArtist={props.onOpenArtist} onOpenAlbum={props.onOpenAlbum} onPlayTrack={props.onPlayTrack} />;
   if (props.view === "tracks") return <PaginatedTracksView serverId={props.serverId} sectionKey={props.sectionKey} route={props.route} artists={props.artists} onRouteChange={props.onTracksRouteChange} onOpenArtist={props.onOpenArtist} onOpenAlbum={props.onOpenAlbum} onPlay={props.onPlayTrack} />;
   if (props.view === "artists") return <CardCollection title="歌手" items={props.items} artistGrid indexed onOpen={props.onOpen} />;
   if (props.view === "albums") return <CardCollection title="专辑" items={props.items} indexed onOpen={props.onOpen} />;
@@ -3011,17 +3019,32 @@ function TrackTable({ title, tracks, artists, accentHeading = false, onOpenArtis
   );
 }
 
-function SearchResults({ hubs, query, artists, onOpen, onOpenArtist, onOpenAlbum, onPlayTrack }: { hubs: PlexHub[]; query: string; artists: PlexItem[]; onOpen: (item: PlexItem) => void; onOpenArtist: (artist: PlexItem) => void; onOpenAlbum: (track: PlexItem) => void; onPlayTrack: (track: PlexItem, context: PlexItem[]) => void }) {
+function SearchResults({ hubs, query, loading, artists, onOpen, onOpenArtist, onOpenAlbum, onPlayTrack }: { hubs: PlexHub[]; query: string; loading: boolean; artists: PlexItem[]; onOpen: (item: PlexItem) => void; onOpenArtist: (artist: PlexItem) => void; onOpenAlbum: (track: PlexItem) => void; onPlayTrack: (track: PlexItem, context: PlexItem[]) => void }) {
   const total = hubs.reduce((sum, hub) => sum + hub.items.length, 0);
-  if (!query) return <EmptyState title="搜索资料库" description="输入歌曲、专辑或歌手名称。" icon={<Search size={28} />} />;
+  const navigate = useNavigate();
+  const hubTitle = (hub: PlexHub): string => {
+    const titles: Record<string, string> = {
+      artist: "歌手",
+      album: "专辑",
+      track: "歌曲",
+    };
+    return titles[hub.type] ?? hub.title;
+  };
+  if (!query) return <EmptyState title="搜索音乐资料库" description="输入歌曲、专辑或歌手名称。" icon={<Search size={28} />} />;
+  if (loading) return <LoadingState />;
   if (!total) return <EmptyState title={`没有找到“${query}”`} description="尝试更短的关键词，或切换到其他音乐资料库。" icon={<Search size={28} />} />;
   return (
-    <>
-      <div className="page-heading"><div><h1>“{query}”的搜索结果</h1><p>共找到 {total} 项内容</p></div></div>
+    <div className="search-results">
+      <div className="search-results-toolbar">
+        <button type="button" className="secondary-button" onClick={() => navigate(-1)}>
+          <ArrowLeft size={16} />返回
+        </button>
+        <div className="page-heading"><div><h1>“{query}”的搜索结果</h1><p>共找到 {total} 项内容</p></div></div>
+      </div>
       {hubs.map((hub, index) => hub.type === "track"
-        ? <TrackTable key={`${hub.title}-${index}`} title={hub.title} tracks={hub.items} artists={artists} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} />
-        : <CardCollection key={`${hub.title}-${index}`} title={hub.title} items={hub.items} round={hub.type === "artist"} compact onOpen={onOpen} />)}
-    </>
+        ? <TrackTable key={`${hub.type}-${index}`} title={hubTitle(hub)} tracks={hub.items} artists={artists} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} />
+        : <CardCollection key={`${hub.type}-${index}`} title={hubTitle(hub)} items={hub.items} round={hub.type === "artist"} compact onOpen={onOpen} />)}
+    </div>
   );
 }
 
@@ -3791,7 +3814,7 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
     let playlist: PlexPlaylist;
     try {
       playlist = await createPlaylist(serverId, newPlaylistTitle, "", { seedRatingKey: seedTrack.ratingKey });
-      setPlaylists((current) => [playlist, ...current.filter((item) => item.ratingKey !== playlist.ratingKey)]);
+      setPlaylists((current) => [...current.filter((item) => item.ratingKey !== playlist.ratingKey), playlist]);
       onPlaylistCreated(playlist);
       setNewPlaylistTitle("");
       setCreateOpen(false);
