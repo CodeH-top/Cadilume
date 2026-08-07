@@ -22,6 +22,10 @@
 - 真实 PMS 自动化回归（290b93a，`cargo test -- --ignored
   real_pms_engine_regression`）：真实资料库两首 FLAC 串行下载→缓存→渐进播放→
   预排→自然结束无缝交接→seek→暂停/恢复，本机已通过。
+- 真实 PMS 高频切歌回归（57d524c，`cargo test -- --ignored
+  real_pms_engine_rapid_switch_regression`）：串行预缓存最多 10 首后两轮快速
+  加载/切换共 20 次 + 第二轮穿插 seek/暂停/恢复，全部无失败；两个真实 PMS
+  回归共用 `load_pms_regression_fixture()`（token/服务器/音乐库/小曲目挑选）。
 - 系统集成：macOS MPNowPlayingInfoCenter + MPRemoteCommandCenter；Windows
   SystemMediaTransportControls（windows crate 0.58，已跨 target 类型检查，
   完整构建待 Windows 环境）。前端处理 remote 命令事件（play/pause/toggle/next/
