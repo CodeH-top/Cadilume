@@ -317,7 +317,6 @@ export function GlobalNotificationQueue({
                   aria-live={announce ? "polite" : undefined}
                   aria-atomic={announce || undefined}
                 >
-                  <span className="global-notification-mark" aria-hidden="true" />
                   <span className={`global-notification-icon is-${notice.level}`} aria-hidden="true">
                     {notificationIcon(notice.level)}
                   </span>
