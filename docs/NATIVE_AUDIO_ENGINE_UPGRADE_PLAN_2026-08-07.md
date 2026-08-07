@@ -14,6 +14,24 @@
   libmpv）；macOS + Windows 双端；不进行客户端转码（PMS universal transcode 兜底）；
   日志/事件脱敏。
 
+## 1.5 执行进度（2026-08-07 更新）
+
+- Phase 0 ✅ 完成：spike 清理、基础 bug/UI 修复、开发/生产凭证隔离、开发态静默启动。
+- Phase 1 ✅ 完成：rodio AudioEngine 正式化；进度/结束事件；队列权威迁入 Rust
+  （曲目列表/当前索引/repeat/shuffle 决策在 Rust，前端负责票据加载与 UI 镜像）。
+- Phase 2 ✅ 完成：磁盘缓存 512MB LRU（按 mtime 淘汰、`.part` 优先清理、命中刷新），
+  设置页展示并清理封面+音频缓存。
+- Phase 3 ✅ 完成：边下边播（渐进 Reader + 后台下载，头部 256KB 就绪即开播）。
+- Phase 4 🟡 MVP 完成：ahead 预取下一首到缓存减少间隙；严格 gapless（PCM 衔接/
+  编码延迟处理）待后续优化，MVP 按计划允许非严格。
+- Phase 5 ✅ 完成：macOS Now Playing/Remote Command Center + Windows SMTC
+  （Windows 代码已跨 target 类型检查，完整构建与实机验证待 Windows 环境）。
+- Phase 6 ✅ 完成：WebView/HTMLAudio 播放路径全部移除（usePlayer native-only，
+  删除 DualAudioPool/预缓冲/媒体错误回退等约 1400 行及对应单测）。
+
+剩余事项：严格 gapless（Phase 4 增强）、Windows 实机 SMTC 验收、真实 PMS 听感回归
+（高频切歌 20+ 次、歌词对时、seek/暂停恢复）、Windows 隐藏窗口后台播放验证。
+
 ## 2. 现状盘点（dev 分支起点）
 
 | 层 | 现状 |

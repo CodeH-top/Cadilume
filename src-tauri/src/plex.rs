@@ -2627,6 +2627,7 @@ fn keyring_entry() -> Result<keyring::Entry> {
 /// local file outside the repository (default `~/.cadilume-dev-token`, or
 /// `CADILUME_DEV_TOKEN_FILE`). It must never be committed or logged; deleting
 /// the file restores Keychain-only mode.
+#[cfg(debug_assertions)]
 fn dev_token_fallback_path() -> PathBuf {
     if let Some(path) = std::env::var_os("CADILUME_DEV_TOKEN_FILE") {
         return PathBuf::from(path);
@@ -2637,6 +2638,7 @@ fn dev_token_fallback_path() -> PathBuf {
     PathBuf::from(home).join(".cadilume-dev-token")
 }
 
+#[cfg(debug_assertions)]
 fn read_dev_token_fallback() -> Option<String> {
     let token = fs::read_to_string(dev_token_fallback_path())
         .ok()?
@@ -2650,6 +2652,7 @@ fn read_dev_token_fallback() -> Option<String> {
 }
 
 #[cfg(unix)]
+#[cfg(debug_assertions)]
 fn write_dev_token_fallback(token: &str) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -2667,6 +2670,7 @@ fn write_dev_token_fallback(token: &str) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
+#[cfg(debug_assertions)]
 fn write_dev_token_fallback(token: &str) -> Result<(), String> {
     use std::io::Write;
     let path = dev_token_fallback_path();
