@@ -27,6 +27,10 @@
   Source: user request on 2026-07-31.
 - [ACT-020] Cadilume 必须完全独立可用：播放内核及一切运行依赖都必须集成到程序内部，禁止要求用户在系统上安装任何独立依赖（如 `brew install mpv`、`libmpv-dev` 等）。系统自带 API（CoreAudio/WASAPI 等）与静态链接进二进制的 Rust 依赖符合此边界；外部动态库若无法静态集成且需要系统安装，默认不采用。
   Source: user constraint on 2026-08-06（原生播放内核选型轮）。
+- [ACT-021] 开发态（debug）凭证只读写 `~/.cadilume-dev-token`（600 权限，git 忽略），
+  永不访问 Keychain；Release 构建只用 Keychain。开发态启动窗口保持隐藏（用户点
+  Dock/托盘才显示），热重载不抢焦点。
+  Source: user requirement on 2026-08-07（凭证隔离与静默启动）。
 
 ## Validation
 

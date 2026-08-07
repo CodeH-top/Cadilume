@@ -1,5 +1,27 @@
 # LEARNINGS
 
+## 2026-08-07 — 原生播放引擎替换完成（dev 分支，Phase 0-6）
+
+- 播放链路：PMS 票据 → Rust 流代理 → 渐进下载缓存（ProgressiveFile 等待式
+  Read+Seek，头部 256KB 就绪即播）→ rodio（cpal+symphonia）出声；进度/结束/
+  远程命令事件经 native-audio://event 回传前端。
+- 队列权威已迁入 Rust：tracks/currentIndex/repeat/shuffle 决策在
+  NativeAudioEngine.queue，自然结束由事件线程决策并 emit queue-item；前端每次
+  加载前 nativeQueueSet 同步快照，next/previous 走 Rust 命令。
+- WebView 播放退役完成：usePlayer native-only，删除 DualAudioPool/预缓冲/
+  MediaError 回退约 1400 行及对应单测（163 项全绿）。开发态不再创建 HTMLAudio。
+- 缓存：512MB LRU（mtime 淘汰、.part 优先清理）；ahead 预取下一首（预缓冲开关
+  开启时 native_audio_precache 后台下载，切歌命中本地缓存减少间隙）。
+- 系统集成：macOS MPNowPlayingInfoCenter + MPRemoteCommandCenter；Windows
+  SystemMediaTransportControls（windows crate 0.58，已跨 target 类型检查，
+  完整构建待 Windows 环境）。前端处理 remote 命令事件（play/pause/toggle/next/
+  previous/seek）。
+- 凭证隔离：debug 构建只读写 ~/.cadilume-dev-token（600），release 只用
+  Keychain；.gitignore 忽略密钥文件；开发态窗口启动隐藏（visible:false +
+  不 reveal），用户点 Dock/托盘显示，避免热重载抢焦点。
+- 遗留验证项：严格 gapless（当前为预取减间隙 MVP）、Windows 实机 SMTC、
+  真实 PMS 高频切歌 20+ 次/歌词对时/seek/后台播放验收。
+
 ## 2026-08-07 — UI/业务修复要点（dev 44e1b9d）
 
 - 歌单内删除歌曲报“请至少选择一首歌曲”根因：PMS `/playlists/{id}/items` 返回的

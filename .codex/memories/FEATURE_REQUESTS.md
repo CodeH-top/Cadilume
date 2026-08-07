@@ -58,6 +58,10 @@
   通过**（连续播放正常，默认音量 20%）。正式原生内核按此路线实施：AudioEngine
   边界 + 队列/进度事件 + seek + Now Playing/SMTC + 缓存上限/LRU + ahead 预取；
   kithara 保留为上游稳定后的备选。
+- 2026-08-07 完成状态：Phase 0-6 主体完成（rodio 内核、队列权威 Rust、磁盘缓存
+  LRU、边下边播、ahead 预取、macOS/Windows SMTC、WebView 播放退役）。剩余：
+  严格 gapless（MVP 预取减间隙）、Windows 实机 SMTC/后台播放验收、真实 PMS 听感
+  回归（高频切歌 20+ 次、歌词对时、seek/暂停恢复）。
 
 ## [FR-20260801-001] 页面标题与歌手资料层级
 
