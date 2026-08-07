@@ -90,6 +90,18 @@
   `::before`（宽=弹层宽、高=空隙高、`bottom: 100%` 居中）做 hover 桥即可，
   保留视觉空隙又不打断 hover。Cadilume 紧凑/展开两套音量弹层都按此修复。
 
+## 2026-08-07 — rodio seek 与下载重试（44e6738）
+
+- rodio 0.22 `Decoder::new(data)` 默认 `is_seekable=false` 且 `byte_len=None`：
+  `try_seek` 直接 NotSupported，向后 seek 尤其失败（报错提示必须提供流长度）。
+  修复：`Decoder::builder().with_data(file).with_byte_len(len).build()`（或
+  `Decoder::try_from`）；渐进播放路径用 `DownloadProgress.expected_len`
+  （来自响应 Content-Length）+ `with_seekable(true)`，未知长度时也开启 seek。
+  `queue_next_source` 预排解码器同样带 byte_len。
+- 下载失败加了最多 3 次自动重试（400ms/800ms 退避）：`download_progressive`
+  拆成 once + retry 包装，每次尝试前重置 downloaded/finished/failed，避免
+  半截文件被当作可用头部；完整性校验失败也会触发重试。
+
 ## 2026-08-07 — 开发态“来回弹窗抢焦点”根因与修复（dev 0cf767a）
 
 - 静默启动不能只看 Rust 侧：`src/App.tsx` 的 `MainApplication` 挂载 effect 曾
