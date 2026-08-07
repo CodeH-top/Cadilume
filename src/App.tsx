@@ -1314,10 +1314,37 @@ function useRouterRoute(): LibraryRoute {
   return useMemo(() => parseLibraryRoute(`${location.pathname}${location.search}`), [location.pathname, location.search]);
 }
 
+function sameLibraryRoute(left: LibraryRoute, right: LibraryRoute): boolean {
+  if (left.view !== right.view || left.query !== right.query) return false;
+  const leftTracks = left.tracks;
+  const rightTracks = right.tracks;
+  if (Boolean(leftTracks) !== Boolean(rightTracks)) return false;
+  if (leftTracks && rightTracks) {
+    if (
+      leftTracks.page !== rightTracks.page
+      || leftTracks.sort?.key !== rightTracks.sort?.key
+      || leftTracks.sort?.direction !== rightTracks.sort?.direction
+    ) return false;
+  }
+  const leftDetail = left.detail;
+  const rightDetail = right.detail;
+  if (Boolean(leftDetail) !== Boolean(rightDetail)) return false;
+  if (leftDetail && rightDetail) {
+    if (leftDetail.type !== rightDetail.type || leftDetail.ratingKey !== rightDetail.ratingKey) return false;
+  }
+  return true;
+}
+
 function useCadilumeNavigate() {
   const navigate = useNavigate();
   const location = useLocation();
+  const currentRoute = useMemo(
+    () => parseLibraryRoute(`${location.pathname}${location.search}`),
+    [location.pathname, location.search],
+  );
   return useCallback((route: LibraryRoute, options: { replace?: boolean } = {}) => {
+    // 重复进入同一路由时不创建新的 History entry，避免 KeepAlive 重建页面/刷新。
+    if (sameLibraryRoute(currentRoute, route)) return;
     navigate(routePath(route), {
       replace: options.replace,
       state: createCadilumeEntryState(location.state, {
@@ -1325,7 +1352,7 @@ function useCadilumeNavigate() {
         route,
       }),
     });
-  }, [location.key, location.state, navigate]);
+  }, [currentRoute, location.key, location.state, navigate]);
 }
 
 function MusicRouterLayout() {
