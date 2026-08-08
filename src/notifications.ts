@@ -1,8 +1,6 @@
-export const GLOBAL_NOTIFICATION_AUTO_CLOSE_MS = 10_000;
+export const GLOBAL_NOTIFICATION_AUTO_CLOSE_MS = 5_000;
 export const GLOBAL_NOTIFICATION_EXIT_MS = 220;
 export const GLOBAL_NOTIFICATION_REDUCED_MOTION_EXIT_MS = 120;
-export const GLOBAL_NOTIFICATION_STACK_THRESHOLD = 3;
-export const GLOBAL_NOTIFICATION_VISIBLE_STACK_LAYERS = 3;
 export const GLOBAL_NOTIFICATION_MAX_COUNT = 5;
 
 export type GlobalNotificationPhase = "entering" | "visible" | "leaving";
@@ -14,7 +12,6 @@ export interface GlobalNotification {
   level: GlobalNotificationLevel;
   createdAt: number;
   order: number;
-  remainingMs: number;
   phase: GlobalNotificationPhase;
 }
 
@@ -31,7 +28,6 @@ export function createGlobalNotification(
     level,
     createdAt,
     order,
-    remainingMs: GLOBAL_NOTIFICATION_AUTO_CLOSE_MS,
     phase: "entering",
   };
 }
@@ -44,8 +40,11 @@ export function isActiveGlobalNotification(notification: GlobalNotification): bo
   return notification.phase !== "leaving";
 }
 
-export function shouldStackGlobalNotifications(notifications: readonly GlobalNotification[]): boolean {
-  return notifications.filter(isActiveGlobalNotification).length >= GLOBAL_NOTIFICATION_STACK_THRESHOLD;
+/** Keep the render list bounded, including a short leaving presence. */
+export function limitGlobalNotifications(notifications: readonly GlobalNotification[]): GlobalNotification[] {
+  return [...notifications]
+    .sort((left, right) => right.order - left.order || right.createdAt - left.createdAt)
+    .slice(0, GLOBAL_NOTIFICATION_MAX_COUNT);
 }
 
 export function markGlobalNotificationLeaving(
@@ -57,8 +56,4 @@ export function markGlobalNotificationLeaving(
       ? { ...notification, phase: "leaving" }
       : notification
   ));
-}
-
-export function remainingNotificationDuration(deadline: number, now: number): number {
-  return Math.max(0, deadline - now);
 }

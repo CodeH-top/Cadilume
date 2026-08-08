@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getCenteredLyricsScrollTop, getLyricProgress } from "./NowPlayingView";
+import { getLyricProgress } from "./NowPlayingView";
+import { getCenteredLyricsScrollTop, getLyricsScrollPlan } from "./lyricsScroll";
 
 describe("expanded player lyric progress", () => {
   const line = { id: "line-1", startMs: 1_000, endMs: 3_000, texts: ["Line"] };
@@ -16,6 +17,8 @@ describe("expanded player lyric progress", () => {
 });
 
 describe("expanded player lyric scrolling", () => {
+  const line = { id: "line-1", startMs: 1_000, endMs: 3_000, texts: ["Line"] };
+
   it("keeps an active lyric centered even when it was already visible", () => {
     expect(getCenteredLyricsScrollTop({
       scrollTop: 100,
@@ -76,5 +79,64 @@ describe("expanded player lyric scrolling", () => {
       targetTop: 120,
       targetHeight: 24,
     })).toBe(0);
+  });
+
+  it("instantly reclaims a manually scrolled list for the opening lyrics", () => {
+    expect(getLyricsScrollPlan({
+      activeLine: line,
+      manuallyScrolled: true,
+      reducedMotion: false,
+      scrollTop: 480,
+      viewportHeight: 200,
+      contentHeight: 1_000,
+      targetTop: -460,
+      targetHeight: 40,
+    })).toEqual({
+      top: 0,
+      behavior: "instant",
+      consumeManualOverride: true,
+    });
+  });
+
+  it("preserves manual control through clear frames until a visible lyric arrives", () => {
+    const metrics = {
+      manuallyScrolled: true,
+      reducedMotion: false,
+      scrollTop: 400,
+      viewportHeight: 200,
+      contentHeight: 1_000,
+      targetTop: -360,
+      targetHeight: 20,
+    };
+    expect(getLyricsScrollPlan({
+      ...metrics,
+      activeLine: { ...line, clear: true, texts: [] },
+    })).toBeUndefined();
+    expect(getLyricsScrollPlan({ ...metrics, activeLine: line })).toMatchObject({
+      behavior: "instant",
+      consumeManualOverride: true,
+    });
+  });
+
+  it("keeps ordinary middle-line following smooth and reduced motion instant", () => {
+    const metrics = {
+      activeLine: line,
+      manuallyScrolled: false,
+      scrollTop: 100,
+      viewportHeight: 200,
+      contentHeight: 1_000,
+      targetTop: 150,
+      targetHeight: 40,
+    };
+    expect(getLyricsScrollPlan({ ...metrics, reducedMotion: false })).toMatchObject({
+      top: 170,
+      behavior: "smooth",
+      consumeManualOverride: false,
+    });
+    expect(getLyricsScrollPlan({ ...metrics, reducedMotion: true })).toMatchObject({
+      top: 170,
+      behavior: "instant",
+      consumeManualOverride: false,
+    });
   });
 });

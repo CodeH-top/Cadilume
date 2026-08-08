@@ -119,50 +119,29 @@ function closeButtonFrom(item: ElementNode): ElementNode {
 beforeEach(() => componentRuntime.reset());
 afterEach(() => componentRuntime.reset());
 
-describe("GlobalNotificationQueue collapsed stack", () => {
-  it("expands all notices for pointer hover and keeps collapsed previews out of the tab order", () => {
+describe("GlobalNotificationQueue flat list", () => {
+  it("renders every bounded notice as a directly interactive row", () => {
     const onDismiss = vi.fn();
-    const onPauseChange = vi.fn();
     const state = notifications();
-    const render = () => componentRuntime.render(() => GlobalNotificationQueue({ notices: state, onDismiss, onPauseChange })) as unknown as ElementNode;
+    const render = () => componentRuntime.render(() => GlobalNotificationQueue({ notices: state, onDismiss })) as unknown as ElementNode;
 
-    let tree = render();
+    const tree = render();
     let list = listFrom(tree);
     let items = elementChildren(list.props.children);
 
-    expect(tree.props["data-stacked"]).toBe(true);
-    expect(list.props.tabIndex).toBe(0);
     expect(items).toHaveLength(3);
-    expect(items[1]?.props["aria-hidden"]).toBe(true);
-    expect(items[1]?.props.inert).toBe(true);
-    expect(closeButtonFrom(items[1]!).props.tabIndex).toBe(-1);
-
-    (list.props.onPointerEnter as () => void)();
-    tree = render();
-    list = listFrom(tree);
-    items = elementChildren(list.props.children);
-
-    expect(tree.props["data-expanded"]).toBe(true);
     expect(tree.props["data-stacked"]).toBeUndefined();
-    expect(list.props.tabIndex).toBeUndefined();
+    expect(tree.props["data-expanded"]).toBeUndefined();
     expect(items.every((item) => item.props["aria-hidden"] === undefined && item.props.inert === undefined)).toBe(true);
     expect(items.every((item) => closeButtonFrom(item).props.tabIndex === undefined)).toBe(true);
-
-    (list.props.onPointerLeave as () => void)();
-    tree = render();
-    expect(tree.props["data-stacked"]).toBe(true);
   });
 
-  it("expands the same stack when keyboard focus enters the list", () => {
-    const state = notifications();
-    const render = () => componentRuntime.render(() => GlobalNotificationQueue({ notices: state, onDismiss: vi.fn(), onPauseChange: vi.fn() })) as unknown as ElementNode;
-
-    let tree = render();
-    const list = listFrom(tree);
-    (list.props.onFocusCapture as () => void)();
-
-    tree = render();
-    expect(tree.props["data-expanded"]).toBe(true);
-    expect(tree.props["data-stacked"]).toBeUndefined();
+  it("keeps the render list capped at five entries", () => {
+    const state = Array.from({ length: 6 }, (_, index) => ({
+      ...createGlobalNotification(`notice-${index}`, `第 ${index + 1} 条`, "info", index, index),
+      phase: "visible" as const,
+    }));
+    const tree = componentRuntime.render(() => GlobalNotificationQueue({ notices: state, onDismiss: vi.fn() })) as unknown as ElementNode;
+    expect(elementChildren(listFrom(tree).props.children)).toHaveLength(5);
   });
 });

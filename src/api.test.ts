@@ -618,7 +618,7 @@ describe("Plex audio playlists", () => {
     const removed = await removeTracksFromPlaylist("demo-server", seeded.ratingKey, [seedTrack!.ratingKey]);
     expect(removed).toEqual({ requested: 1, removed: 1, failedItemIds: [] });
     await expect(getPlaylistItems("demo-server", seeded.ratingKey)).resolves.toEqual([]);
-    expect((await getPlaylists("demo-server")).some((playlist) => playlist.ratingKey === seeded.ratingKey)).toBe(true);
+    expect((await getPlaylists("demo-server")).find((playlist) => playlist.ratingKey === seeded.ratingKey)).toMatchObject({ leafCount: 0, duration: 0 });
     expect(invokeMock).not.toHaveBeenCalled();
   });
 

@@ -14,8 +14,9 @@ import {
   SkipBack,
   SkipForward,
 } from "lucide-react";
-import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { hasDisplayableLyrics, type LyricLine, type LyricsDocument } from "./lyrics";
+import { useActiveLyricsScroll } from "./lyricsScroll";
 import { playbackControlLabel, usableDurationSeconds } from "./playerUi";
 import { trackArtistContributors, type PlexContributor, type PlexMedia, type ThemeMode } from "./types";
 import { SharedVolumeControl } from "./VolumeControl";
@@ -123,37 +124,6 @@ export function getLyricProgress(line: LyricLine, positionMs: number): number {
   const end = line.endMs;
   if (end === null || !Number.isFinite(end) || end <= start) return positionMs >= start ? 1 : 0;
   return clampUnit((positionMs - start) / (end - start));
-}
-
-export interface LyricsScrollMetrics {
-  scrollTop: number;
-  viewportHeight: number;
-  contentHeight: number;
-  targetTop: number;
-  targetHeight: number;
-}
-
-/**
- * Keep the active lyric centered whenever the scroll range allows it. Near
- * either edge, clamp to the available range instead of creating blank space.
- * `targetTop` is measured from the list's visible top edge.
- */
-export function getCenteredLyricsScrollTop({
-  scrollTop,
-  viewportHeight,
-  contentHeight,
-  targetTop,
-  targetHeight,
-}: LyricsScrollMetrics): number {
-  const viewport = Number.isFinite(viewportHeight) ? Math.max(0, viewportHeight) : 0;
-  const content = Number.isFinite(contentHeight) ? Math.max(viewport, contentHeight) : viewport;
-  const maximum = Math.max(0, content - viewport);
-  const current = Number.isFinite(scrollTop) ? Math.min(maximum, Math.max(0, scrollTop)) : 0;
-  const offset = Number.isFinite(targetTop) ? targetTop : 0;
-  const height = Number.isFinite(targetHeight) ? Math.max(0, targetHeight) : 0;
-  const targetCenterInContent = current + offset + height / 2;
-  const centeredTop = targetCenterInContent - viewport / 2;
-  return Math.min(maximum, Math.max(0, centeredTop));
 }
 
 function clampUnit(value: number): number {
@@ -363,12 +333,24 @@ export function NowPlayingView({
           <section className="now-playing-art-column" aria-label="播放视觉">
             {displayMode === "vinyl" ? (
               <div className={`now-playing-record-stage ${activelyPlaying ? "is-playing" : "is-paused"}`}>
-                <div className="now-playing-tonearm" aria-hidden="true">
-                  <span className="now-playing-tonearm-pivot" data-testid="tonearm-pivot" />
-                  <span className="now-playing-tonearm-arm" data-testid="tonearm-arm">
-                    <span className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge"><span /></span>
-                  </span>
-                </div>
+                <svg className="now-playing-tonearm" viewBox="0 0 240 220" aria-hidden="true">
+                  <g className="now-playing-tonearm-base" data-testid="tonearm-pivot">
+                    <ellipse className="now-playing-tonearm-base-shadow" cx="205" cy="36" rx="28" ry="14" />
+                    <circle className="now-playing-tonearm-base-ring" cx="205" cy="30" r="22" />
+                    <circle className="now-playing-tonearm-base-bearing" cx="205" cy="30" r="13" />
+                    <circle className="now-playing-tonearm-base-cap" cx="201" cy="25" r="4" />
+                  </g>
+                  <g className="now-playing-tonearm-armature">
+                    <path className="now-playing-tonearm-rail-shadow" d="M205 30 C196 56 180 80 153 105 S91 154 63 189" />
+                    <path className="now-playing-tonearm-arm" data-testid="tonearm-arm" d="M205 30 C196 56 180 80 153 105 S91 154 63 189" />
+                    <path className="now-playing-tonearm-rail-highlight" d="M203 28 C194 53 178 77 151 102 S89 151 61 186" />
+                    <g className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge" transform="translate(63 189) rotate(-18)">
+                      <path className="now-playing-tonearm-cartridge-neck" d="M-4 0 H7" />
+                      <rect className="now-playing-tonearm-cartridge-body" x="5" y="-7" width="29" height="14" rx="3" />
+                      <path className="now-playing-tonearm-stylus" d="M27 6 L24 20 L20 22" />
+                    </g>
+                  </g>
+                </svg>
                 <div className="now-playing-record" aria-label={`${track?.title || "尚未播放"} 黑胶唱片`} role="img">
                   <div className="now-playing-record-grooves" aria-hidden="true" />
                   <div className="now-playing-record-label">
@@ -509,47 +491,27 @@ function ExpandedLyricsPanel({ track, lyrics, onSeek }: {
   lyrics?: NowPlayingLyricsState;
   onSeek: (seconds: number) => void;
 }) {
-  const listRef = useRef<HTMLDivElement>(null);
-  const lineRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const trackIdentity = String(track?.ratingKey ?? track?.key ?? track?.title ?? "");
-  const previousTrackIdentityRef = useRef(trackIdentity);
   const lines = lyrics?.document?.lines ?? [];
   const activeIndex = lyrics?.activeIndex ?? -1;
-
-  useLayoutEffect(() => {
-    const list = listRef.current;
-    if (!list) return;
-    if (previousTrackIdentityRef.current !== trackIdentity) {
-      previousTrackIdentityRef.current = trackIdentity;
-      list.scrollTop = 0;
-    }
-    if (!lyrics?.document?.timed) return;
-    const activeLine = lines[activeIndex];
-    if (!activeLine || activeLine.clear) return;
-    const node = lineRefs.current[activeLine.id];
-    if (!node || typeof list.scrollTo !== "function") return;
-    const listRect = list.getBoundingClientRect();
-    const nodeRect = node.getBoundingClientRect();
-    const nextScrollTop = getCenteredLyricsScrollTop({
-      scrollTop: list.scrollTop,
-      viewportHeight: list.clientHeight,
-      contentHeight: list.scrollHeight,
-      targetTop: nodeRect.top - listRect.top,
-      targetHeight: nodeRect.height,
-    });
-    if (Math.abs(nextScrollTop - list.scrollTop) < 0.5) return;
-    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-    list.scrollTo({ top: nextScrollTop, behavior: reducedMotion ? "auto" : "smooth" });
-  }, [activeIndex, lines, lyrics?.document?.timed, trackIdentity]);
+  const lyricScroll = useActiveLyricsScroll({
+    trackIdentity,
+    timed: lyrics?.document?.timed === true,
+    activeLine: lines[activeIndex],
+  });
 
   return (
     <section className="now-playing-panel now-playing-lyrics-panel" aria-label="展开播放器歌词">
       <div
-        ref={listRef}
+        ref={lyricScroll.listRef}
         className="now-playing-lyrics-list"
         aria-live="polite"
         aria-busy={lyrics?.loading || undefined}
         tabIndex={0}
+        onWheel={lyricScroll.onWheel}
+        onTouchMove={lyricScroll.onTouchMove}
+        onPointerDown={lyricScroll.onPointerDown}
+        onKeyDown={lyricScroll.onKeyDown}
       >
         {lyrics?.loading ? (
           <div className="now-playing-panel-message" role="status"><LoaderCircle className="spin" size={22} /><span>正在读取歌词...</span></div>
@@ -565,7 +527,7 @@ function ExpandedLyricsPanel({ track, lyrics, onSeek }: {
           const active = timed && index === activeIndex;
           return (
             <button
-              ref={(node) => { lineRefs.current[line.id] = node; }}
+              ref={(node) => lyricScroll.setLineRef(line.id, node)}
               className={`now-playing-lyric-line ${active ? "is-active" : ""} ${timed ? "is-timed" : "is-static"}`}
               key={line.id}
               type="button"

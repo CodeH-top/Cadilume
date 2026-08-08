@@ -40,7 +40,9 @@
   Source: user requirement and full-window validation on 2026-08-08.
 - [ACT-024] 主窗口与展开播放器的定时歌词统一保持活动行垂直居中；只有滚动范围不足时才在
   顶部/底部钳制。切歌可归零旧滚动位置，但不得清空本次渲染已挂载的行 ref 后提前返回。
-  Source: user requirement and dual-view DOM validation on 2026-08-08.
+  用户手动滚动后，下一条可见歌词必须瞬时夺回定位；空白歌词帧保留手动标记，普通切句
+  继续平滑跟随。
+  Source: user requirement and dual-view DOM/wheel validation on 2026-08-08.
 
 ## Validation
 

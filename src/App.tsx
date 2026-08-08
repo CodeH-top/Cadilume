@@ -99,7 +99,8 @@ import { isCurrentLibraryDetailRoute, libraryDetailRoute, libraryRouteHash, libr
 import { createCadilumeEntryState, historyEntryCacheKey, routeEntryId, routeParentEntryId } from "./routeEntry";
 import { routeScrollBehavior, shouldShowRouteBackToTop } from "./routeScroll";
 import { hasDisplayableLyrics } from "./lyrics";
-import { getCenteredLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
+import { NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
+import { useActiveLyricsScroll } from "./lyricsScroll";
 import { getLyricsActionPresentation } from "./playerActions";
 import { playbackControlLabel, rangeFillPercent, usableDurationSeconds } from "./playerUi";
 import { homeRecommendationHubs, isRecentlyAddedHub, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
@@ -176,8 +177,6 @@ interface MusicShellRuntime {
   brandPreset: BrandPreset;
   onThemeMode: ThemeModeChange;
   onBrandPreset: BrandPresetChange;
-  searchText: string;
-  setSearchText: (value: string) => void;
   servers: PlexServer[];
   serverId?: string;
   selectedServer?: PlexServer;
@@ -381,12 +380,13 @@ const NOTIFICATION_FIXTURE_MESSAGES = [
   "已切换为琥珀金。",
   "播放队列已更新。",
   "封面缓存已在后台整理。",
+  "歌词已同步。",
+  "输出设备已切换。",
 ];
 
 function NotificationFixture() {
   const queue = useGlobalNotificationQueue();
   const previewParams = new URLSearchParams(window.location.search);
-  const holdTimers = previewParams.get("notification-hold") === "1";
   const requestedTheme = previewParams.get("notification-theme");
   const requestedBrand = previewParams.get("notification-brand");
   const previewTheme = requestedTheme === "light" || requestedTheme === "dark" ? requestedTheme : undefined;
@@ -409,15 +409,12 @@ function NotificationFixture() {
     };
   }, [previewBrand, previewTheme]);
 
-  const setQueuePaused = useCallback((paused: boolean) => {
-    queue.setPaused(holdTimers || paused);
-  }, [holdTimers, queue.setPaused]);
   const addMessages = (count: number) => {
     for (const message of NOTIFICATION_FIXTURE_MESSAGES.slice(0, count)) queue.notify(message, "error");
   };
 
   return (
-    <main className="notification-fixture" data-testid="notification-fixture" data-hold-timers={holdTimers || undefined}>
+    <main className="notification-fixture" data-testid="notification-fixture">
       <div>
         <p>开发验收</p>
         <h1>通知队列</h1>
@@ -426,10 +423,11 @@ function NotificationFixture() {
         <button type="button" data-testid="notification-fixture-add-one" onClick={() => addMessages(1)}>加入 1 条</button>
         <button type="button" data-testid="notification-fixture-add-three" onClick={() => addMessages(3)}>加入 3 条</button>
         <button type="button" data-testid="notification-fixture-add-four" onClick={() => addMessages(4)}>加入 4 条</button>
-        <button type="button" data-testid="notification-fixture-add-long" onClick={() => queue.notify("这是一条用于验证自动换行、堆叠高度、展开列表和关闭按钮可访问名称的较长通知文案。")}>加入长文案</button>
+        <button type="button" data-testid="notification-fixture-add-six" onClick={() => addMessages(6)}>加入 6 条</button>
+        <button type="button" data-testid="notification-fixture-add-long" onClick={() => queue.notify("这是一条用于验证自动换行、固定宽度列表和关闭按钮可访问名称的较长通知文案。")}>加入长文案</button>
         <button type="button" data-testid="notification-fixture-clear" onClick={queue.clear}>清空</button>
       </div>
-      <GlobalNotificationQueue notices={queue.notices} onDismiss={queue.dismiss} onPauseChange={setQueuePaused} />
+      <GlobalNotificationQueue notices={queue.notices} onDismiss={queue.dismiss} />
     </main>
   );
 }
@@ -469,13 +467,11 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [sections, setSections] = useState<LibrarySection[]>([]);
   const [sectionKey, setSectionKey] = useState<string>();
   const [libraryArtists, setLibraryArtists] = useState<PlexItem[]>([]);
-  const [searchText, setSearchText] = useState("");
   const [, setLoading] = useState(true);
   const {
     notices,
     notify,
     dismiss: dismissNotification,
-    setPaused: setNotificationsPaused,
   } = useGlobalNotificationQueue();
   const [sidePanel, setSidePanel] = useState<"queue" | "lyrics" | "devices" | null>(null);
   const [nowPlayingOpen, setNowPlayingOpen] = useState(false);
@@ -1079,8 +1075,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     brandPreset,
     onThemeMode,
     onBrandPreset,
-    searchText,
-    setSearchText,
     servers,
     serverId,
     selectedServer,
@@ -1311,7 +1305,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       <GlobalNotificationQueue
         notices={notices}
         onDismiss={dismissNotification}
-        onPauseChange={setNotificationsPaused}
       />
     </div>
     </MusicShellContext.Provider>
@@ -1399,16 +1392,6 @@ function MusicRouterLayout() {
     ? connectionPreviewParam as ConnectionKind
     : undefined;
 
-  const submitSearch = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const query = runtime.searchText.trim();
-    if (!query) {
-      runtime.notify("搜索内容不能为空", "warning");
-      return;
-    }
-    navigateRoute({ view: "search", query });
-  };
-
   const selectedPlaylistId = route.detail?.type === "playlist" ? route.detail.ratingKey : undefined;
   const activeView = selectedPlaylistId ? undefined : route.view;
 
@@ -1420,15 +1403,7 @@ function MusicRouterLayout() {
   return (
     <>
       <AppTitlebar inactive={runtime.expandedPlayerOpen}>
-        <form className="searchbox" onSubmit={submitSearch} role="search">
-          <Search size={17} />
-          <input value={runtime.searchText} onChange={(event) => runtime.setSearchText(event.target.value)} placeholder="搜索歌曲、专辑或歌手" aria-label="搜索资料库" />
-          {runtime.searchText && (
-            <button type="button" className="searchbox-clear" aria-label="清除搜索" onClick={() => runtime.setSearchText("")}>
-              <X size={15} />
-            </button>
-          )}
-        </form>
+        <LibrarySearchBox route={route} navigateRoute={navigateRoute} notify={runtime.notify} />
         <div className="topbar-actions">
           <div className="topbar-account" aria-label={`${runtime.account.title || runtime.account.username} 的 Plex 用户信息`}>
             <Avatar account={runtime.account} />
@@ -1478,6 +1453,55 @@ function MusicRouterLayout() {
         </main>
       </section>
     </>
+  );
+}
+
+/** Keep typing state outside MusicShell so each key cannot invalidate the player tree. */
+function LibrarySearchBox({ route, navigateRoute, notify }: {
+  route: LibraryRoute;
+  navigateRoute: RouteNavigate;
+  notify: MusicShellRuntime["notify"];
+}) {
+  const [draft, setDraft] = useState(() => route.view === "search" ? route.query || "" : "");
+
+  useEffect(() => {
+    if (route.view === "search") setDraft(route.query || "");
+  }, [route.query, route.view]);
+
+  const submitQuery = useCallback(() => {
+    const query = draft.trim();
+    if (!query) {
+      notify("搜索内容不能为空", "warning");
+      return;
+    }
+    navigateRoute({ view: "search", query }, { replace: route.view === "search" });
+  }, [draft, navigateRoute, notify, route.view]);
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    submitQuery();
+  };
+
+  return (
+    <form className="searchbox" onSubmit={submit} role="search">
+      <Search size={17} />
+      <input
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          submitQuery();
+        }}
+        placeholder="搜索歌曲、专辑或歌手"
+        aria-label="搜索资料库"
+      />
+      {draft && (
+        <button type="button" className="searchbox-clear" aria-label="清除搜索" onClick={() => setDraft("")}>
+          <X size={15} />
+        </button>
+      )}
+    </form>
   );
 }
 
@@ -1639,7 +1663,7 @@ function KeepAliveRoutePage({ cacheKey, children }: { cacheKey: string; children
   }, []);
 
   return <>
-    <div ref={pageRef} className={`route-page-scroll ${route.view === "tracks" ? "is-track-workspace" : ""}`.trim()} data-route-entry={cacheKey}>{children}</div>
+    <div ref={pageRef} className={`route-page-scroll ${route.view === "tracks" ? "is-track-workspace" : ""} ${route.view === "settings" ? "is-settings-workspace" : ""}`.trim()} data-route-entry={cacheKey}>{children}</div>
     {active && showBackToTop && (
       <button className="route-back-to-top" type="button" aria-label="回到顶部" data-tooltip="回到顶部" onClick={scrollToRouteTop}>
         <ArrowUp size={18} strokeWidth={2.2} aria-hidden="true" />
@@ -1649,8 +1673,10 @@ function KeepAliveRoutePage({ cacheKey, children }: { cacheKey: string; children
 }
 
 function RoutePage() {
-  const entryRef = useRef(useRouteEntry());
-  const { route, entryLocation, onNavigate, onBack } = entryRef.current;
+  // The keep-alive host gives every history entry its own context value. Read it
+  // directly so a restored or rapidly switched cache node cannot stay pinned to
+  // the first route that happened to mount this component.
+  const { route, entryLocation, onNavigate, onBack } = useRouteEntry();
   const runtime = useMusicShellRuntime();
   const [items, setItems] = useState<PlexItem[]>([]);
   const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
@@ -1729,7 +1755,10 @@ function RoutePage() {
       runtime.notify("这个歌单不可编辑。");
       return;
     }
-    const playlistItemId = track.playlistItemID;
+    // Demo playlist entries do not carry Plex's optional playlistItemID. Only
+    // the browser adapter may use the track key as its local identity; a real
+    // PMS mutation must keep requiring the server-issued playlist item ID.
+    const playlistItemId = track.playlistItemID || (!isDesktopRuntime() ? track.ratingKey : undefined);
     if (!playlistItemId) {
       runtime.notify("这首歌曲缺少歌单项标识，无法从歌单移除。");
       return;
@@ -1737,7 +1766,7 @@ function RoutePage() {
     try {
       const result = await removeTracksFromPlaylist(runtime.serverId, playlist.ratingKey, [playlistItemId]);
       if (result.removed > 0) {
-        setPlaylistItems((current) => current.filter((item) => item.playlistItemID !== playlistItemId));
+        setPlaylistItems((current) => current.filter((item) => (item.playlistItemID || item.ratingKey) !== playlistItemId));
         runtime.notify(`已从歌单移除《${track.title}》。`, "success");
         void runtime.loadPlaylistList();
       } else {
@@ -1751,10 +1780,6 @@ function RoutePage() {
   const handleRouteChange = useCallback((nextRoute: LibraryRoute) => {
     onNavigate(nextRoute);
   }, [onNavigate]);
-
-  useEffect(() => {
-    if (view === "search") runtime.setSearchText(query);
-  }, [query, runtime.setSearchText, view]);
 
   useEffect(() => {
     const requestId = ++requestRef.current;
@@ -2186,22 +2211,38 @@ function PlaylistDeleteDialog({ playlist, busy, onConfirm, onClose }: {
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const dialogRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.querySelector<HTMLButtonElement>(".secondary-button")?.focus({ preventScroll: true }));
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || busy) return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [busy, onClose]);
+
   return (
     <div className="playlist-dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
-      <section className="playlist-dialog playlist-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="playlist-delete-title">
-        <header>
-          <div><h2 id="playlist-delete-title">删除歌单</h2></div>
-          <IconButton label="关闭删除确认" tooltip={null} disabled={busy} onClick={onClose}><X size={18} /></IconButton>
-        </header>
-        <div className="playlist-delete-copy">
-          将删除歌单“{playlist.title}”及其中的 {playlist.leafCount ?? 0} 首歌曲，此操作无法撤销。
+      <section ref={dialogRef} className="playlist-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="playlist-delete-title" tabIndex={-1}>
+        <div className="playlist-delete-content">
+          <span className="playlist-delete-icon" aria-hidden="true"><Trash2 size={18} /></span>
+          <div>
+            <h2 id="playlist-delete-title">删除歌单</h2>
+            <p>确定删除“{playlist.title}”？其中的 {playlist.leafCount ?? 0} 首歌曲也会从歌单中移除。</p>
+          </div>
         </div>
-        <footer>
+        <div className="playlist-delete-actions">
           <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>取消</button>
           <button type="button" className="danger-button" disabled={busy} aria-busy={busy || undefined} onClick={() => { if (!busy) onConfirm(); }}>
             {busy ? <><LoaderCircle className="spin" size={15} />正在删除…</> : <><Trash2 size={15} />删除</>}
           </button>
-        </footer>
+        </div>
       </section>
     </div>
   );
@@ -2980,7 +3021,7 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
         </div>
         {tracks.map((track, index) => (
           <div
-            className={`track-row track-data-row ${onRemoveTrack ? "has-remove" : ""}`.trim()}
+            className={`track-row track-data-row ${onRemoveTrack ? "has-remove" : ""} ${pendingRemove?.ratingKey === track.ratingKey ? "is-remove-confirm-open" : ""}`.trim()}
             role="row"
             aria-rowindex={index + 2}
             key={`${track.ratingKey}-${index}`}
@@ -3080,7 +3121,7 @@ function Popconfirm({ title, description, confirmLabel = "确认", cancelLabel =
 
   useEffect(() => {
     if (!anchor) return;
-    confirmRef.current?.focus();
+    confirmRef.current?.focus({ preventScroll: true });
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as Node | null;
       if (!target) return;
@@ -3265,7 +3306,6 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
       <div className="page-heading sticky-page-heading track-page-heading">
         <div className="track-page-heading-copy">
           <LibraryPageTitle>歌曲</LibraryPageTitle>
-          <span className="track-page-count" aria-live="polite">{totalSize ? `共 ${totalSize} 首歌曲` : loading ? "正在读取歌曲…" : "当前资料库没有歌曲"}</span>
         </div>
         <div className="track-selection-actions" role="group" aria-label="已选歌曲操作">
           {selectedTracks.length > 0 && <span className="track-selection-summary" aria-live="polite">已选择 {selectedTracks.length} 首</span>}
@@ -3281,11 +3321,15 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
             <TrackTableGrid label="歌曲" tracks={tracks} artists={artists} totalSize={totalSize} sort={sort} onSort={updateSort} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlay} startIndex={start} selection={{ selectedRatingKeys, onToggleTrack: toggleTrack, onTogglePage: togglePage }} />
           </div>
           <nav className="track-pagination" aria-label="歌曲分页">
-            {page > 1 && <button type="button" onClick={() => updatePage(1)} aria-label="首页">首页</button>}
-            <button type="button" onClick={() => updatePage(page - 1)} disabled={page <= 1} aria-label="上一页">上一页</button>
-            <span className="track-pagination-pages">{paginationSequence(page, totalPages).map((item, index) => item === "ellipsis" ? <span key={`ellipsis-${index}`} aria-hidden="true">…</span> : <button key={item} type="button" className={item === page ? "is-current" : ""} aria-current={item === page ? "page" : undefined} onClick={() => updatePage(item)}>{item}</button>)}</span>
-            <button type="button" onClick={() => updatePage(page + 1)} disabled={page >= totalPages} aria-label="下一页">下一页</button>
-            {page < totalPages && <button type="button" onClick={() => updatePage(totalPages)} aria-label="末页">末页</button>}
+            <span className="track-pagination-total" aria-live="polite">{totalSize ? `共 ${totalSize} 首歌曲` : loading ? "正在读取歌曲…" : "当前资料库没有歌曲"}</span>
+            <span className="track-pagination-controls">
+              {page > 1 && <button type="button" onClick={() => updatePage(1)} aria-label="首页">首页</button>}
+              <button type="button" onClick={() => updatePage(page - 1)} disabled={page <= 1} aria-label="上一页">上一页</button>
+              <span className="track-pagination-pages">{paginationSequence(page, totalPages).map((item, index) => item === "ellipsis" ? <span key={`ellipsis-${index}`} aria-hidden="true">…</span> : <button key={item} type="button" className={item === page ? "is-current" : ""} aria-current={item === page ? "page" : undefined} onClick={() => updatePage(item)}>{item}</button>)}</span>
+              <button type="button" onClick={() => updatePage(page + 1)} disabled={page >= totalPages} aria-label="下一页">下一页</button>
+              {page < totalPages && <button type="button" onClick={() => updatePage(totalPages)} aria-label="末页">末页</button>}
+            </span>
+            <span className="track-pagination-spacer" aria-hidden="true" />
           </nav>
         </div>
       ) : <EmptyState title="没有歌曲" description="当前音乐资料库没有返回可显示的歌曲。" icon={<Music2 size={28} />} />}
@@ -3370,7 +3414,7 @@ function SettingsView(props: ContentViewProps) {
           <div className="choice-grid choice-grid--compact choice-grid--visual" role="radiogroup" aria-label="视觉风格">
             {BRAND_PRESET_OPTIONS.map((option) => {
               const active = props.brandPreset === option.preset;
-              return <ChoiceCard key={option.preset} radio active={active} title={option.label} icon={<span className="visual-preset-swatch" data-preset={option.preset} aria-hidden="true" />} onClick={(event) => {
+              return <ChoiceCard key={option.preset} radio active={active} title={option.label} showCheck={false} icon={<span className="visual-preset-swatch" data-preset={option.preset} aria-hidden="true" />} onClick={(event) => {
                 if (active) return;
                 const bounds = event.currentTarget.getBoundingClientRect();
                 void props.onBrandPreset(option.preset, { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 });
@@ -3629,8 +3673,8 @@ function SettingsSelect({ label, value, placeholder, disabled, options, onValueC
   );
 }
 
-function ChoiceCard({ active, title, icon, onClick, radio = false }: { active: boolean; title: string; icon: ReactNode; onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void; radio?: boolean }) {
-  return <button type="button" className={`choice-card ${active ? "active" : ""}`} role={radio ? "radio" : undefined} aria-checked={radio ? active : undefined} onClick={onClick}>{icon}<strong>{title}</strong>{active && <Check className="choice-check" size={16} />}</button>;
+function ChoiceCard({ active, title, icon, onClick, radio = false, showCheck = true }: { active: boolean; title: string; icon: ReactNode; onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void; radio?: boolean; showCheck?: boolean }) {
+  return <button type="button" className={`choice-card ${active ? "active" : ""}`} role={radio ? "radio" : undefined} aria-checked={radio ? active : undefined} onClick={onClick}>{icon}<strong>{title}</strong>{active && showCheck && <Check className="choice-check" size={16} />}</button>;
 }
 
 function ThemeCycleButton({ resolvedTheme, onChange }: { resolvedTheme: ResolvedTheme; onChange: ThemeModeChange }) {
@@ -3699,52 +3743,28 @@ function LyricsPanel({ open, track, lyrics, onSeek }: {
   lyrics: NowPlayingLyricsState;
   onSeek: (seconds: number) => void;
 }) {
-  const listRef = useRef<HTMLDivElement>(null);
-  const lineRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const trackIdentity = track?.ratingKey || track?.key || track?.title || "";
-  const previousTrackIdentityRef = useRef(trackIdentity);
   const lines = lyrics.document?.lines ?? [];
   const activeIndex = lyrics.activeIndex ?? -1;
-
-  useLayoutEffect(() => {
-    const list = listRef.current;
-    if (!list) return;
-
-    if (previousTrackIdentityRef.current !== trackIdentity) {
-      previousTrackIdentityRef.current = trackIdentity;
-      list.scrollTop = 0;
-    }
-
-    if (!lyrics.document?.timed) return;
-    const activeLine = lines[activeIndex];
-    if (!activeLine || activeLine.clear) return;
-    const node = lineRefs.current[activeLine.id];
-    if (!node || typeof list.scrollTo !== "function") return;
-    const listRect = list.getBoundingClientRect();
-    const nodeRect = node.getBoundingClientRect();
-    const nextScrollTop = getCenteredLyricsScrollTop({
-      scrollTop: list.scrollTop,
-      viewportHeight: list.clientHeight,
-      contentHeight: list.scrollHeight,
-      targetTop: nodeRect.top - listRect.top,
-      targetHeight: nodeRect.height,
-    });
-    if (Math.abs(nextScrollTop - list.scrollTop) < 0.5) return;
-    list.scrollTo({
-      top: nextScrollTop,
-      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-    });
-  }, [activeIndex, lines, lyrics.document?.timed, trackIdentity]);
+  const lyricScroll = useActiveLyricsScroll({
+    trackIdentity,
+    timed: lyrics.document?.timed === true,
+    activeLine: lines[activeIndex],
+  });
 
   return (
     <aside className="lyrics-panel" data-panel-state={open ? "open" : "closing"} aria-hidden={!open || undefined} inert={!open || undefined} aria-label="歌词">
       <div
-        ref={listRef}
+        ref={lyricScroll.listRef}
         className="lyrics-list"
         tabIndex={0}
         aria-label={`${track?.title || "当前歌曲"}的歌词内容`}
         aria-live="polite"
         aria-busy={lyrics.loading || undefined}
+        onWheel={lyricScroll.onWheel}
+        onTouchMove={lyricScroll.onTouchMove}
+        onPointerDown={lyricScroll.onPointerDown}
+        onKeyDown={lyricScroll.onKeyDown}
       >
         {lyrics.loading ? (
           <div className="lyrics-message" role="status"><LoaderCircle className="spin" size={22} /><span>正在读取歌词…</span></div>
@@ -3760,7 +3780,7 @@ function LyricsPanel({ open, track, lyrics, onSeek }: {
           const active = timed && index === activeIndex;
           return (
             <button
-              ref={(node) => { lineRefs.current[line.id] = node; }}
+              ref={(node) => lyricScroll.setLineRef(line.id, node)}
               className={`lyric-line ${active ? "is-active" : ""} ${timed ? "is-timed" : "is-static"}`}
               key={line.id}
               type="button"
@@ -4301,7 +4321,7 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
     <footer className={`player-bar ${expanded ? "is-expanded" : ""}`} aria-label="播放器" aria-hidden={expanded || undefined} inert={expanded || undefined}>
       <button ref={nowPlayingTriggerRef} className="now-playing now-playing-trigger" type="button" disabled={!canOpenNowPlaying} onClick={onOpenNowPlaying} aria-label={player.current ? `展开正在播放：${player.current.title}` : "尚未播放"}>
         <span className={`mini-vinyl ${player.playing && !playbackBusy ? "is-playing" : ""}`.trim()}>
-          <Artwork item={player.current} size="player" />
+          <Artwork item={player.current} size="player" stableTransition />
         </span>
         <span><strong>{player.current?.title || "尚未播放"}</strong><small>{player.current ? trackArtist(player.current) : "从资料库选择音乐"}</small></span>
       </button>
@@ -4417,16 +4437,18 @@ interface ArtworkItem {
   imageUrl?: string;
 }
 
-function Artwork({ item, size, className = "", preferArt = false }: {
+function Artwork({ item, size, className = "", preferArt = false, stableTransition = false }: {
   item?: ArtworkItem;
   size: "small" | "large" | "hero" | "player" | "immersive" | "backdrop";
   className?: string;
   preferArt?: boolean;
+  stableTransition?: boolean;
 }) {
   const serverId = useContext(ArtworkServerContext);
   const hostRef = useRef<HTMLSpanElement>(null);
   const [visible, setVisible] = useState(!isDesktopRuntime());
   const [source, setSource] = useState(item?.imageUrl);
+  const [displayedSource, setDisplayedSource] = useState(item?.imageUrl);
   const [failed, setFailed] = useState(false);
   const [ticketRetryCount, setTicketRetryCount] = useState(0);
   const path = preferArt
@@ -4447,9 +4469,10 @@ function Artwork({ item, size, className = "", preferArt = false }: {
 
   useEffect(() => {
     setSource(item?.imageUrl);
+    if (!stableTransition || (!item?.imageUrl && !path)) setDisplayedSource(item?.imageUrl);
     setFailed(false);
     setTicketRetryCount(0);
-  }, [item?.imageUrl, item?.ratingKey, path, serverId]);
+  }, [item?.imageUrl, item?.ratingKey, path, serverId, stableTransition]);
 
   useEffect(() => {
     if (!isDesktopRuntime() || item?.imageUrl || !path || !serverId) {
@@ -4485,7 +4508,10 @@ function Artwork({ item, size, className = "", preferArt = false }: {
       .then((url) => { if (!cancelled) setSource(url); })
       .catch(() => {
         artworkCache.delete(artworkRequestKey);
-        if (!cancelled) setFailed(true);
+        if (!cancelled) {
+          setFailed(true);
+          setDisplayedSource(undefined);
+        }
       });
     return () => { cancelled = true; };
   }, [artworkRequestKey, dimensions.height, dimensions.width, failed, path, serverId, source, visible]);
@@ -4500,14 +4526,39 @@ function Artwork({ item, size, className = "", preferArt = false }: {
       }
     }
     setFailed(true);
+    setDisplayedSource(undefined);
   };
   const awaitingTicketRetry = ticketRetryCount > 0 && !failed && !source && Boolean(path);
+  const renderedSource = stableTransition ? displayedSource : source;
+  const candidateSource = stableTransition && source && source !== displayedSource ? source : undefined;
 
   return (
     <span ref={hostRef} className={`artwork artwork-${size} ${className}`}>
-      {source && !failed
-        ? <img src={source} alt={`${item?.title || "音乐"} 封面`} loading="lazy" onError={handleImageError} />
+      {renderedSource && (!failed || stableTransition)
+        ? <img
+            src={renderedSource}
+            alt={`${item?.title || "音乐"} 封面`}
+            loading={stableTransition ? "eager" : "lazy"}
+            onError={() => {
+              if (stableTransition && renderedSource !== source) {
+                setDisplayedSource(undefined);
+                return;
+              }
+              handleImageError();
+            }}
+          />
         : awaitingTicketRetry ? null : <Music2 aria-hidden="true" />}
+      {candidateSource && !failed && (
+        <img
+          className="artwork-candidate"
+          src={candidateSource}
+          alt=""
+          aria-hidden="true"
+          decoding="async"
+          onLoad={() => setDisplayedSource(candidateSource)}
+          onError={handleImageError}
+        />
+      )}
     </span>
   );
 }
@@ -4857,6 +4908,7 @@ function useAppearance() {
   const [brandPreset, setBrandPreset] = useState<BrandPreset>(readInitialBrandPreset);
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(themeMode);
   const transitionLockRef = useRef(false);
+  const brandSaveChainRef = useRef<Promise<void>>(Promise.resolve());
 
   useLayoutEffect(() => {
     applyAppearance({ theme: themeMode, brand: brandPreset });
@@ -4914,25 +4966,18 @@ function useAppearance() {
     void playAppearanceReveal(origin, { theme: themeMode, brand: brandPreset }, applyAtomically).finally(release);
   }, [brandPreset, themeMode]);
 
-  const updateBrandPreset = useCallback<BrandPresetChange>(async (next, origin) => {
-    if (transitionLockRef.current || next === brandPreset) return;
-    transitionLockRef.current = true;
-    const applyAtomically = () => {
-      persistBrandPreset(next);
-      applyAppearance({ theme: themeMode, brand: next });
-      setBrandPreset(next);
-    };
-    try {
-      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (!origin || reducedMotion) {
-        applyAtomically();
-      } else {
-        await playAppearanceReveal(origin, { theme: themeMode, brand: brandPreset }, applyAtomically);
-      }
-      await saveBrandPreset(next);
-    } finally {
-      transitionLockRef.current = false;
-    }
+  const updateBrandPreset = useCallback<BrandPresetChange>(async (next) => {
+    if (next === brandPreset) return;
+
+    // Brand presets only change CSS variables. Apply them optimistically and
+    // serialize the small native persistence calls so a rapid sequence keeps
+    // its final selection instead of waiting on a full-window snapshot.
+    persistBrandPreset(next);
+    applyAppearance({ theme: themeMode, brand: next });
+    setBrandPreset(next);
+    const save = brandSaveChainRef.current.then(() => saveBrandPreset(next));
+    brandSaveChainRef.current = save.catch(() => undefined);
+    await save;
   }, [brandPreset, themeMode]);
 
   return {

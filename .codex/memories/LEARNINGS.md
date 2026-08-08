@@ -17,6 +17,10 @@
 - 歌词中心定位用“当前 scrollTop + 活动行相对视口 top + 行高/2 - 视口高/2”，再钳制到
   `[0, scrollHeight-clientHeight]`。切歌重置 scrollTop 后应继续本轮定位；不要在 layout effect
   中清空刚由 ref callback 挂载的行节点或提前返回，否则新曲首个活动行会漏居中。
+- 歌词允许手动滚动时，不要用普通 `scroll` 事件判断用户意图，因为程序滚动也会触发它；只
+  记录 wheel/touch/滚动条 pointer/滚动键。下一条可见活动行用直接写 `scrollTop` 瞬时夺回，
+  避开 WebKit 中被用户输入打断的 smooth 动画；clear frame 不消费标记。effect 依赖活动行
+  稳定 id 而不是歌词数组身份，避免开发预览或父级重渲染在同一句内过早夺回。
 
 ## 2026-08-07 — 原生播放引擎替换完成（dev 分支，Phase 0-6）
 

@@ -90,18 +90,32 @@ import {
 } from "./notifications";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+const windowEventListeners = new Map<string, Set<() => void>>();
 
 function installWindow(reducedMotion = false): void {
+  windowEventListeners.clear();
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
       clearTimeout: globalThis.clearTimeout,
       setTimeout: globalThis.setTimeout,
+      addEventListener: (type: string, listener: () => void) => {
+        const listeners = windowEventListeners.get(type) ?? new Set<() => void>();
+        listeners.add(listener);
+        windowEventListeners.set(type, listeners);
+      },
+      removeEventListener: (type: string, listener: () => void) => {
+        windowEventListeners.get(type)?.delete(listener);
+      },
       matchMedia: () => ({ matches: reducedMotion }),
       requestAnimationFrame: (callback: FrameRequestCallback) => globalThis.setTimeout(() => callback(Date.now()), 0),
       cancelAnimationFrame: globalThis.clearTimeout,
     },
   });
+}
+
+function dispatchWindowEvent(type: string): void {
+  for (const listener of windowEventListeners.get(type) ?? []) listener();
 }
 
 function mountQueue() {
@@ -139,8 +153,8 @@ describe("useGlobalNotificationQueue", () => {
     mounted.current.notify("第二条");
     mounted.render();
 
-    const [first, second] = mounted.current.notices;
-    expect(mounted.current.notices.map((notice) => notice.message)).toEqual(["第一条", "第二条"]);
+    const [second, first] = mounted.current.notices;
+    expect(mounted.current.notices.map((notice) => notice.message)).toEqual(["第二条", "第一条"]);
 
     mounted.current.dismiss(second.id);
     mounted.render();
@@ -158,30 +172,38 @@ describe("useGlobalNotificationQueue", () => {
     expect(mounted.current.notices[0]?.id).toBe(first.id);
   });
 
-  it("pauses the timer with its remaining duration and resumes without losing the notice", () => {
+  it("keeps its five-second timer running without hover/focus pause state", () => {
     const mounted = mountQueue();
-    mounted.current.notify("等待暂停");
+    mounted.current.notify("自动关闭");
     mounted.render();
 
-    vi.advanceTimersByTime(1_000);
-    mounted.current.setPaused(true);
-    mounted.render();
-    mounted.render();
-
-    expect(mounted.current.notices[0]?.remainingMs).toBe(GLOBAL_NOTIFICATION_AUTO_CLOSE_MS - 1_000);
-
-    vi.advanceTimersByTime(GLOBAL_NOTIFICATION_AUTO_CLOSE_MS);
-    mounted.render();
-    expect(mounted.current.notices[0]?.phase).not.toBe("leaving");
-
-    mounted.current.setPaused(false);
-    mounted.render();
-    vi.advanceTimersByTime(GLOBAL_NOTIFICATION_AUTO_CLOSE_MS - 1_001);
+    vi.advanceTimersByTime(GLOBAL_NOTIFICATION_AUTO_CLOSE_MS - 1);
     mounted.render();
     expect(mounted.current.notices[0]?.phase).not.toBe("leaving");
 
     vi.advanceTimersByTime(1);
     mounted.render();
+    expect(mounted.current.notices[0]?.phase).toBe("leaving");
+  });
+
+  it("drops the oldest notice as soon as the sixth notice arrives", () => {
+    const mounted = mountQueue();
+    for (let index = 1; index <= 6; index += 1) mounted.current.notify(`第 ${index} 条`);
+    mounted.render();
+    expect(mounted.current.notices).toHaveLength(5);
+    expect(mounted.current.notices.map((notice) => notice.message)).not.toContain("第 1 条");
+    expect(mounted.current.notices.map((notice) => notice.message)).toContain("第 6 条");
+  });
+
+  it("expires an overdue notice on focus even when its background timer was throttled", () => {
+    const mounted = mountQueue();
+    mounted.current.notify("后台自动关闭");
+    mounted.render();
+
+    vi.setSystemTime(Date.now() + GLOBAL_NOTIFICATION_AUTO_CLOSE_MS);
+    dispatchWindowEvent("focus");
+    mounted.render();
+
     expect(mounted.current.notices[0]?.phase).toBe("leaving");
   });
 

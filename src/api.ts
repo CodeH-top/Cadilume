@@ -381,7 +381,18 @@ export async function getRecentAlbums(serverId: string, sectionKey: string): Pro
 /** Return all readable audio playlists visible to the selected server token. */
 export async function getPlaylists(serverId: string): Promise<PlexPlaylist[]> {
   if (!isDesktopRuntime()) {
-    return [...demoCreatedPlaylists, ...demoPlaylists];
+    // Keep the browser/demo adapter's summary in sync with its item tombstones
+    // so sidebar counts and confirmation dialogs reflect removals immediately.
+    return [...demoCreatedPlaylists, ...demoPlaylists].map((playlist) => {
+      const sourceItems = demoCreatedPlaylistItems.get(playlist.ratingKey) ?? demoPlaylistItems[playlist.ratingKey];
+      if (!sourceItems) return { ...playlist };
+      const remainingItems = sourceItems.filter((item) => !demoRemovedPlaylistItemIds.has(`${playlist.ratingKey}:${item.playlistItemID ?? item.ratingKey}`));
+      return {
+        ...playlist,
+        leafCount: remainingItems.length,
+        duration: remainingItems.reduce((total, item) => total + (item.duration ?? 0), 0),
+      };
+    });
   }
   const response = await invoke<unknown>("get_playlists", { serverId });
   return playlistRecords(response)

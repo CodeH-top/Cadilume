@@ -1,4 +1,3 @@
-import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { applyBrandPreset, readInitialBrandPreset } from "./brand";
@@ -19,8 +18,7 @@ if (isDesktopRuntime()) {
   }, 1000);
 }
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+// keepalive-for-react portals are not compatible with React.StrictMode's
+// development-only mount/unmount probe. Rendering the app once keeps history
+// route entries alive in the same way as the production build.
+ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(<App />);
