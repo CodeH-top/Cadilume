@@ -95,7 +95,7 @@
 - Recurrence-Count: 1
 - First-Seen: 2026-08-01
 - Last-Seen: 2026-08-01
-- Related Files: /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.css, /Users/hoganchou/Documents/Work/Project/AI/cadilume/docs/NEXT_DEVELOPMENT_PLAN_2026-07-29.md
+- Related Files: /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/App.css, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/docs/NEXT_DEVELOPMENT_PLAN_2026-07-29.md
 
 ### Requested Capability
 
@@ -130,7 +130,7 @@
 - Recurrence-Count: 1
 - First-Seen: 2026-08-01
 - Last-Seen: 2026-08-01
-- Related Files: /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/api.ts, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/types.ts, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/trackArtists.ts, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/usePlayer.ts, /Users/hoganchou/Documents/Work/Project/AI/cadilume/docs/NEXT_DEVELOPMENT_PLAN_2026-07-29.md
+- Related Files: /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/api.ts, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/types.ts, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/trackArtists.ts, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/usePlayer.ts, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/docs/NEXT_DEVELOPMENT_PLAN_2026-07-29.md
 
 ### Requested Capability
 
@@ -165,7 +165,7 @@
 - Recurrence-Count: 2
 - First-Seen: 2026-08-01
 - Last-Seen: 2026-08-01
-- Related Files: /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.css, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/libraryRoute.ts, /Users/hoganchou/Documents/Work/Project/AI/cadilume/docs/NEXT_DEVELOPMENT_PLAN_2026-07-29.md
+- Related Files: /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/App.css, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/libraryRoute.ts, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/docs/NEXT_DEVELOPMENT_PLAN_2026-07-29.md
 
 ### Requested Capability
 

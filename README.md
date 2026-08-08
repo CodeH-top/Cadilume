@@ -2,7 +2,9 @@
 
 一个以桌面体验为先的轻量 Plex 音乐客户端，目标平台为 macOS 与 Windows。界面采用原生桌面应用的信息密度与清晰层级，同时保留 Cadilume 自己的深浅色主题、品牌标记、图标和视觉语言。
 
-项目、应用与安装包统一使用名称 `Cadilume`，Bundle ID 为 `top.codeh.cadilume`，仓库目录为 `cadilume`。Plex 仅表示 Cadilume 所连接的第三方媒体服务与互操作 API，不属于应用名称。
+项目、应用与安装包统一使用名称 `Cadilume`，Bundle ID 为 `top.codeh.cadilume`，仓库目录为 `Cadilume`。Plex 仅表示 Cadilume 所连接的第三方媒体服务与互操作 API，不属于应用名称。
+
+这是一个独立 git 仓库；项目级工作规则和持续记忆位于根目录的 `AGENTS.md` 与 `.codex/memories/`，不依赖父工作区的入口文件。
 
 当前版本已经打通 Plex PIN 登录、服务器发现、家庭/共享资源 token、Music 资料库浏览、本地与远程串流、普通/智能/只读音频歌单读取与播放、普通歌单创建与写入、歌词、下一首预缓冲、独立软件音量、Windows 播放设备入口、系统媒体会话、原生窗口和托盘退出入口。
 

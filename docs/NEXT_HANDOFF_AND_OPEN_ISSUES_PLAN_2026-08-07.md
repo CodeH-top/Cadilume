@@ -5,7 +5,7 @@
 
 ## 1. 当前基线
 
-- 仓库：`/Users/hoganchou/Documents/Work/Project/AI/cadilume`，分支 `dev`。
+- 仓库：`/Users/hoganchou/Documents/Work/Project/AI/Cadilume`，分支 `dev`。
 - 播放内核：Rust `rodio 0.22 + cpal + symphonia`，全部静态集成；不需要 BASS、
   FFmpeg/libmpv、Homebrew 动态库、sidecar、SDK 或后台服务。
 - Plexamp 只作为 clean-room 行为参考。本机 Plexamp 使用私有 `treble.node + BASS`，

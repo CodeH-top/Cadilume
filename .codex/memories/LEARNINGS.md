@@ -427,7 +427,7 @@
 - Recurrence-Count: 2
 - First-Seen: 2026-08-01
 - Last-Seen: 2026-08-01
-- Related Files: /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/cadilume/src/App.css
+- Related Files: /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/App.tsx, /Users/hoganchou/Documents/Work/Project/AI/Cadilume/src/App.css
 - See Also: FR-20260801-003
 
 ### Summary

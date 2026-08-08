@@ -1,5 +1,11 @@
 # ERRORS
 
+## 2026-08-08 — APFS 大小写迁移后的缓存与开发态地址
+
+- macOS APFS 默认不区分大小写；目录实际改为 `Cadilume` 后，`test -e .../cadilume` 仍可能返回成功，不能用它判断旧目录是否并存。用父目录的大小写保留列表、Git 根路径和进程 cwd 交叉确认实际入口。
+- Cargo/Tauri 的 `src-tauri/target` 会把仓库绝对路径写入 `.d` 和构建脚本产物。目录只改大小写后，必须针对明确可再生的项目 manifest 执行 `cargo clean --manifest-path src-tauri/Cargo.toml`，再重新构建；不清理其他项目或宽范围缓存。
+- Tauri 开发态的 Vite 在本机配置下监听 `[::1]:1420`；对 `127.0.0.1:1420` 的失败只是地址族不匹配，先用 `http://[::1]:1420/` 或 `localhost` 验证，再判断服务是否异常。
+
 ## 2026-08-08 — Tauri 打包验收可能遗留第二个 Cadilume 进程
 
 - `pnpm tauri build --debug --no-bundle` 或手工启动 `target/debug/bundle/macos/Cadilume.app`
