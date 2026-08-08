@@ -2366,6 +2366,76 @@ impl NativeAudioEngine {
         });
     }
 
+    /// Attach a late artwork ticket without delaying foreground playback. The
+    /// queue identity prevents an old WebView request from updating a reused
+    /// index after a track or server transition.
+    fn set_artwork_for_track(
+        &self,
+        index: i64,
+        rating_key: &str,
+        artwork_url: String,
+    ) -> Result<(), String> {
+        self.ensure_accepting_work()?;
+        let index = usize::try_from(index).map_err(|_| "无效的曲目序号".to_string())?;
+        let track_matches = self
+            .queue
+            .lock()
+            .map_err(|_| "队列状态锁失败".to_string())?
+            .tracks
+            .get(index)
+            .is_some_and(|track| track.rating_key == rating_key);
+        if !track_matches {
+            return Err("封面对应的曲目已不在当前队列".to_string());
+        }
+
+        {
+            let mut pending = self
+                .pending
+                .lock()
+                .map_err(|_| "预排状态锁失败".to_string())?;
+            if let Some(queued) = pending
+                .as_mut()
+                .filter(|queued| queued.index == index && queued.rating_key == rating_key)
+            {
+                queued.metadata.artwork_url = Some(artwork_url.clone());
+                drop(pending);
+                self.prime_artwork_ticket(
+                    &artwork_url,
+                    self.playback_generation.load(Ordering::SeqCst),
+                );
+                return Ok(());
+            }
+        }
+
+        let is_current = self
+            .queue
+            .lock()
+            .map_err(|_| "队列状态锁失败".to_string())?
+            .current_index
+            == index as i64;
+        if !is_current {
+            return Err("封面对应的曲目尚未开始播放".to_string());
+        }
+        let mut metadata = self
+            .metadata
+            .lock()
+            .map_err(|_| "元数据状态锁失败".to_string())?;
+        metadata
+            .get_or_insert_with(NowPlayingMetadata::default)
+            .artwork_url = Some(artwork_url.clone());
+        drop(metadata);
+        if let Ok(mut source) = self.current_source.lock() {
+            if let Some(source) = source.as_mut() {
+                source.metadata.artwork_url = Some(artwork_url.clone());
+            }
+        }
+        self.start_artwork_fetch(
+            &artwork_url,
+            self.playback_generation.load(Ordering::SeqCst),
+        );
+        Ok(())
+    }
+
     /// Mark a queued artwork ticket as active while it is still fresh. Unused
     /// loopback tickets expire after 90 seconds, which is shorter than a normal
     /// track; a HEAD request extends the idle window without publishing the
@@ -3915,6 +3985,23 @@ pub fn native_audio_set_volume(
 ) {
     let _ = app;
     state.set_volume(volume);
+}
+
+#[tauri::command]
+pub fn native_audio_set_artwork(
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+    stream_proxy: tauri::State<'_, crate::stream_proxy::StreamProxy>,
+    index: i64,
+    rating_key: String,
+    artwork_url: String,
+) -> Result<(), String> {
+    if artwork_url.is_empty() || !stream_proxy.owns_artwork_url(&artwork_url) {
+        return Err("封面地址不是当前 Cadilume 本机票据".to_string());
+    }
+    state
+        .current()
+        .ok_or_else(|| "当前没有可更新的播放".to_string())?
+        .set_artwork_for_track(index, &rating_key, artwork_url)
 }
 
 #[tauri::command]

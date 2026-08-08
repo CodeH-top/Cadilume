@@ -846,6 +846,15 @@ export async function nativeAudioSetVolume(volume: number): Promise<void> {
   await invoke("native_audio_set_volume", { volume });
 }
 
+export async function nativeAudioSetArtwork(
+  index: number,
+  ratingKey: string,
+  artworkUrl: string,
+): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_set_artwork", { index, ratingKey, artworkUrl });
+}
+
 export async function nativeAudioPrecache(
   source: string,
   cacheKey?: string,

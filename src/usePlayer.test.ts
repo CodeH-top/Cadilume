@@ -9,8 +9,10 @@ import {
   createPersistedPlaybackSession,
   createShuffleBag,
   createShuffleNavigationState,
+  effectivePlaybackVolume,
   appendQueueBatch,
   getManualNextIndex,
+  getManualPreviousIndex,
   getSequentialNextIndex,
   insertQueueBatchNext,
   mergeFreshTrackMetadata,
@@ -23,6 +25,7 @@ import {
   previewShuffleNext,
   readPersistedPlaybackSession,
   sourceStreamQuality,
+  shouldScrobblePlayback,
   takeShuffleIndex,
 } from "./usePlayer";
 import type { PlexItem } from "./types";
@@ -316,6 +319,13 @@ describe("queue transition rules", () => {
     expect(getSequentialNextIndex(1, 3, "one")).toBe(1);
   });
 
+  it("moves Previous backward and wraps only when repeat permits it", () => {
+    expect(getManualPreviousIndex(2, 3, "off")).toBe(1);
+    expect(getManualPreviousIndex(0, 3, "off")).toBeNull();
+    expect(getManualPreviousIndex(0, 3, "all")).toBe(2);
+    expect(getManualPreviousIndex(0, 3, "one")).toBe(2);
+  });
+
   it("consumes a shuffle bag once per queue round", () => {
     let bag = createShuffleBag(4, 0);
     expect(bag).toEqual([1, 2, 3]);
@@ -400,5 +410,20 @@ describe("resume safety", () => {
     expect(normalizeRestoredProgress(179, 180)).toBe(0);
     expect(normalizeRestoredProgress(180, 180)).toBe(0);
     expect(normalizeRestoredProgress(177, 180)).toBe(177);
+  });
+});
+
+describe("native playback state projection", () => {
+  it("sends zero gain while muted without losing the slider value", () => {
+    expect(effectivePlaybackVolume(0.72, true)).toBe(0);
+    expect(effectivePlaybackVolume(0.72, false)).toBe(0.72);
+    expect(effectivePlaybackVolume(Number.NaN, false)).toBe(0.5);
+  });
+
+  it("scrobbles only after a finite playback position reaches 90 percent", () => {
+    expect(shouldScrobblePlayback(89.9, 100)).toBe(false);
+    expect(shouldScrobblePlayback(90, 100)).toBe(true);
+    expect(shouldScrobblePlayback(Number.NaN, 100)).toBe(false);
+    expect(shouldScrobblePlayback(90, 0)).toBe(false);
   });
 });

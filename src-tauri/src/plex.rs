@@ -2657,20 +2657,26 @@ fn read_dev_token_fallback() -> Option<String> {
 
 #[cfg(unix)]
 #[cfg(debug_assertions)]
-fn write_dev_token_fallback(token: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let path = dev_token_fallback_path();
+fn write_dev_token_file(path: &Path, token: &str) -> Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(&path)
+        .open(path)
         .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("收紧开发 token 文件权限失败: {e}"))?;
     file.write_all(token.as_bytes())
         .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
     Ok(())
+}
+
+#[cfg(unix)]
+#[cfg(debug_assertions)]
+fn write_dev_token_fallback(token: &str) -> Result<(), String> {
+    write_dev_token_file(&dev_token_fallback_path(), token)
 }
 
 #[cfg(not(unix))]
@@ -2763,6 +2769,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_existing_dev_token_tightens_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cache = TestCache::new();
+        let path = cache.root.join("dev-token");
+        fs::write(&path, "old-token").expect("existing token should be created");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .expect("test token permissions should be relaxed");
+
+        write_dev_token_file(&path, "new-token").expect("token rewrite should succeed");
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new-token");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

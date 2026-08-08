@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
+import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { readOutputDevicePreference, writeOutputDevicePreference } from "./outputDevicePreference";
 import { playbackLog } from "./playbackLog";
@@ -592,6 +592,34 @@ export function getManualNextIndex(currentIndex: number, queueLength: number): n
   return (currentIndex + 1) % queueLength;
 }
 
+/** Manual Previous follows the queue boundary unless repeat permits wrapping. */
+export function getManualPreviousIndex(
+  currentIndex: number,
+  queueLength: number,
+  repeat: RepeatMode,
+): number | null {
+  if (!Number.isInteger(queueLength) || queueLength <= 0) return null;
+  if (Number.isInteger(currentIndex) && currentIndex > 0 && currentIndex < queueLength) {
+    return currentIndex - 1;
+  }
+  return repeat === "off" ? null : queueLength - 1;
+}
+
+/** The native engine receives the audible gain, while React retains the slider value. */
+export function effectivePlaybackVolume(volume: number, muted: boolean): number {
+  if (muted) return 0;
+  return Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 0.5;
+}
+
+/** PMS counts a track once playback reaches 90 percent. */
+export function shouldScrobblePlayback(position: number, duration: number): boolean {
+  return Number.isFinite(position)
+    && Number.isFinite(duration)
+    && position >= 0
+    && duration > 0
+    && position / duration >= 0.9;
+}
+
 function readStorage(key: string, fallback: string): string {
   try {
     return typeof localStorage === "undefined" ? fallback : localStorage.getItem(key) ?? fallback;
@@ -615,6 +643,12 @@ const storedVolume = (): number => {
 
 const storedPrebufferNext = (): boolean => readStorage(PREBUFFER_STORAGE_KEY, "true") !== "false";
 const storedOutputSinkId = (): string => readOutputDevicePreference();
+
+function playbackArtworkTicket(serverId: string, track: PlexItem): Promise<string | undefined> {
+  if (track.imageUrl) return Promise.resolve(track.imageUrl);
+  if (!track.thumb) return Promise.resolve(undefined);
+  return artworkUrl(serverId, track.thumb, 512, 512).catch(() => undefined);
+}
 
 export type FallbackStreamQuality = Exclude<StreamQuality, "auto" | "original">;
 
@@ -693,7 +727,7 @@ export function normalizeRestoredProgress(seconds: number, duration: number): nu
   return bounded;
 }
 
-/** Update a loaded media element without letting an empty/transitioning source throw. */
+/** Coordinate the Rust playback authority with its React state mirror. */
 export function usePlayer(serverId: string | undefined, quality: StreamQuality) {
   const queueRef = useRef<PlexItem[]>([]);
   const indexRef = useRef(-1);
@@ -714,32 +748,21 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const restoredServerRef = useRef<string | undefined>(undefined);
   const persistedSessionTimerRef = useRef<number | undefined>(undefined);
   const playbackSessionDiscardedRef = useRef(false);
-  const [initialPersistedSession] = useState<PersistedPlaybackSession | null>(() => readPersistedPlaybackSession());
-  // 首帧就从持久化会话渲染队列/进度/时长，避免恢复 effect 等待
-  // serverId/bootstrap 期间播放器显示空白；恢复 effect 仍会复核并刷新元数据。
-  const [queue, setQueue] = useState<PlexItem[]>(() => (
-    initialPersistedSession?.queue?.map((item) => ({ ...item })) as PlexItem[] ?? []
-  ));
-  const [currentIndex, setCurrentIndex] = useState(() => initialPersistedSession?.currentIndex ?? -1);
+  // The queue is restored only after bootstrap identifies its owning server.
+  // Rendering an unowned snapshot here can leak a stale queue into another PMS.
+  const [queue, setQueue] = useState<PlexItem[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(-1);
   const [playing, setPlaying] = useState(false);
   const [loading, setLoadingState] = useState(false);
   const [buffering, setBuffering] = useState(false);
-  const [progress, setProgress] = useState(() => {
-    const session = initialPersistedSession;
-    const track = session && session.currentIndex >= 0 ? session.queue[session.currentIndex] : undefined;
-    return track ? normalizeRestoredProgress(session!.progress, (track.duration || 0) / 1000) : 0;
-  });
-  const [duration, setDuration] = useState(() => {
-    const session = initialPersistedSession;
-    const track = session && session.currentIndex >= 0 ? session.queue[session.currentIndex] : undefined;
-    return track ? (track.duration || 0) / 1000 : 0;
-  });
+  const [progress, setProgress] = useState(0);
+  const [duration, setDuration] = useState(0);
   const [volume, setVolumeState] = useState(storedVolume);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMutedState] = useState(false);
   // A resumed playlist loops by default so ending it cannot unexpectedly
   // advance into another context. Existing users can still switch to off.
-  const [shuffle, setShuffleState] = useState(() => initialPersistedSession?.shuffle ?? false);
-  const [repeat, setRepeatState] = useState<RepeatMode>(() => initialPersistedSession?.repeat ?? "all");
+  const [shuffle, setShuffleState] = useState(false);
+  const [repeat, setRepeatState] = useState<RepeatMode>("all");
   const [prebufferNext, setPrebufferNextState] = useState(storedPrebufferNext);
   const [outputSinkId, setOutputSinkIdState] = useState(storedOutputSinkId);
   const [error, setError] = useState<string>();
@@ -894,18 +917,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     if (!track || !serverId) return;
     const attemptedQualities: StreamQuality[] = [];
     const diagnostics: string[] = [];
+    const artworkTicketPromise = playbackArtworkTicket(serverId, track);
     try {
       // Put stop + queue sync in the same frontend barrier. The prebuffer effect
       // cannot peek the old Rust queue while a track switch is being prepared.
       await syncNativeQueue(() => nativeAudioStop().catch(() => undefined));
       // 音量权威始终在前端；即使引擎尚未创建，Rust slot 也会先记住该值，
       // 在创建 Player 的同一轮应用，避免首个采样短暂以 100% 输出。
-      await nativeAudioSetVolume(volumeRef.current);
-      // 真实曲目没有预置 imageUrl：用服务器相对路径向代理申请封面票据。
-      const artworkTicket = track.imageUrl
-        ?? (track.thumb
-          ? await artworkUrl(serverId, track.thumb, 512, 512).catch(() => undefined)
-          : undefined);
+      await nativeAudioSetVolume(effectivePlaybackVolume(volumeRef.current, mutedRef.current));
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
       let activeQuality: StreamQuality | undefined = quality;
       while (activeQuality) {
@@ -923,8 +942,16 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             artist: trackArtist(track),
             album: trackAlbum(track),
             durationMs: track.duration,
-            artworkUrl: artworkTicket,
+            artworkUrl: track.imageUrl,
           }, autoplay);
+          if (!track.imageUrl) {
+            void artworkTicketPromise.then((artworkTicket) => {
+              if (!artworkTicket
+                || requestId !== loadRequestRef.current
+                || indexRef.current !== index) return;
+              return nativeAudioSetArtwork(index, track.ratingKey, artworkTicket).catch(() => undefined);
+            });
+          }
           break;
         } catch (reason) {
           if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
@@ -1158,8 +1185,29 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
   const previous = useCallback(() => {
     if (!isDesktopRuntime()) {
-      void stopCurrentImmediately();
-      void advance(false);
+      if (progressRef.current > 4) {
+        progressRef.current = 0;
+        setProgress(0);
+        resumeProgressRef.current = null;
+        schedulePersistedSession(false);
+        return;
+      }
+      if (shuffleRef.current) {
+        const selection = moveShufflePrevious(
+          shuffleNavigationRef.current,
+          queueRef.current.length,
+          indexRef.current,
+        );
+        shuffleNavigationRef.current = selection.state;
+        if (selection.index != null) void loadAt(selection.index, true);
+        return;
+      }
+      const previousIndex = getManualPreviousIndex(
+        indexRef.current,
+        queueRef.current.length,
+        repeatRef.current,
+      );
+      if (previousIndex != null) void loadAt(previousIndex, true);
       return;
     }
     if (progressRef.current > 4) {
@@ -1228,10 +1276,19 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
   const setVolume = useCallback((value: number) => {
     const normalized = Math.min(1, Math.max(0, value));
+    volumeRef.current = normalized;
+    mutedRef.current = false;
     setVolumeState(normalized);
-    setMuted(false);
+    setMutedState(false);
     writeStorage(VOLUME_STORAGE_KEY, String(normalized));
     void nativeAudioSetVolume(normalized).catch(() => undefined);
+  }, []);
+
+  const setMuted = useCallback((value: boolean) => {
+    const normalized = Boolean(value);
+    mutedRef.current = normalized;
+    setMutedState(normalized);
+    void nativeAudioSetVolume(effectivePlaybackVolume(volumeRef.current, normalized)).catch(() => undefined);
   }, []);
 
   const setPrebufferNext = useCallback((enabled: boolean) => {
@@ -1297,6 +1354,12 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       // the old session look like it belongs to the newly selected PMS.
       flushPlaybackSession();
       loadRequestRef.current += 1;
+      precacheRequestRef.current += 1;
+      if (isDesktopRuntime()) {
+        void nativeQueueBarrierRef.current!.enqueue(async () => {
+          await nativeAudioStop().catch(() => undefined);
+        });
+      }
       queueRef.current = [];
       queueServerIdRef.current = undefined;
       indexRef.current = -1;
@@ -1396,8 +1459,27 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         if (playbackLoadingRef.current) return;
         progressRef.current = payload.position;
         setProgress(payload.position);
+        const track = queueRef.current[indexRef.current];
+        const activeServerId = queueServerIdRef.current;
+        const reportedDuration = typeof payload.duration === "number"
+          && Number.isFinite(payload.duration)
+          && payload.duration > 0
+          ? payload.duration
+          : (track?.duration || 0) / 1000;
         if (typeof payload.duration === "number" && Number.isFinite(payload.duration) && payload.duration > 0) {
           setDuration(payload.duration);
+        }
+        schedulePersistedSession(false);
+        const scrobbleKey = activeServerId && track
+          ? `${activeServerId}:${track.ratingKey}`
+          : undefined;
+        if (activeServerId
+          && track
+          && scrobbleKey
+          && shouldScrobblePlayback(payload.position, reportedDuration)
+          && !scrobbledRef.current.has(scrobbleKey)) {
+          scrobbledRef.current.add(scrobbleKey);
+          void plexMusicGateway.playback.scrobble(activeServerId, track).catch(() => undefined);
         }
       } else if (payload.type === "ended") {
         // Queue authority lives in Rust: it already decided the next item and
@@ -1485,13 +1567,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           : tracks[secondIndex];
         // Immediate next is always admitted before far-ahead warming. Rust also
         // enforces this priority, so another caller cannot invert the order.
-        const artworkPromise = nextTrack.imageUrl
-          ? Promise.resolve(nextTrack.imageUrl)
-          : nextTrack.thumb
-            ? artworkUrl(serverId, nextTrack.thumb, 512, 512).catch(() => undefined)
-            : Promise.resolve(undefined);
-        const artworkTicket = await artworkPromise;
-        if (precacheRequestRef.current !== requestId) return;
+        const artworkTicketPromise = playbackArtworkTicket(serverId, nextTrack);
         const attemptedQualities: StreamQuality[] = [];
         let activeQuality: StreamQuality | undefined = quality;
         while (activeQuality) {
@@ -1514,8 +1590,18 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
               artist: trackArtist(nextTrack),
               album: trackAlbum(nextTrack),
               durationMs: nextTrack.duration,
-              artworkUrl: artworkTicket,
+              artworkUrl: nextTrack.imageUrl,
             });
+            if (!nextTrack.imageUrl) {
+              void artworkTicketPromise.then((artworkTicket) => {
+                if (!artworkTicket || precacheRequestRef.current !== requestId) return;
+                return nativeAudioSetArtwork(
+                  nextIndex,
+                  nextTrack.ratingKey,
+                  artworkTicket,
+                ).catch(() => undefined);
+              });
+            }
             break;
           } catch {
             if (precacheRequestRef.current !== requestId) return;
@@ -1679,5 +1765,5 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     removeFromQueue,
     flushPlaybackSession,
     discardPlaybackSession,
-  }), [appendTracks, buffering, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, insertTracksNext, loading, muted, next, outputSinkId, playContext, playTracks, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
+    }), [appendTracks, buffering, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, insertTracksNext, loading, muted, next, outputSinkId, playContext, playTracks, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setMuted, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
 }

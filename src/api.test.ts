@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setBrandPreset, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
+import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, nativeAudioSetArtwork, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setBrandPreset, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -829,5 +829,18 @@ describe("artworkUrl dimensions and runtime boundary", () => {
 
     await expect(artworkUrl("demo-server", path, 320)).resolves.toBe(path);
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("attaches a delayed ticket to the matching native queue item", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    const ticket = `http://127.0.0.1:49152/artwork/${"b".repeat(64)}`;
+
+    await nativeAudioSetArtwork(3, "track-42", ticket);
+
+    expect(invokeMock).toHaveBeenCalledWith("native_audio_set_artwork", {
+      index: 3,
+      ratingKey: "track-42",
+      artworkUrl: ticket,
+    });
   });
 });

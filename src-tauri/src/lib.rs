@@ -80,6 +80,7 @@ pub fn run() {
             audio_engine::native_audio_heartbeat,
             audio_engine::native_audio_seek,
             audio_engine::native_audio_set_volume,
+            audio_engine::native_audio_set_artwork,
             audio_engine::native_audio_status,
             audio_engine::native_audio_device_check,
             audio_engine::native_audio_cache_status,
