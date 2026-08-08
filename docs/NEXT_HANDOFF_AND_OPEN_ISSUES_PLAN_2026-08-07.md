@@ -176,4 +176,4 @@ Windows 验收明确不属于本轮范围，不作为本轮完成门禁；后续
 - 日志和文档不得记录 PMS URI、token、loopback ticket 或真实媒体路径。
 - 公开发行继续执行零外部运行依赖审计、签名与 notarization；开发态 ad-hoc `.app`
   不能冒充正式发行包。
-- 每轮结束检查父项目与 `cadilume/.codex/memories`，只记录可复用结论。
+- 每轮结束检查父项目与 `Cadilume/.codex/memories`，只记录可复用结论。
