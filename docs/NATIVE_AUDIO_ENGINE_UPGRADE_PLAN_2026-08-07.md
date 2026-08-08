@@ -15,7 +15,7 @@
 
 ## 最终选型
 
-保留 `rodio 0.22 + cpal 0.17 + symphonia 0.5`：
+保留 `rodio 0.22 + cpal 0.17 + symphonia 0.5.5`：
 
 - rodio 提供 Player、队列、格式/声道转换和 cpal mixer 接入；
 - cpal 直接使用 CoreAudio/WASAPI；
@@ -67,6 +67,16 @@
   被拉取时提交来源、时长、缓存身份和元数据。
 - stop/切歌/设备切换使用取消 Reader、播放代际与替换 Player，不再调用可能同步等待
   渐进 Source 的 `Player::clear()`。
+
+### Phase 3.1：渐进容器探测保护（2026-08-08）
+
+- `Decoder::builder().build()`、时长探测和首批 PCM 准备移入 `spawn_blocking`，每个质量档
+  设置有界准备超时，避免合法但需要更深容器探测的格式把 Tauri async worker 卡在下载前沿。
+- 取消时同时设置下载取消位、递增 Reader interrupt epoch、唤醒条件变量，并有界等待下载/探测
+  任务；失败与超时清理 `.audio.part`，前端可继续尝试 PMS 兼容质量。
+- 活动下载槽通过进度对象做代际匹配，任务完成后自动释放；`.part` 原子改名与探测并发时
+  优先读取已提交的完整缓存。
+- 限速下载的 pacing 与最终提交均响应取消位，避免取消竞态把最后一个 chunk 提交成完整缓存。
 
 ### Phase 5：系统媒体与输出
 
@@ -133,12 +143,12 @@ rodio 的 `Player::clear()` 会等待音频线程。旧架构让渐进 Reader/de
 - 64 路同键预取只发出一次 HTTP；远 ahead 升级、取消清理和账号 reset。
 - 空响应、截断重试、chunked、缓存损坏自愈、LRU 与活动 `.part` 隔离。
 - 本机真实 PMS 两首 FLAC 完整链路，以及最多 10 首、两轮共 20 次快速切换。
-- Rust 全量 `96` 项：`94 passed / 0 failed / 2 ignored`；严格 Clippy 零警告。
+- Rust 全量 `99` 项：`97 passed / 0 failed / 2 ignored`；严格 Clippy 零警告。
 
 ## 待实机验收
 
-1. macOS 连续专辑听感、弱网缓冲、隐藏窗口、睡眠恢复、设备切换，以及修复后控制中心
-   曲目元数据/封面与媒体键的最终可见验收。
+1. macOS 连续专辑听感、弱网缓冲、隐藏窗口、睡眠恢复和设备切换的长期验收；控制中心
+   曲目元数据/封面与媒体键的可见验收已于 2026-08-08 完成。
 2. ReplayGain、crossfade、离线下载属于后续能力，不是本轮缺陷。
 
 Windows 不属于本轮验收范围，也不作为本轮完成门禁；重新开启该平台工作时另立任务。

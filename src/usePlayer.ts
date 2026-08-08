@@ -30,7 +30,6 @@ export const PLAYBACK_SESSION_VERSION = 1 as const;
 export const PLAYBACK_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const PLAYBACK_SESSION_MAX_QUEUE = 500;
 const PLAYBACK_SESSION_WRITE_THROTTLE_MS = 5_000;
-export const PLAYBACK_START_TIMEOUT_MS = 12_000;
 /** Keep the transport button visibly busy during quick prebuffered switches. */
 const MIN_LOADING_VISIBLE_MS = 250;
 /** Reuse an in-flight stream ticket briefly so bursty track switching does not

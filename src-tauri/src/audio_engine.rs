@@ -8,7 +8,9 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{
+    sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
+};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -42,6 +44,17 @@ const DECODE_BUFFER_SECONDS: usize = 4;
 /// rapid pause/resume oscillation on an unstable connection.
 const DECODE_RESUME_BUFFER_MS: usize = 250;
 const DECODE_INITIAL_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
+/// Progressive containers may need bytes beyond the initial preload while
+/// probing metadata. Bound the complete probe + first-PCM preparation so one
+/// incompatible source cannot prevent the frontend from trying another PMS
+/// quality indefinitely.
+const PROGRESSIVE_DECODE_PREPARE_TIMEOUT: Duration = Duration::from_secs(6);
+/// Cancellation wakes ProgressiveFile immediately. Keep a second bound around
+/// joining the blocking probe so timeout/error paths never retain a decoder or
+/// download worker in the background.
+const PROGRESSIVE_PREPARE_CANCEL_TIMEOUT: Duration = Duration::from_secs(3);
+const DECODE_INITIAL_WAIT_POLL: Duration = Duration::from_millis(50);
+const DOWNLOAD_CANCEL_POLL: Duration = Duration::from_millis(50);
 const DECODE_SEND_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 static NEXT_DECODE_WORKER_ID: AtomicUsize = AtomicUsize::new(1);
 /// Background prefetch bandwidth cap (Plexamp desktop default ~5 Mbps).
@@ -955,16 +968,32 @@ where
         })
         .map_err(|error| format!("启动解码线程失败: {error}"))?;
 
-    let initial = receiver
-        .recv_timeout(DECODE_INITIAL_CHUNK_TIMEOUT)
-        .map_err(|_| {
-            state.cancelled.store(true, Ordering::SeqCst);
-            state.notify_worker();
-            if let Some(progress) = state.reader_progress.as_ref() {
-                progress.interrupt_reader();
+    let initial_deadline = std::time::Instant::now() + DECODE_INITIAL_CHUNK_TIMEOUT;
+    let initial = loop {
+        let now = std::time::Instant::now();
+        let remaining = initial_deadline.saturating_duration_since(now);
+        if remaining.is_zero() {
+            state.cancel_worker();
+            return Err("解码线程未能及时产生首个 PCM 缓冲".to_string());
+        }
+        match receiver.recv_timeout(remaining.min(DECODE_INITIAL_WAIT_POLL)) {
+            Ok(chunk) => break chunk,
+            Err(RecvTimeoutError::Timeout) => {
+                let reader_cancelled = state
+                    .reader_progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.cancelled.load(Ordering::SeqCst));
+                if state.cancelled.load(Ordering::SeqCst) || reader_cancelled {
+                    state.cancel_worker();
+                    return Err("解码准备已取消".to_string());
+                }
             }
-            "解码线程未能及时产生首个 PCM 缓冲".to_string()
-        })?;
+            Err(RecvTimeoutError::Disconnected) => {
+                state.cancel_worker();
+                return Err("解码线程在首个 PCM 缓冲前退出".to_string());
+            }
+        }
+    };
     Ok((
         ThreadedDecoderSource {
             receiver,
@@ -979,6 +1008,56 @@ where
         },
         state,
     ))
+}
+
+struct PreparedProgressiveDecoder {
+    decoder: ThreadedDecoderSource,
+    decode_state: Arc<DecodeBufferState>,
+    total_seconds: Option<f64>,
+}
+
+fn prepare_progressive_decoder(
+    part_path: PathBuf,
+    final_path: PathBuf,
+    progress: Arc<DownloadProgress>,
+    metadata_duration_ms: Option<u64>,
+    health: Arc<NativeAudioHealth>,
+) -> Result<PreparedProgressiveDecoder, String> {
+    // The downloader renames `.part` atomically just as the probe starts. If
+    // that small-file race occurs, the completed cache is still a valid source
+    // and should be decoded instead of forcing an unnecessary quality retry.
+    let path = if part_path.exists() {
+        part_path
+    } else if progress.finished.load(Ordering::SeqCst) && final_path.exists() {
+        final_path
+    } else {
+        part_path
+    };
+    let file = std::fs::File::open(&path).map_err(|error| format!("打开渐进缓存失败: {error}"))?;
+    let reader = ProgressiveFile {
+        file,
+        progress: Arc::clone(&progress),
+        reader_interrupt_epoch: progress.reader_interrupt_epoch.load(Ordering::SeqCst),
+    };
+    let expected_len = progress.expected_len.load(Ordering::SeqCst);
+    let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
+    if expected_len > 0 {
+        builder = builder.with_byte_len(expected_len);
+    }
+    let decoder = builder
+        .build()
+        .map_err(|error| format!("媒体解码失败: {error}"))?;
+    let total_seconds = decoder
+        .total_duration()
+        .map(|duration| duration.as_secs_f64())
+        .or_else(|| metadata_duration_ms.map(|milliseconds| milliseconds as f64 / 1000.0));
+    let (decoder, decode_state) =
+        spawn_threaded_decoder_with_health(decoder, Some(progress), health)?;
+    Ok(PreparedProgressiveDecoder {
+        decoder,
+        decode_state,
+        total_seconds,
+    })
 }
 
 /// One download attempt: stream the loopback media URL into `part_path`,
@@ -1045,9 +1124,25 @@ async fn download_progressive_once(
             let expected_seconds = total as f64 / limit as f64;
             let elapsed = started_at.elapsed().as_secs_f64();
             if expected_seconds > elapsed {
-                tokio::time::sleep(Duration::from_secs_f64(expected_seconds - elapsed)).await;
+                let deadline =
+                    std::time::Instant::now() + Duration::from_secs_f64(expected_seconds - elapsed);
+                loop {
+                    if progress.cancelled.load(Ordering::SeqCst) {
+                        return Err("下载已取消".to_string());
+                    }
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    tokio::time::sleep(remaining.min(DOWNLOAD_CANCEL_POLL)).await;
+                }
             }
         }
+    }
+    // Cancellation can arrive while the final chunk is being paced. Check
+    // again before making the `.part -> .audio` commit irreversible.
+    if progress.cancelled.load(Ordering::SeqCst) {
+        return Err("下载已取消".to_string());
     }
     if let Some(expected) = expected_total {
         if total != expected {
@@ -1062,6 +1157,9 @@ async fn download_progressive_once(
     file.flush()
         .await
         .map_err(|e| format!("缓存刷新失败: {e}"))?;
+    if progress.cancelled.load(Ordering::SeqCst) {
+        return Err("下载已取消".to_string());
+    }
     drop(file);
     tokio::fs::rename(part_path, final_path)
         .await
@@ -1123,6 +1221,28 @@ async fn download_progressive(
     Err(last_error.unwrap_or_else(|| "下载失败".to_string()))
 }
 
+struct ActiveDownload {
+    progress: Arc<DownloadProgress>,
+    part_path: PathBuf,
+    handle: tauri::async_runtime::JoinHandle<()>,
+}
+
+fn clear_active_download_slot(
+    active_download: &Arc<Mutex<Option<ActiveDownload>>>,
+    expected_progress: &Arc<DownloadProgress>,
+) {
+    if let Ok(mut active) = active_download.lock() {
+        let is_same = active
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(&active.progress, expected_progress));
+        if is_same {
+            // Dropping a completed JoinHandle only releases its control handle;
+            // it does not cancel a task that is still finishing its cleanup.
+            let _ = active.take();
+        }
+    }
+}
+
 struct ActivePrecache {
     cache_key: String,
     rate_limited: bool,
@@ -1176,9 +1296,8 @@ pub struct NativeAudioEngine {
     /// while it cancels a far-ahead request and acquires the single permit, so
     /// a throttled request cannot slip in and steal playback-critical capacity.
     precache_gate: tokio::sync::Mutex<()>,
-    active_download: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    active_download: Arc<Mutex<Option<ActiveDownload>>>,
     active_precache: Arc<Mutex<Option<ActivePrecache>>>,
-    active_progress: Arc<Mutex<Option<Arc<DownloadProgress>>>>,
     health: Arc<NativeAudioHealth>,
     output_recovery_pending: Arc<AtomicBool>,
 }
@@ -1926,7 +2045,6 @@ impl NativeAudioEngine {
             precache_gate: tokio::sync::Mutex::new(()),
             active_download: Arc::new(Mutex::new(None)),
             active_precache: Arc::new(Mutex::new(None)),
-            active_progress: Arc::new(Mutex::new(None)),
             health,
             output_recovery_pending,
         })
@@ -1953,15 +2071,12 @@ impl NativeAudioEngine {
 
     fn take_active_work(&self) -> Vec<tauri::async_runtime::JoinHandle<()>> {
         let mut handles = Vec::new();
-        if let Ok(mut progress) = self.active_progress.lock() {
-            if let Some(progress) = progress.take() {
-                progress.cancel();
-            }
-        }
         if let Ok(mut active) = self.active_download.lock() {
-            if let Some(handle) = active.take() {
-                handle.abort();
-                handles.push(handle);
+            if let Some(active) = active.take() {
+                active.progress.cancel();
+                active.handle.abort();
+                let _ = std::fs::remove_file(active.part_path);
+                handles.push(active.handle);
             }
         }
         if let Ok(mut active) = self.active_precache.lock() {
@@ -1985,16 +2100,66 @@ impl NativeAudioEngine {
         }
     }
 
-    fn cancel_active_download(&self) {
-        if let Ok(mut progress) = self.active_progress.lock() {
-            if let Some(progress) = progress.take() {
-                progress.cancel();
-            }
+    fn cancel_active_download_for(
+        &self,
+        expected_progress: &Arc<DownloadProgress>,
+    ) -> Option<ActiveDownload> {
+        let _transition = self
+            .transition_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut active = self.active_download.lock().ok()?;
+        let matches = active
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(&active.progress, expected_progress));
+        if !matches {
+            return None;
         }
-        if let Ok(mut active) = self.active_download.lock() {
-            if let Some(handle) = active.take() {
-                handle.abort();
+        let active = active.take()?;
+        active.progress.cancel();
+        active.handle.abort();
+        let _ = std::fs::remove_file(&active.part_path);
+        Some(active)
+    }
+
+    async fn cancel_progressive_download(&self, progress: &Arc<DownloadProgress>) {
+        progress.cancel();
+        let Some(active) = self.cancel_active_download_for(progress) else {
+            return;
+        };
+        if tokio::time::timeout(PROGRESSIVE_PREPARE_CANCEL_TIMEOUT, active.handle)
+            .await
+            .is_err()
+        {
+            eprintln!("[原生] 渐进下载任务取消超时");
+        }
+    }
+
+    fn release_active_download(&self, progress: &Arc<DownloadProgress>) {
+        clear_active_download_slot(&self.active_download, progress);
+    }
+
+    async fn cancel_progressive_prepare(
+        &self,
+        progress: &Arc<DownloadProgress>,
+        prepare_task: &mut tauri::async_runtime::JoinHandle<
+            Result<PreparedProgressiveDecoder, String>,
+        >,
+    ) {
+        progress.cancel();
+        let active_download = self.cancel_active_download_for(progress);
+        let shutdown = async {
+            if let Some(active) = active_download {
+                let _ = active.handle.await;
             }
+            let _ = (&mut *prepare_task).await;
+        };
+        if tokio::time::timeout(PROGRESSIVE_PREPARE_CANCEL_TIMEOUT, shutdown)
+            .await
+            .is_err()
+        {
+            prepare_task.abort();
+            eprintln!("[原生] 渐进解码准备任务取消超时");
         }
     }
 
@@ -2348,6 +2513,24 @@ impl NativeAudioEngine {
         metadata: Option<NowPlayingMetadata>,
         start_playing: bool,
     ) -> Result<usize, String> {
+        self.load_cached_with_prepare_timeout(
+            source,
+            cache_key,
+            metadata,
+            start_playing,
+            PROGRESSIVE_DECODE_PREPARE_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn load_cached_with_prepare_timeout(
+        &self,
+        source: &str,
+        cache_key: Option<String>,
+        metadata: Option<NowPlayingMetadata>,
+        start_playing: bool,
+        prepare_timeout: Duration,
+    ) -> Result<usize, String> {
         self.ensure_accepting_work()?;
         let generation = self.begin_playback_transition();
         let metadata_for_source = metadata.clone();
@@ -2426,16 +2609,7 @@ impl NativeAudioEngine {
         if !self.playback_is_current(generation) {
             return Err("播放加载已被新操作替代".to_string());
         }
-        {
-            let mut active_progress = self
-                .active_progress
-                .lock()
-                .map_err(|_| "播放下载状态锁失败".to_string())?;
-            if !self.playback_is_current(generation) {
-                return Err("播放加载已被新操作替代".to_string());
-            }
-            *active_progress = Some(Arc::clone(&progress));
-        }
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         let task = tauri::async_runtime::spawn(async move {
             let _permit = permit;
             if let Err(error) = download_progressive(
@@ -2453,15 +2627,42 @@ impl NativeAudioEngine {
                 progress_task.wake();
                 eprintln!("[原生] 渐进下载失败：{error}");
             }
+            let _ = completion_tx.send(());
         });
-        if let Ok(mut active) = self.active_download.lock() {
+        let mut task = Some(task);
+        let registered = {
+            let _transition = self
+                .transition_lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut active = self
+                .active_download
+                .lock()
+                .map_err(|_| "播放下载状态锁失败".to_string())?;
             if self.playback_is_current(generation) {
-                *active = Some(task);
+                *active = Some(ActiveDownload {
+                    progress: Arc::clone(&progress),
+                    part_path: part_path.clone(),
+                    handle: task.take().expect("下载任务只能登记一次"),
+                });
+                true
             } else {
-                task.abort();
-                return Err("播放加载已被新操作替代".to_string());
+                false
             }
+        };
+        if !registered {
+            progress.cancel();
+            if let Some(task) = task {
+                task.abort();
+            }
+            return Err("播放加载已被新操作替代".to_string());
         }
+        let active_download_slot = Arc::clone(&self.active_download);
+        let progress_for_cleanup = Arc::clone(&progress);
+        tauri::async_runtime::spawn(async move {
+            let _ = completion_rx.await;
+            clear_active_download_slot(&active_download_slot, &progress_for_cleanup);
+        });
         drop(precache_gate);
 
         // Wait for the head bytes (or terminal state) before decoding.
@@ -2481,14 +2682,16 @@ impl NativeAudioEngine {
         if progress.downloaded.load(Ordering::SeqCst) < MIN_PROGRESSIVE_PRELOAD_BYTES
             && !progress.finished.load(Ordering::SeqCst)
         {
-            self.cancel_active_download();
+            self.cancel_progressive_download(&progress).await;
             return Err("下载歌曲超时，无法开始播放".to_string());
         }
         if progress.failed.load(Ordering::SeqCst) {
+            self.cancel_progressive_download(&progress).await;
             return Err("下载歌曲失败，无法开始播放".to_string());
         }
         if progress.finished.load(Ordering::SeqCst) {
             // 小文件/快速下载可能在等待期间已完整落盘并改名。
+            self.release_active_download(&progress);
             return self.load_file_for_generation(
                 final_path.to_str().unwrap(),
                 generation,
@@ -2500,50 +2703,44 @@ impl NativeAudioEngine {
                 start_playing,
             );
         }
-        let file = match std::fs::File::open(&part_path) {
-            Ok(file) => file,
-            Err(error) => {
-                self.cancel_active_download();
-                return Err(format!("打开渐进缓存失败: {error}"));
-            }
-        };
-        let reader = ProgressiveFile {
-            file,
-            progress: Arc::clone(&progress),
-            reader_interrupt_epoch: progress.reader_interrupt_epoch.load(Ordering::SeqCst),
-        };
-        let expected_len = progress.expected_len.load(Ordering::SeqCst);
-        let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
-        if expected_len > 0 {
-            builder = builder.with_byte_len(expected_len);
-        }
-        let decoder = match builder.build() {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                self.cancel_active_download();
-                return Err(format!("媒体解码失败: {error}"));
-            }
-        };
-        let total = decoder
-            .total_duration()
-            .map(|duration| duration.as_secs_f64())
-            .or_else(|| {
-                metadata_for_source
-                    .as_ref()
-                    .and_then(|metadata| metadata.duration_ms)
-                    .map(|milliseconds| milliseconds as f64 / 1000.0)
-            });
-        let (decoder, decode_state) = match spawn_threaded_decoder_with_health(
-            decoder,
-            Some(Arc::clone(&progress)),
-            Arc::clone(&self.health),
-        ) {
-            Ok(threaded) => threaded,
-            Err(error) => {
-                self.cancel_active_download();
+        let part_for_prepare = part_path.clone();
+        let final_for_prepare = final_path.clone();
+        let progress_for_prepare = Arc::clone(&progress);
+        let metadata_duration_ms = metadata_for_source
+            .as_ref()
+            .and_then(|metadata| metadata.duration_ms);
+        let health = Arc::clone(&self.health);
+        let mut prepare_task = tauri::async_runtime::spawn_blocking(move || {
+            prepare_progressive_decoder(
+                part_for_prepare,
+                final_for_prepare,
+                progress_for_prepare,
+                metadata_duration_ms,
+                health,
+            )
+        });
+        let prepared = match tokio::time::timeout(prepare_timeout, &mut prepare_task).await {
+            Ok(Ok(Ok(prepared))) => prepared,
+            Ok(Ok(Err(error))) => {
+                self.cancel_progressive_download(&progress).await;
                 return Err(error);
             }
+            Ok(Err(error)) => {
+                self.cancel_progressive_download(&progress).await;
+                return Err(format!("渐进解码准备任务失败: {error}"));
+            }
+            Err(_) => {
+                self.cancel_progressive_prepare(&progress, &mut prepare_task)
+                    .await;
+                return Err(format!(
+                    "媒体解码准备超过 {} 秒，尝试兼容质量",
+                    prepare_timeout.as_secs_f64()
+                ));
+            }
         };
+        let total = prepared.total_seconds;
+        let decoder = prepared.decoder;
+        let decode_state = prepared.decode_state;
         let player = self
             .player
             .lock()
@@ -3950,6 +4147,17 @@ mod tests {
         std::fs::write(path, wav).unwrap();
     }
 
+    fn stalled_wave_probe_head() -> Vec<u8> {
+        const JUNK_BYTES: u32 = 1024 * 1024;
+        let mut head = Vec::with_capacity(512 * 1024);
+        head.extend_from_slice(b"RIFF");
+        head.extend_from_slice(&(JUNK_BYTES + 64).to_le_bytes());
+        head.extend_from_slice(b"WAVEJUNK");
+        head.extend_from_slice(&JUNK_BYTES.to_le_bytes());
+        head.resize(512 * 1024, 0);
+        head
+    }
+
     fn unique_temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("cadilume-{label}-{}", uuid::Uuid::new_v4()))
     }
@@ -4448,7 +4656,13 @@ mod tests {
         progress
             .expected_len
             .store(bytes.len() as u64, Ordering::SeqCst);
-        *engine.active_progress.lock().unwrap() = Some(Arc::clone(&progress));
+        *engine.active_download.lock().unwrap() = Some(ActiveDownload {
+            progress: Arc::clone(&progress),
+            part_path: partial_wav.clone(),
+            handle: tauri::async_runtime::spawn(async {
+                std::future::pending::<()>().await;
+            }),
+        });
         let reader = ProgressiveFile {
             file: std::fs::File::open(&partial_wav).unwrap(),
             progress,
@@ -5034,6 +5248,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stalled_progressive_probe_times_out_cleans_and_allows_next_quality() {
+        let next_wav = unique_temp_path("progressive-probe-next.wav");
+        write_test_wav_of_seconds(&next_wav, 1);
+        let next_data = std::fs::read(&next_wav).unwrap();
+        let stalled_head = stalled_wave_probe_head();
+        let stalled_requests = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/stalled.wav",
+                axum::routing::get({
+                    let requests = Arc::clone(&stalled_requests);
+                    move || {
+                        let requests = Arc::clone(&requests);
+                        let head = stalled_head.clone();
+                        async move {
+                            requests.fetch_add(1, AtomicOrdering::SeqCst);
+                            let first = futures_util::stream::once(async move {
+                                Ok::<_, std::io::Error>(axum::body::Bytes::from(head))
+                            });
+                            let body = first.chain(futures_util::stream::pending::<
+                                Result<axum::body::Bytes, std::io::Error>,
+                            >());
+                            axum::response::Response::builder()
+                                .header(axum::http::header::CONTENT_TYPE, "audio/wav")
+                                .body(axum::body::Body::from_stream(body))
+                                .unwrap()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/next.wav",
+                axum::routing::get(move || {
+                    let data = next_data.clone();
+                    async move { ([(axum::http::header::CONTENT_TYPE, "audio/wav")], data) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let cache_root = unique_temp_path("progressive-probe-timeout-cache");
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        engine.player().set_volume(0.0);
+        let stalled_url = format!("http://127.0.0.1:{}/stalled.wav", addr.port());
+        let stalled = tokio::time::timeout(
+            Duration::from_secs(3),
+            engine.load_cached_with_prepare_timeout(
+                &stalled_url,
+                Some("stalled-original".into()),
+                None,
+                true,
+                Duration::from_millis(300),
+            ),
+        )
+        .await
+        .expect("渐进探测必须在有界时间内返回")
+        .expect_err("永久停流的媒体探测必须失败并允许质量回退");
+        assert!(
+            stalled.contains("媒体解码准备超过"),
+            "应由解码准备超时终止，实际：{stalled}"
+        );
+        assert_eq!(stalled_requests.load(AtomicOrdering::SeqCst), 1);
+        let (_, stalled_part) = test_cache_paths(&cache_root, "stalled-original");
+        assert!(!stalled_part.exists(), "超时后不得残留 .audio.part");
+        assert!(
+            engine.active_download.lock().unwrap().is_none(),
+            "超时后活动下载槽必须释放"
+        );
+
+        let next_url = format!("http://127.0.0.1:{}/next.wav", addr.port());
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            engine.load_cached_and_play(&next_url, Some("fallback-320".into()), None),
+        )
+        .await
+        .expect("下一质量请求不应被旧探测或下载任务阻塞")
+        .expect("下一质量请求应立即开始播放");
+        assert!(engine.loaded.load(Ordering::SeqCst));
+        let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while engine.active_download.lock().unwrap().is_some()
+            && tokio::time::Instant::now() < cleanup_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            engine.active_download.lock().unwrap().is_none(),
+            "完整下载完成后活动下载槽应自动释放"
+        );
+        engine.stop_immediately_and_wait().await;
+        let _ = std::fs::remove_file(next_wav);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[tokio::test]
     async fn download_retries_after_transient_truncation() {
         use axum::response::IntoResponse;
         let wav = std::env::temp_dir().join("cadilume-download-retry.wav");
@@ -5229,6 +5540,61 @@ mod tests {
         assert!(error.contains("单文件缓存上限"), "实际错误：{error}");
         assert!(!part_path.exists());
         assert!(!final_path.exists());
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[tokio::test]
+    async fn cancelling_final_rate_limit_never_commits_partial_download() {
+        let data = vec![1_u8, 2, 3, 4];
+        let data_for_server = data.clone();
+        let app = axum::Router::new().route(
+            "/cancel-final",
+            axum::routing::get(move || {
+                let data = data_for_server.clone();
+                async move {
+                    axum::response::Response::builder()
+                        .header(axum::http::header::CONTENT_TYPE, "audio/wav")
+                        .header(axum::http::header::CONTENT_LENGTH, data.len().to_string())
+                        .body(axum::body::Body::from(data))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let cache_root = unique_temp_path("cancel-final-download-cache");
+        let (_, final_path, part_path) =
+            resolve_audio_cache_paths(&cache_root, Some("cancel-final-download")).unwrap();
+        let progress = DownloadProgress::new();
+        let progress_for_cancel = Arc::clone(&progress);
+        let cancel_task = tokio::spawn(async move {
+            // The 1 byte/s pacing keeps the future inside its final wait long
+            // enough for this cancellation to race the commit deterministically.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            progress_for_cancel.cancel();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            download_progressive(
+                &loopback_http_client(None).unwrap(),
+                &format!("http://127.0.0.1:{}/cancel-final", addr.port()),
+                &part_path,
+                &final_path,
+                &progress,
+                Some(1),
+                1,
+            ),
+        )
+        .await
+        .expect("取消限速下载应及时返回");
+        cancel_task.await.unwrap();
+        assert!(result.unwrap_err().contains("取消"));
+        assert!(!part_path.exists(), "取消后不得残留 .part");
+        assert!(!final_path.exists(), "取消后不得提交完整缓存");
         let _ = std::fs::remove_dir_all(cache_root);
     }
 

@@ -758,8 +758,9 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 
   const deletePlaylistCallback = useCallback(async (playlist: PlexPlaylist) => {
     if (!serverId) {
-      notify("请先在设置中选择音乐服务器。", "warning");
-      return;
+      const message = "请先在设置中选择音乐服务器。";
+      notify(message, "warning");
+      throw new Error(message);
     }
     try {
       await deletePlaylist(serverId, playlist.ratingKey);
@@ -768,6 +769,9 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       bumpPlaylistMutation();
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : String(reason), "error");
+      // Keep the confirmation dialog open so a transient PMS/ACL failure is
+      // not mistaken for a successful deletion.
+      throw reason;
     }
   }, [bumpPlaylistMutation, loadPlaylistList, notify, serverId]);
 
@@ -1770,10 +1774,13 @@ function RoutePage() {
         runtime.notify(`已从歌单移除《${track.title}》。`, "success");
         void runtime.loadPlaylistList();
       } else {
-        runtime.notify("没有从歌单移除任何歌曲，请刷新后重试。");
+        const message = "没有从歌单移除任何歌曲，请刷新后重试。";
+        runtime.notify(message);
+        throw new Error(message);
       }
     } catch (reason) {
       runtime.notify(reason instanceof Error ? reason.message : String(reason), "error");
+      throw reason;
     }
   }, [playlist, runtime]);
 
@@ -2150,9 +2157,15 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
           onClose={() => setDeleting(null)}
           onConfirm={async () => {
             setDeleteBusy(true);
-            await onDeletePlaylist(deleting);
-            setDeleteBusy(false);
-            setDeleting(null);
+            try {
+              await onDeletePlaylist(deleting);
+              setDeleting(null);
+            } catch {
+              // The callback already surfaced the sanitized error notification;
+              // retain the dialog for an explicit retry or cancellation.
+            } finally {
+              setDeleteBusy(false);
+            }
           }}
         />
       )}
@@ -3070,10 +3083,13 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
             setRemoveBusy(true);
             try {
               await onRemoveTrack(pendingRemove);
-            } finally {
-              setRemoveBusy(false);
               setPendingRemove(undefined);
               removeAnchorRef.current = null;
+            } catch {
+              // Keep the anchor and confirmation visible when PMS rejects the
+              // mutation so the user can retry without reopening the row menu.
+            } finally {
+              setRemoveBusy(false);
             }
           }}
         />

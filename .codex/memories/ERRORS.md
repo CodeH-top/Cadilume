@@ -1,5 +1,14 @@
 # ERRORS
 
+## 2026-08-08 — Tauri 打包验收可能遗留第二个 Cadilume 进程
+
+- `pnpm tauri build --debug --no-bundle` 或手工启动 `target/debug/bundle/macos/Cadilume.app`
+  会留下独立于唯一 `pnpm tauri dev` 链的 bundle 进程；它不会显示为 Vite/Tauri CLI 子进程，
+  但会造成两个媒体会话、重复 Now Playing 命令和错误的 UI 验收对象。
+- 每次 macOS 验收前同时按 cwd/可执行路径检查 `target/debug/Cadilume` 与
+  `target/debug/bundle/macos/Cadilume.app/Contents/MacOS/Cadilume`，确认只保留开发链；
+  只终止已核对的本项目残留 PID，不要重启唯一开发链或清理构建目录。
+
 ## 2026-08-08 — 本地验收环境的三个可复用边界
 
 - 新的 ad-hoc 签名会改变 macOS 钥匙串访问者身份并可能再次触发 ACL 确认；这不代表凭证损坏。

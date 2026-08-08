@@ -12,14 +12,14 @@
 - Repository directory: `cadilume`.
 - Purpose: lightweight, desktop-first music client for macOS and Windows that interoperates with authorized Plex Media Server libraries.
 - Stack: Tauri 2, React 19, TypeScript, Rust, Vite.
-- Repository: independent git repository on branch `main`.
+- Repository: independent git repository on branch `dev` (the active development branch; `main` and `webview` remain historical baselines).
 - UI direction: native system window, equally complete dark/light themes, Plex/Plexamp-like desktop information density through a clean-room Cadilume implementation, fixed bottom player, persistent independent volume, default/minimum size `1280×820`.
 
 ## User Priorities
 
 - A visible, reliable way to close or quit the app.
-- User-selectable close-to-tray vs direct quit behavior.
-- Explicit application quit actions in the Windows notification area and macOS menu bar; settings keeps close behavior and a danger-colored account logout action without duplicating application quit.
+- Closing the main window minimizes natively and continues playback; explicit quit remains available from the macOS menu bar / status icon path.
+- The status icon visibility preference is independent of close behavior, and settings keeps a danger-colored account logout action without duplicating application quit.
 - Basic music playback for authorized free/shared Plex accounts without a client-side Plex Pass gate.
 - One internal Cadilume icon system across the UI, application bundle, tray/menu bar, and installers, with sharp Retina assets generated from the project SVG master.
 - macOS release packages must never rely on a broken or incomplete resource signature; a normal Internet/download warning is acceptable.

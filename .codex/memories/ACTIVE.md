@@ -7,7 +7,7 @@
 - [ACT-003] 主窗口关闭统一执行原生最小化并继续播放，不再提供 `tray` / `quit` 状态选择；macOS 菜单栏 / Windows 通知区域状态图标显示与否是独立、持久化偏好。状态图标开启时保留唯一的原生显式退出入口，关闭时窗口仍须能从 Dock / 任务栏恢复，不能形成不可见后台进程。
 - [ACT-004] Plex account token stays in Keychain/Credential Manager. PMS calls use each resource's per-server `accessToken`, especially for `owned:false` shared servers.
 - [ACT-005] Do not client-gate basic authorized music by `subscription.active`; respect server ACL failures and feature-specific Plex Pass gates.
-- [ACT-006] v0.1 WebView audio is an MVP boundary. Do not claim strict gapless, background queue authority, output-device control, or complete Windows SMTC until the Rust native playback core exists.
+- [ACT-006] Rust `rodio + cpal + symphonia` is the authoritative desktop playback path. Keep WebView audio limited to browser/demo mode; do not reintroduce HTMLAudio as a desktop fallback or claim a second queue authority.
 - [ACT-007] Use the browser demo dataset only outside Tauri. Real Plex traffic must run through Rust commands.
 - [ACT-008] Keep the product/application name `Cadilume`, Bundle/application identifier `top.codeh.cadilume`, and repository directory `cadilume` aligned. Use Plex/Plexamp/PMS names only for third-party service, API/protocol, interoperability, or clean-room research semantics.
 - [ACT-009] The expanded now-playing view is an in-window modal that covers the entire viewport, including the fixed bottom bar, and must carry its own complete playback controls; it may never render outside the application window.

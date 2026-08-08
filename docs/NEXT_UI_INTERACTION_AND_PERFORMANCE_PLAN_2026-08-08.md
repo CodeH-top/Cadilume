@@ -134,7 +134,8 @@ snapshot。
 | 搜索 | 路由 replace/缓存契约 | 播放中输入、连续提交、History/KeepAlive 数量与响应耗时 |
 | 设置 | 结构和样式检查 | 底部间距、无勾号、快速切换三种配色 |
 
-实现完成后依次执行 `pnpm check`、`pnpm test`、`pnpm build`。Rust 源码本轮不改，但最终
+实现完成后依次执行 `pnpm check`、`pnpm test`、`pnpm build`。A-E UI 批次本身不改 Rust，
+但后续播放器稳定性审查补充了 Rust 渐进探测超时与任务清理修复；最终
 仍进行一次实际 Tauri 开发态回归；若打包门禁需要，再执行对应 Tauri build。全部通过后
 更新结果文档和项目记忆并在 `dev` 分支创建本地提交，不 push。
 
@@ -168,6 +169,13 @@ snapshot。
   长期显示上一首封面。浏览器恢复态不会持久化演示用 `data:` 封面，这是凭证/URL 安全
   边界；真实 PMS 队列持久化的是服务器相对 `thumb`，两条路径没有混用。
 
+### 后续稳定性审查补充
+
+- 歌单删除或歌曲移除遇到 PMS/ACL 错误时，确认弹窗现在保留锚点和重试入口，只在真实
+  成功后关闭；零条目删除结果也按失败处理，不再显示成已完成。
+- 渐进音频容器探测的隔离、超时、取消和 `.part` 清理记录在
+  `NEXT_HANDOFF_AND_OPEN_ISSUES_PLAN_2026-08-07.md`，不改变零外部运行依赖边界。
+
 ### macOS 系统媒体验收
 
 - 在唯一 Tauri 开发链和真实 PMS 播放中，macOS 控制中心已显示完整曲名、歌手、专辑和
@@ -180,8 +188,8 @@ snapshot。
 ### 最终门禁
 
 - `pnpm check`：通过。
-- `pnpm test`：30 个测试文件、178 项测试全部通过。
+- `pnpm test`：30 个测试文件、183 项测试全部通过。
 - `pnpm build`：通过；仅保留单 JS chunk 约 `593KB` 的非阻塞体积提示。
-- `cargo test --manifest-path src-tauri/Cargo.toml`：94 passed、2 ignored；ignored 项为需要真实
+- `cargo test --manifest-path src-tauri/Cargo.toml`：97 passed、2 ignored；ignored 项为需要真实
   PMS token 的显式手工压力测试。
 - `pnpm tauri build --debug --no-bundle`：通过，完整 Debug 应用成功链接。

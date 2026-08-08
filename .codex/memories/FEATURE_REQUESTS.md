@@ -1,5 +1,11 @@
 # FEATURE_REQUESTS
 
+## 歌单删除失败后的确认状态（已完成，2026-08-08）
+
+- PMS/ACL 删除歌单或移除歌曲失败时，前端现在保留确认弹窗与原锚点，只显示脱敏错误通知，
+  允许重试或取消；只有真实成功才关闭弹窗并刷新列表。
+- 零条目移除也按失败处理，避免“请求成功返回但实际未删除”被误报为完成。
+
 ## macOS Now Playing 可见验收（已完成）
 
 - 代码链路已闭环：禁用 WebKit MediaSession；Rust 在主线程用 MediaPlayer 框架导出的真实
@@ -12,7 +18,9 @@
 
 ## 歌词与 Plexamp 实曲对时：待 Cadilume 原生听感验收
 
-- 已修复可确认的前端时间问题：完整保留 PMS `startOffset/endOffset` 毫秒边界，歌词流按 PMS 原始顺序尝试；桌面播放期间约每 50ms 读取活动 `HTMLAudioElement.currentTime`，不再只依赖约 250ms 粒度的 `timeupdate`，且未加入猜测性的固定正负 delay。
+- 已修复可确认的前端时间问题（历史 WebView 路径）：完整保留 PMS `startOffset/endOffset`
+  毫秒边界，歌词流按 PMS 原始顺序尝试；当时约每 50ms 读取活动时钟，未加入猜测性的固定
+  正负 delay。当前桌面播放时钟已由 Rust 原生 PCM 输出权威驱动。
 - Plex Web 已用曾沛慈《我才没有那样呢》及李荣浩、周杰伦、S.H.E 等多曲自然播放采样；活动行通常在目标边界后约 20–80ms 更新，没有发现统一提前、延后半拍或累积漂移规则。自动测试已覆盖毫秒边界与无歌词状态。
 - 2026-08-05 用户真实回归确认周杰伦《完美主义》仍存在歌词不同步，必须作为后续 Cadilume 原生专项样本复测；先核对同一歌词源的原始时间戳、活动音频时钟与实际人声起点，不能根据单曲现象直接加入固定偏移。
 - 2026-08-06 代码级修复：歌词文档不再因媒体时长稳定（含非 seekable 流的 `Infinity`）
@@ -21,16 +29,13 @@
 
 ## 真实 PMS 播放验收与逐曲链路诊断
 
-- 有界回退已覆盖原始流及 PMS 生成的 320/256/192 kbps 兼容流，但此前用户报告的真实失败曲目尚未在其 PMS 上端到端复播；完成该验收前不能把自动测试等同于“所有音乐均已解决”。
-- 2026-08-05 新增明确样本：周杰伦《天地一斗》在自动源、320、256、192 kbps 均返回 `MediaError code 4`，WKWebView 未提供 message。按用户决定先预留，不在当前视觉修正轮修改播放链路；后续复测须让本机代理提供脱敏的上游 HTTP 状态、Content-Type、连接类型和转码端点结果，区分原文件不受支持、PMS 转码响应异常与代理响应头问题。
-- 2026-08-06 代理代码级修复：只转发 `audio/*` 的 2xx/416 响应，杜绝“PMS 错误页 200 +
-  text/html”被当作音频交给 WebView 触发 code 4；转码参数按 Plex Web musicProfile 收口，
-  失败响应带脱敏逐次尝试诊断。仍需在真实 PMS 上复播《天地一斗》并覆盖原始直放/三档码率/
-  seek/暂停恢复后才能关闭该项。
-- 2026-08-06 新增播放链路调试日志：Rust 代理逐次尝试 eprintln + 前端 `playback://log`
-  事件转发到 Tauri 开发终端（脱敏）。用户报告切歌过程仍出现 `MediaError code 4` 且可能
-  卡住，正在用该日志通道定位“切歌时序/旧会话/转码槽”还是代理/PMS 响应问题；确认前不
-  擅自加固定延迟或按歌名规则。
+- 有界回退已覆盖原始流及 PMS 生成的 320/256/192 kbps 兼容流。
+- 2026-08-08 在唯一 Tauri 开发链和真实 PMS 上完成《天地一斗》端到端回归：原始音源下载、
+  缓存、渐进播放、暂停/恢复、滑杆与键盘 seek、窗口隐藏后继续播放均通过；前端此前的
+  `MediaError code 4` 路径已由原生引擎接管。另有确定性停流探测测试验证失败后下一质量
+  能立即接管，且不残留 `.audio.part`。该已知样本问题关闭。
+- 2026-08-06 的代理约束仍有效：只转发 `audio/*` 的 2xx/416 响应，杜绝“PMS 错误页 200 +
+  text/html”被当作音频；失败诊断只保留脱敏逐次尝试信息。
 - 当前“本地直连 / 远程直连 / Plex Relay”只显示服务器发现阶段的首选连接。代理会在逐曲请求中尝试多个连接与转码 endpoint，因此该标签不是最终成功链路。
 - 若需要向用户显示当前曲目的实际连接和直放/转码结果，应由 Rust 流代理在成功获得上游响应时发布脱敏运行态事件，只返回连接类型、媒体决策和有效码率，不暴露 PMS URI、媒体路径或 token。
 
@@ -40,22 +45,24 @@
 
 ## Native playback core
 
-- Move queue authority, Range/cache, decoding, independent gain, gapless/prefetch and output device selection into Rust so Windows hidden-window playback does not depend on WebView timers.
-- Add macOS Now Playing/Remote Command Center and Windows SMTC with metadata, progress, Seek and artwork.
+- Move queue authority, Range/cache, decoding, independent gain, gapless/prefetch and output device selection into Rust so desktop playback does not depend on WebView timers.（已完成；Windows 仅保留代码路径，未纳入本轮实机验收。）
+- Add macOS Now Playing/Remote Command Center and Windows SMTC with metadata, progress, Seek and artwork.（macOS 已完成并通过可见验收；Windows 实机验收延期。）
 - 2026-08-06 用户新增硬约束：程序必须完全独立可用，禁止系统安装依赖（如
   `brew install mpv`），一切依赖必须集成进程序内部。该约束直接排除 libmpv 的
   Homebrew/系统库路线，也排除 tauri-plugin-libmpv（其 setup 在 macOS 明确要求
   `brew install mpv`，且 macOS 标为未测试）。
-- 2026-08-06 选型结论（待用户确认后启动 POC）：首选纯 Rust 静态方案
-  `rodio 0.22 + cpal + symphonia 0.6`，全部编译进现有二进制，macOS/Windows 单一
+- 2026-08-06 选型结论（现已落地；候选对比内容保留作历史记录）：首选纯 Rust 静态方案
+  `rodio 0.22 + cpal + symphonia 0.5.5`，全部编译进现有二进制，macOS/Windows 单一
   代码路径。实测：含 rodio+cpal+symphonia（MP3/AAC/FLAC/ALAC/Vorbis/WAV）的
   release 二进制仅 2.5MB；对比 Windows LGPL 版 `libmpv-2.dll` 解压 95MB（单架构、
   压缩包 27MB）。许可全部兼容 MIT 应用（rodio/cpal MIT OR Apache-2.0，
   symphonia MPL-2.0，miniaudio Unlicense/MIT-0）；libmpv 本体是 GPLv2+/LGPLv2.1+
   双许可、Rust 绑定 crate 是 LGPL-2.1，不是 MIT。
-- 已知边界：symphonia 0.6.0 无 Opus/WMA/APE/DSD/HE-AAC；MP3 gapless 能力有限；
-  Now Playing/SMTC 仍需 Rust 侧单独接入。PMS 转码回退（container=mp3）可兜住
-  不支持格式；磁盘缓存与“先落盘再解码”设计可同时解决 seek 与 Plexamp 式 ahead 预缓存。
+- 已知边界（候选版本研究）：symphonia 0.6.0 无 Opus/WMA/APE/DSD/HE-AAC；当前锁定的
+  symphonia 0.5.5 由同一 rodio feature 集合编译验证；MP3 gapless 能力有限；
+  Now Playing/SMTC 的 Rust 接入已完成（macOS 已做可见验收，Windows 延期）。PMS 转码回退
+  （container=mp3）可兜住不支持格式；磁盘缓存与“先落盘再解码”设计可同时解决 seek 与
+  Plexamp 式 ahead 预缓存。
 - 2026-08-06 用户追问“JS 端是否有现成开源引擎”后补充两条可选路线：
   （1）JS WASM 解码（`@wasm-audio-decoders`，MIT）：可消除 codec 级 MediaError 4、
   支持 gapless，完全打进前端产物，无系统依赖；但仍在 WebView 内，后台播放/SMTC/
@@ -68,14 +75,10 @@
   通过**（连续播放正常，默认音量 20%）。正式原生内核按此路线实施：AudioEngine
   边界 + 队列/进度事件 + seek + Now Playing/SMTC + 缓存上限/LRU + ahead 预取；
   kithara 保留为上游稳定后的备选。
-- 2026-08-07 完成状态：Phase 0-6 主体完成（rodio 内核、队列权威 Rust、磁盘缓存
-  LRU、边下边播、ahead 预取、macOS/Windows SMTC、WebView 播放退役）。剩余：
-  严格 gapless（MVP 预取减间隙）、Windows 实机 SMTC/后台播放验收、真实 PMS 听感
-  回归（高频切歌 20+ 次、歌词对时、seek/暂停恢复）。
-- 2026-08-08 更新：严格 gapless、PCM 解码/实时线程隔离、缓存身份与并发清理、设备恢复、
-  macOS Now Playing 字典契约均已实现并通过自动化/负载验证。Windows 已按用户要求移出本轮；
-  当前只保留 macOS 控制中心可见人工确认、长期真实听感/弱网/睡眠恢复、ReplayGain、
-  crossfade、响度扫描和离线下载等明确后续项。
+- 2026-08-08 当前状态：Phase 0-6、严格 gapless、PCM 解码/实时线程隔离、缓存身份与并发
+  清理、设备恢复、macOS Now Playing 字典契约和《天地一斗》真实 PMS 回归均已完成；
+  Windows 实机验收按用户决定移出本轮。剩余仅为 macOS 长期听感/弱网/睡眠恢复、
+  《完美主义》歌词听感专项，以及 ReplayGain、crossfade、响度扫描和离线下载等后续能力。
 
 ## [FR-20260801-001] 页面标题与歌手资料层级
 
