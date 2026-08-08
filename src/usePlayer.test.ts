@@ -19,8 +19,10 @@ import {
   normalizeRestoredProgress,
   normalizeQueueBatch,
   parsePersistedPlaybackSession,
+  playbackFallbackQualities,
   previewShuffleNext,
   readPersistedPlaybackSession,
+  sourceStreamQuality,
   takeShuffleIndex,
 } from "./usePlayer";
 import type { PlexItem } from "./types";
@@ -48,6 +50,35 @@ describe("native audio cache identity", () => {
       ...source,
       Media: [{ ...source.Media![0], Part: [{ ...source.Media![0].Part![0], size: 5678 }] }],
     }, "original")).not.toBe(first);
+  });
+});
+
+describe("native playback compatibility fallback", () => {
+  it("reads only bounded public bitrate markers from loopback URLs", () => {
+    expect(sourceStreamQuality("http://127.0.0.1:49152/stream/ticket?maxAudioBitrate=320")).toBe("320");
+    expect(sourceStreamQuality("http://127.0.0.1:49152/stream/ticket?maxAudioBitrate=128")).toBeUndefined();
+    expect(sourceStreamQuality("not a url")).toBeUndefined();
+  });
+
+  it("falls back through strictly lower PMS compatibility streams", () => {
+    const localAuto = "http://127.0.0.1:49152/stream/ticket";
+    const remoteAuto = `${localAuto}?maxAudioBitrate=320`;
+
+    expect(playbackFallbackQualities("auto", "auto", localAuto)).toEqual(["320", "256", "192"]);
+    expect(playbackFallbackQualities("original", "original", localAuto)).toEqual(["320", "256", "192"]);
+    expect(playbackFallbackQualities("auto", "auto", remoteAuto)).toEqual(["256", "192"]);
+    expect(playbackFallbackQualities("320", "320", remoteAuto)).toEqual(["256", "192"]);
+    expect(playbackFallbackQualities("256", "256", localAuto)).toEqual(["192"]);
+    expect(playbackFallbackQualities("192", "192", localAuto)).toEqual([]);
+  });
+
+  it("never repeats an already attempted effective quality", () => {
+    expect(playbackFallbackQualities(
+      "auto",
+      "auto",
+      "http://127.0.0.1:49152/stream/ticket",
+      ["auto", "320"],
+    )).toEqual(["256", "192"]);
   });
 });
 
