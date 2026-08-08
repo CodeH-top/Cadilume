@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
+import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioClearCache, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { readOutputDevicePreference, writeOutputDevicePreference } from "./outputDevicePreference";
 import { playbackLog } from "./playbackLog";
@@ -1165,6 +1165,42 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     return stop;
   }, []);
 
+  const clearPlaybackAndCache = useCallback(async (): Promise<void> => {
+    // Invalidate queued load/prefetch continuations before asking Rust to stop
+    // and delete files; otherwise a stale WebView promise can recreate a cache
+    // entry immediately after the user pressed Clear.
+    loadRequestRef.current += 1;
+    precacheRequestRef.current += 1;
+    const timer = persistedSessionTimerRef.current;
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      persistedSessionTimerRef.current = undefined;
+    }
+    await (isDesktopRuntime()
+      ? nativeQueueBarrierRef.current!.enqueue(nativeAudioClearCache)
+      : Promise.resolve());
+    playbackSessionDiscardedRef.current = false;
+    clearPersistedPlaybackSession();
+    queueRef.current = [];
+    queueServerIdRef.current = undefined;
+    indexRef.current = -1;
+    progressRef.current = 0;
+    resumeProgressRef.current = null;
+    shuffleNavigationRef.current = createShuffleNavigationState(0, -1);
+    scrobbledRef.current.clear();
+    setQueue([]);
+    setCurrentIndex(-1);
+    setProgress(0);
+    setDuration(0);
+    setPlaying(false);
+    setPlaybackLoading(false);
+    setBuffering(false);
+    setShuffleState(false);
+    setRepeatState("all");
+    setError(undefined);
+    setPlaybackFailure(undefined);
+  }, [setPlaybackLoading]);
+
   const next = useCallback(() => {
     // 先停旧歌 + 进度归 0，避免 nativeQueueNext IPC 往返期间旧歌继续出声/进度残留。
     const stopped = stopCurrentImmediately();
@@ -1559,14 +1595,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         if (precacheRequestRef.current !== requestId || nextIndex == null) return;
         const nextTrack = tracks[nextIndex];
         if (!nextTrack) return;
-        const secondIndex = !shuffle
-          ? getSequentialNextIndex(nextIndex, tracks.length, repeat === "one" ? "all" : repeat)
-          : null;
-        const secondTrack = secondIndex == null || secondIndex === nextIndex
-          ? undefined
-          : tracks[secondIndex];
-        // Immediate next is always admitted before far-ahead warming. Rust also
-        // enforces this priority, so another caller cannot invert the order.
+        // Only the actual next item is warmed. A second full-track download can
+        // consume hundreds of MiB before the listener has expressed any intent
+        // to continue, while the current track remains progressively streamed.
         const artworkTicketPromise = playbackArtworkTicket(serverId, nextTrack);
         const attemptedQualities: StreamQuality[] = [];
         let activeQuality: StreamQuality | undefined = quality;
@@ -1615,16 +1646,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             if (!activeQuality) throw new Error("下一首没有可用的兼容音源");
           }
         }
-        if (precacheRequestRef.current !== requestId || !secondTrack) return;
-        const secondUrl = await requestStreamUrl(serverId, secondTrack, quality);
-        if (precacheRequestRef.current !== requestId) return;
-        // Far-ahead warming is throttled and opportunistic; it starts only
-        // after the immediate next source is safely attached to rodio.
-        await nativeAudioPrecache(
-          secondUrl,
-          nativeAudioCacheIdentity(serverId, secondTrack, quality),
-          true,
-        );
       } catch {
         // Prefetch is best-effort and never blocks ordinary playback fallback.
       }
@@ -1765,5 +1786,6 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     removeFromQueue,
     flushPlaybackSession,
     discardPlaybackSession,
-    }), [appendTracks, buffering, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, insertTracksNext, loading, muted, next, outputSinkId, playContext, playTracks, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setMuted, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
+    clearPlaybackAndCache,
+    }), [appendTracks, buffering, clearPlaybackAndCache, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, insertTracksNext, loading, muted, next, outputSinkId, playContext, playTracks, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setMuted, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
 }

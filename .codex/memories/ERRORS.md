@@ -44,10 +44,14 @@
 - 这不是 HMR、Vite 或 WebView 启动失败的证据。不要为绕过它重启唯一开发链、启动已安装版或
   截图；本轮可用 Codex 内部浏览器的 DOM、computed style、控制台和 Tauri 构建补足验证。
 
-## 2026-08-05 — 本地 Python 未提供 Playwright 验收运行时
+## 2026-08-09 — Playwright 可用，但默认 Chromium 不在本机运行时内
 
-- 系统 `python3` 和 Codex 工作区随附 Python 都无法导入 `playwright`，因此 `webapp-testing` 的原生 Python 脚本流程不能直接用于 Cadilume。
-- 在不启动第二条 Tauri 原生链、且用户禁止截图的验收中，使用 Codex 内部浏览器读取构建预览的 DOM、可访问性状态和控制台；临时 Vite 预览须以实际监听的 IPv6 回环地址作为浏览器目标。
+- 当前 `webapp-testing` 的 Playwright 运行时可用；旧记录“Python 无 Playwright”已经过时。
+  实际失败点是默认 Playwright Chromium 可执行文件未安装，不能把该错误误判为应用或测试
+  代码失败。
+- 在用户禁止截图的 Cadilume UI 验收中，可显式复用本机系统 Chrome 做无截图 DOM、computed
+  style、几何和控制台检查；项目内预览仍优先遵守内部浏览器规则，只有其不可用并完成检查后
+  才使用该回退。Vite 项目端口是 `1420`，并可能只监听 IPv6 `[::1]`；先检查实际监听地址。
 
 ## 2026-08-05 — 内部浏览器的本地预览等待状态
 

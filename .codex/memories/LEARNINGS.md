@@ -51,8 +51,9 @@
   加载前 nativeQueueSet 同步快照，next/previous 走 Rust 命令。
 - WebView 播放退役完成：usePlayer native-only，删除 DualAudioPool/预缓冲/
   MediaError 回退约 1400 行及对应单测（163 项全绿）。开发态不再创建 HTMLAudio。
-- 缓存：512MB LRU（mtime 淘汰、.part 优先清理）；ahead 预取下一首（预缓冲开关
-  开启时 native_audio_precache 完整下载后挂入 rodio 队列）。
+- 缓存（2026-08-09 更新）：默认 1 GiB、可选 1–10 GiB；完整 `.audio` 与活动
+  `.audio.part` 共同计费，按 mtime LRU 淘汰未受保护的完整文件。预缓冲只完整下载 Rust
+  队列确认的真实下一首，完成后挂入 rodio 队列。
 - 严格 gapless（29dc62b）：预排下一首解码器进 rodio 顺序队列，
   `HandoffMarker` 在样本级交接（上一首耗尽、下一首首个样本被拉取）时翻转，
   事件线程据此发 `track` 事件；前端只镜像 UI 不重载流。重复一首/队列不一致时
@@ -60,17 +61,14 @@
   处理，FLAC 天然无缝。
 - 缓存完整性（290b93a）：`download_progressive` 按 Content-Length 校验，
   静默截断不再提交为完整缓存。
-- 预取增强（ad7e679）：顺序模式下 prebuffer 额外预热第二首 ahead，远前置下载
-  限速 5 Mbps（`PRECACHE_RATE_LIMIT_BYTES_PER_SEC`），即时下一首（gapless 预排）
-  保持全速；`native_audio_precache` 新增 `rate_limit` 参数（前端
-  `nativeAudioPrecache(url, key, true)`），`download_progressive` 用按字节
-  期望耗时做 pacing，测试用小 WAV 验证限速生效且文件完整。
+- 预取收口（2026-08-09 更新）：历史“下下首”限速预热已从产品流程删除，只保留当前播放
+  和真实下一首；Rust 的低优先级限速接口仍保留为受测底层能力，但前端当前不调用。
 - 缓存自愈与小文件竞态（90c0d75）：命中缓存解码失败时删坏文件并走渐进下载
   自愈；`download_progressive` 必须先 rename 再置 `finished`（否则 <256KB 的
   小文件在等待方打开 `.part` 前已被改名，导致“打开渐进缓存失败”）。
-- Now Playing 封面仍为遗留代码项：objc2 将 AppKit 类（NSImage/
-  MPMediaItemArtwork）标为 MainThreadOnly，跨线程持有是 UB；实现须在主线程
-  构造并重建字典，且需用户实机验证，设计说明已写入升级计划文档。
+- Now Playing 封面与字典契约已于 2026-08-08 完成：objc2 标记为 MainThreadOnly 的
+  NSImage/MPMediaItemArtwork 只在主线程构造和发布，真实控制中心已验收封面、元数据、
+  时间轴、状态和远程命令。
 - 真实 PMS 自动化回归（290b93a，`cargo test -- --ignored
   real_pms_engine_regression`）：真实资料库两首 FLAC 串行下载→缓存→渐进播放→
   预排→自然结束无缝交接→seek→暂停/恢复，本机已通过。
@@ -183,10 +181,11 @@
   → `MixerDeviceSink`，`Player::connect_new(sink.mixer())`；
   `append/play/pause/clear/try_seek/get_pos/set_volume/empty/is_paused/len`；
   `Decoder::new(File)` 后取 `total_duration()` 需 `use rodio::Source`。
-- 磁盘缓存方案验证通过：Rust 侧用 reqwest 下载 loopback 票据 URL 全量落盘到
-  `app_cache/native-audio/downloads/{ratingKey}.{ext}`（按 Content-Type 推断
-  扩展名），重复播放同曲目直接命中；这正是后续 Plexamp 式 ahead 缓存的基础。
-- 原生引擎默认音量按用户要求设为 20%（比 WebView 播放明显更响的问题）。
+- 磁盘缓存正式实现已替换 spike：Rust 侧把版本化复合身份再次 SHA-256，文件只落为
+  `app_cache/native-audio/downloads/<digest>.audio[.part]`，不暴露 rating key、媒体路径或
+  token；重复播放按身份命中。
+- 音量权威后续迁到前端：localStorage 无值时默认 50%，每次加载/恢复同步给引擎；Rust
+  不再持有业务默认音量，rodio 的 1.0 只可能是同步前的瞬时值。
 - BASS（Un4seen）许可结论：闭源，非商业个人免费，商业产品约 $120 起且插件另算；
   Plexamp 由 Plex 公司商业使用（付费许可）。Cadilume 是 MIT 开源并要分发，
   不采用 BASS；rodio/cpal/symphonia（MIT/Apache + MPL）无此负担。
@@ -257,20 +256,24 @@
     等上游 alpha5/beta 或继续 pin main commit，Tauri 集成层应封装为薄
     `AudioEngine` 边界以便升级或回退 rodio。
 
-## 2026-08-06 — Plexamp 缓存与高频切歌参考（clean-room 结论）
+## 2026-08-09 — 有界流式缓存与 Plexamp/网易云观察（clean-room 结论）
 
-- Plexamp（Electron + React Native Web + 私有 BASS 原生音频引擎）有明确的多级缓存策略：
-  - 播放队列 ahead 预缓存：Wi-Fi 默认预缓存接下来 15 首、蜂窝 5 首，按 `source-key`
-    去重，逐首 `PrecacheTrack`，失败只记录不阻塞播放；预缓存同时加载 loudness/palette
-    元数据。
-  - 磁盘缓存上限（Node 默认 256MB）与预缓存限速（Node 默认 5 Mbps），设置页可调并可
-    “Delete Caches”；还有 `preferDownloadedMedia`（优先已下载媒体）。
-  - 音频实际由原生引擎（electron-media-service）输出并落盘，因此“切到已缓存歌曲”不依赖
-    网络往返；`Journey.load(track,next)` 是 Sonic 跨曲预加载，不是通用 next 缓存。
-- Cadilume 的 WebView/HTMLAudio 架构无法直接复刻该磁盘缓存（音频由 WebKit 拉取、不经
-  Rust 代理落盘）；当前等价物是双 `HTMLAudioElement` 预缓冲下一首 + streamUrl 在途去重。
-  完整复刻应落在既有“原生播放内核”路线（Rust AudioEngine + Range/磁盘缓存）上，不作为
-  本轮 WebView 修补范围。
+- Plexamp 公开资料能稳定确认的是原则，不是当前私有实现细节：ahead 数量与磁盘容量独立；
+  准入必须计入即将缓存的目标文件；低磁盘要主动收口；播放产生的流式缓存与用户显式离线
+  下载是不同语义。历史版本的具体默认值或 ahead 数量不能继续当作当前事实。
+- Cadilume 已落地 Rust 有界流式缓存：默认 1 GiB、设置范围 1–10 GiB；当前曲目渐进下载，
+  可选预取真实下一首，不扫描曲库或整条队列。已知 `Content-Length` 时预留整首，上限变化
+  立即重做预留；未知长度约每 1 MiB 扩展窗口；最终提交前再次按完整文件与所有 `.part`
+  的实时总量复核。重试排除自身旧 `.part`，避免重复计费。
+- “14 首约 491 MB”是原始质量完整媒体的累计，平均约 35 MiB/首，符合 FLAC/ALAC 等无损
+  文件量级；它不是下载整个资料库的证据。连续收听的旧曲会留在 LRU 内，主动范围至多比已
+  实际播放的曲目多一个真实下一首。
+- 本机网易云音乐 macOS 3.1.10 的 `online_play_cache` 使用 `.uc!` 稀疏媒体文件、`.idx!`
+  的 `size/zone` 区间索引和独立 `.info` 元数据。现场 3 个媒体逻辑大小约 123.5 MB，实际
+  分配约 65.6 MiB，说明只写入已请求区间，适合减少跳歌浪费。
+- Cadilume 当前 `ProgressiveFile`/symphonia 依赖连续前缀；直接制造稀疏洞会把未下载区域
+  当成零字节或损坏媒体。若采用网易云式策略，必须另做 Range 缺口调度、区间合并索引、
+  缺口感知随机 Reader、seek/read-head 优先级、崩溃恢复和按实际分配块计费，作为缓存 v2。
 - Plexamp 连接层可借鉴且已落地：并行测试全部连接（非 relay 优先、relay 最后兜底），
   用 `/identity` 的 machineIdentifier 校验连接归属（防错连；期望值必须是 PMS 服务器
   标识 `resource.clientIdentifier`，不是客户端自身标识，否则所有连接都会被判不可达）；

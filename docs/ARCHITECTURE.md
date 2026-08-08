@@ -16,7 +16,7 @@ Rust / Tauri      │
   ├─ 凭证库、PMS 资源发现、per-server token 与连接回退
   ├─ 授权隔离的 loopback 音频/封面票据
   ├─ PlaybackCoordinator：队列、repeat、shuffle、播放代际
-  ├─ DownloadManager：单流优先级、渐进下载、ahead 与磁盘 LRU
+  ├─ DownloadManager：单流优先级、渐进下载、真实下一首预取与磁盘 LRU
   ├─ Decoder workers：symphonia -> 有界 PCM chunk 队列
   ├─ rodio -> cpal -> CoreAudio / WASAPI
   └─ macOS Now Playing / Remote Command Center、Windows SMTC
@@ -56,21 +56,29 @@ Rust / Tauri      │
 
 ```text
 PMS Part / universal transcode
-  -> 单条 HTTP body（播放 > 即时下一首 > 远 ahead）
+  -> 单条 HTTP body（当前播放 > 真实下一首）
   -> <sha256>.audio.part
   -> 256 KiB 头部就绪后允许渐进解码
+  -> 下载中也持续受用户缓存预算约束
   -> Content-Length/空响应/超时校验
   -> 原子 rename 为 <sha256>.audio
 ```
 
 - 同时只允许一条真实 PMS 音频下载，避免远程连接、反代或转码会话互相争抢。
-- 同一缓存身份的并发预取共享一个任务；即时下一首可取消并升级同键的 5 Mbps 限速任务。
+- 当前曲目按需渐进下载；启用“预缓冲下一首”时，前端只完整预取 Rust 队列确认的真实
+  下一首，不再下载“下下首”或扫描整个播放队列。Rust 仍保留低优先级限速接口，但当前
+  产品流程不调用它。
+- 同一缓存身份的并发预取共享一个任务；即时下一首可取消并升级同键的低优先级任务。
 - 首包和连续 body chunk 均有 30 秒无进展上限。Content-Length 响应必须字节数完全一致；
   无 Content-Length 的 chunked 响应完整结束后也可提交；空响应永不进入缓存。
-- 无论响应是否声明 Content-Length，单个音频下载超过 512 MiB 都会在继续写盘前拒绝；
-  引擎 HTTP 客户端禁止重定向，避免 loopback ticket 被带到其他 origin。
+- 已知 Content-Length 时在写盘前把即将缓存的完整文件计入准入预算；用户动态修改上限后，
+  下一块写入前重新预留完整目标。未知长度时每增长约 1 MiB 重新检查。重试会替换同一个
+  `.part`，预算不会把旧部分文件和新目标重复计算。
+- 无论响应是否声明 Content-Length，单个音频都不能超过当前 1–10 GiB 用户上限；下载
+  期间读取实时上限，最终提交前再按实际占用复核。引擎 HTTP 客户端禁止重定向，避免
+  loopback ticket 被带到其他 origin。
 - `.part` 由任务 RAII guard 管理，失败、取消和 abort 都会清理；启动时只删除上次崩溃
-  遗留的 `.audio.part`，LRU 不触碰活动部分文件。
+  遗留的 `.audio.part`，LRU 不触碰活动部分文件，但其字节始终计入容量上限。
 
 ## 实时解码与缓冲
 
@@ -111,13 +119,16 @@ PMS Part / universal transcode
 
 ## 音频缓存
 
-- 默认上限 512 MiB，目录位于应用 cache 下的 `native-audio/downloads`。
+- 默认上限 1 GiB，可在设置中选择 1–10 GiB，目录位于应用 cache 下的
+  `native-audio/downloads`。设置页显示“完整文件 + 下载中 `.part`”的总占用、上限和数量。
 - 前端生成版本化复合身份：server、rating key/key、quality、codec/container/bitrate、
   PMS Part key/size/duration；Rust 再以带 namespace 的 SHA-256 生成文件名，原始标识
   不落盘。
-- 完整文件按 mtime 近似 LRU；命中刷新时间。解码首块失败会删除损坏文件并重新下载。
-- 下载重试原位截断同一个 `.part`，不会先 unlink 一个已被渐进 Reader 打开的 inode；
-  终态失败或取消再由任务 guard 统一清理。
+- 完整文件按 mtime 近似 LRU；命中刷新时间。启动、修改上限、缓存命中和下载完成都会
+  触发收口。当前播放和已预排的真实下一首不会被 LRU 删除，其他最旧完整文件先淘汰；
+  如果受保护文件或活动 `.part` 暂时占满预算，新下载会拒绝提交而不是突破上限。
+- 解码首块失败会删除损坏文件并重新下载。下载重试原位截断同一个 `.part`，不会先
+  unlink 一个已被渐进 Reader 打开的 inode；终态失败或取消由任务 guard 统一清理。
 - 清缓存、登出或换账号按“序列化前台操作 -> 阻止新预取 -> 取消并等待任务 -> 停播 ->
   删除”执行，并清空队列、来源、元数据、封面字节和系统媒体面板。
 - 封面缓存与音频缓存、票据注册表彼此独立；单张封面限制 12 MiB。

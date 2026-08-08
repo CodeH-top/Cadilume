@@ -877,16 +877,34 @@ export async function nativeAudioQueueNextSource(
 export interface NativeAudioCacheStatus {
   size_bytes: number;
   file_count: number;
+  partial_size_bytes: number;
+  partial_file_count: number;
+  limit_bytes: number;
 }
 
 export async function nativeAudioCacheStatus(): Promise<NativeAudioCacheStatus> {
-  if (!isDesktopRuntime()) return { size_bytes: 0, file_count: 0 };
+  if (!isDesktopRuntime()) {
+    return {
+      size_bytes: 0,
+      file_count: 0,
+      partial_size_bytes: 0,
+      partial_file_count: 0,
+      limit_bytes: 1024 ** 3,
+    };
+  }
   return invoke("native_audio_cache_status");
 }
 
 export async function nativeAudioClearCache(): Promise<void> {
   if (!isDesktopRuntime()) return;
   await invoke("native_audio_clear_cache");
+}
+
+export async function setAudioCacheLimitGib(limitGib: number): Promise<number> {
+  const normalized = Math.round(limitGib);
+  if (normalized < 1 || normalized > 10) throw new Error("音频缓存上限只能设置为 1–10 GiB。");
+  if (!isDesktopRuntime()) return normalized;
+  return invoke("set_audio_cache_limit_gib", { limitGib: normalized });
 }
 
 export async function nativeQueuePeekNext(naturalEnded = true): Promise<number | null> {

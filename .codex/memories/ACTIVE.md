@@ -43,6 +43,11 @@
   用户手动滚动后，下一条可见歌词必须瞬时夺回定位；空白歌词帧保留手动标记，普通切句
   继续平滑跟随。
   Source: user requirement and dual-view DOM/wheel validation on 2026-08-08.
+- [ACT-025] 音频流式缓存默认 1 GiB，只允许用户设置 1–10 GiB；完整 `.audio` 与下载中的
+  `.audio.part` 必须共同计入同一预算。主动下载范围只能是当前曲目和启用预缓冲时 Rust 队列
+  确认的真实下一首，不得扫描资料库、下载整条队列或恢复“下下首”预取。LRU 保护当前播放和
+  已预排下一首，超额时拒绝新写入而不是突破上限；离线下载与分段/稀疏缓存须另立能力边界。
+  Source: user cache requirement and bounded-cache validation on 2026-08-09.
 
 ## Validation
 

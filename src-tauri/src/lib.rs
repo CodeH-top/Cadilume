@@ -23,10 +23,14 @@ pub fn run() {
             fs::create_dir_all(&config_dir)?;
             let plex_state = PlexState::load(config_dir, cache_dir)?;
             let status_icon_enabled = plex_state.status_icon_enabled();
+            let audio_cache_limit_gib = plex_state.audio_cache_limit_gib();
             app.manage(plex_state);
             let native_cache = app.path().app_cache_dir()?.join("native-audio");
             fs::create_dir_all(&native_cache)?;
-            app.manage(NativeAudioEngineSlot::new(native_cache));
+            app.manage(NativeAudioEngineSlot::new_with_cache_limit(
+                native_cache,
+                audio_engine::audio_cache_limit_bytes(audio_cache_limit_gib),
+            ));
             #[cfg(target_os = "macos")]
             now_playing::install(app.handle().clone());
             #[cfg(target_os = "windows")]
@@ -95,6 +99,7 @@ pub fn run() {
             audio_engine::native_queue_set_shuffle,
             plex::set_status_icon_enabled,
             plex::set_device_name,
+            plex::set_audio_cache_limit_gib,
             plex::set_brand_preset,
             window::show_main_window,
             window::quit_app,

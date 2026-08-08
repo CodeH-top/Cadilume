@@ -837,6 +837,9 @@ button.device-option:hover { border-color: var(--border-strong); background: var
 .toggle-switch input:checked + .toggle-control::after { transform: translateX(18px); background: var(--accent-ink); box-shadow: 0 1px 2px color-mix(in srgb, var(--accent-ink) 32%, transparent); }
 .toggle-switch input:focus-visible + .toggle-control { outline: 2px solid var(--accent); outline-offset: 2px; }
 .cache-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.cache-row-copy { min-width: 0; display: inline-flex !important; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.cache-row-copy > span { min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.cache-row .settings-select-trigger { min-width: 112px; max-width: 128px; }
 .account-settings-row { display: grid; grid-template-columns: minmax(180px, 1fr) auto; align-items: center; gap: 18px; color: var(--muted); font-size: 13px; }
 .account-settings-actions { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .settings-account-identity { min-width: 0; display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; gap: 9px; }

@@ -25,9 +25,14 @@ use tokio::io::AsyncWriteExt;
 
 /// Minimum bytes downloaded before progressive playback may start.
 const MIN_PROGRESSIVE_PRELOAD_BYTES: u64 = 256 * 1024;
-/// Disk cache cap for native audio files (Plexamp desktop default 256MB;
-/// Cadilume keeps 512MB to cover FLAC originals).
-const AUDIO_CACHE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
+/// The streaming cache is user-configurable. Keep the range deliberately
+/// small and explicit so a queue can never silently turn into an offline copy
+/// of the whole library.
+pub(crate) const DEFAULT_AUDIO_CACHE_LIMIT_GIB: u64 = 1;
+pub(crate) const MIN_AUDIO_CACHE_LIMIT_GIB: u64 = 1;
+pub(crate) const MAX_AUDIO_CACHE_LIMIT_GIB: u64 = 10;
+const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
+const CACHE_CAPACITY_CHECK_GRANULARITY: u64 = 1024 * 1024;
 /// Cache identities cross the WebView boundary but are never used as paths.
 /// Bound their size before hashing to keep command memory predictable.
 const MAX_AUDIO_CACHE_IDENTITY_BYTES: usize = 8 * 1024;
@@ -134,6 +139,122 @@ fn touch_cache_file(path: &Path) {
     let _ = filetime::set_file_mtime(path, filetime::FileTime::now());
 }
 
+pub(crate) const fn audio_cache_limit_bytes(limit_gib: u64) -> u64 {
+    limit_gib.saturating_mul(BYTES_PER_GIB)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AudioCacheUsage {
+    complete_bytes: u64,
+    partial_bytes: u64,
+    complete_files: usize,
+    partial_files: usize,
+}
+
+impl AudioCacheUsage {
+    fn total_bytes(self) -> u64 {
+        self.complete_bytes.saturating_add(self.partial_bytes)
+    }
+}
+
+fn audio_cache_usage_excluding(cache_root: &Path, excluded_path: Option<&Path>) -> AudioCacheUsage {
+    let dir = audio_cache_dir(cache_root);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return AudioCacheUsage::default();
+    };
+    let mut usage = AudioCacheUsage::default();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if excluded_path.is_some_and(|excluded| excluded == path) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(length) = entry.metadata().map(|metadata| metadata.len()) else {
+            continue;
+        };
+        if name.ends_with(".audio.part") {
+            usage.partial_bytes = usage.partial_bytes.saturating_add(length);
+            usage.partial_files += 1;
+        } else if name.ends_with(".audio") {
+            usage.complete_bytes = usage.complete_bytes.saturating_add(length);
+            usage.complete_files += 1;
+        }
+    }
+    usage
+}
+
+fn audio_cache_usage(cache_root: &Path) -> AudioCacheUsage {
+    audio_cache_usage_excluding(cache_root, None)
+}
+
+/// Make room for an upcoming write. Partial files are counted but never
+/// deleted while active; the caller's download guard removes them on failure.
+/// Returning `false` is preferable to exceeding the user's configured limit.
+fn ensure_audio_cache_capacity(
+    cache_root: &Path,
+    limit_bytes: u64,
+    additional_bytes: u64,
+    protected_paths: &[PathBuf],
+) -> bool {
+    ensure_audio_cache_capacity_excluding(
+        cache_root,
+        limit_bytes,
+        additional_bytes,
+        protected_paths,
+        None,
+    )
+}
+
+fn ensure_audio_cache_capacity_excluding(
+    cache_root: &Path,
+    limit_bytes: u64,
+    additional_bytes: u64,
+    protected_paths: &[PathBuf],
+    excluded_path: Option<&Path>,
+) -> bool {
+    let dir = audio_cache_dir(cache_root);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return additional_bytes <= limit_bytes;
+    };
+    let mut files: Vec<(PathBuf, u64)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let name = path.file_name()?.to_string_lossy();
+            if !name.ends_with(".audio") {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            Some((path, metadata.len()))
+        })
+        .collect();
+    let mut usage = audio_cache_usage_excluding(cache_root, excluded_path).total_bytes();
+    if usage.saturating_add(additional_bytes) <= limit_bytes {
+        return true;
+    }
+    files.sort_by_key(|(path, _)| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::UNIX_EPOCH)
+    });
+    for (path, length) in files {
+        if usage.saturating_add(additional_bytes) <= limit_bytes {
+            return true;
+        }
+        if protected_paths.iter().any(|protected| protected == &path) {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            usage = usage.saturating_sub(length);
+            eprintln!(
+                "[原生] 缓存准入淘汰：{}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+    usage.saturating_add(additional_bytes) <= limit_bytes
+}
+
 /// Wraps a queued source so the engine can detect the exact sample-level
 /// handoff: the flag flips the first time the queued source is actually
 /// pulled by the output (i.e. the previous track has fully ended). Polling
@@ -182,58 +303,10 @@ impl<S: Source> Source for HandoffMarker<S> {
     }
 }
 
-/// LRU eviction: when total cached audio exceeds the cap, delete oldest
-/// completed `.audio` files until under the limit. Active `.part` files are
-/// owned by their download task and must never be touched by an LRU scan.
+/// LRU eviction: keep the combined complete + partial footprint within the
+/// configured cap whenever no active partial file has to remain in place.
 fn enforce_audio_cache_limit_with_limit(cache_root: &Path, limit_bytes: u64) {
-    let dir = audio_cache_dir(cache_root);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
-    };
-    let mut files: Vec<(PathBuf, u64)> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            let name = path.file_name()?.to_string_lossy().into_owned();
-            if name.ends_with(".part") {
-                // Partial files can be actively written and read by progressive
-                // playback. Their async owner removes them on every terminal
-                // path; startup cleanup handles remnants from a crashed process.
-                return None;
-            }
-            if !name.ends_with(".audio") {
-                return None;
-            }
-            let metadata = entry.metadata().ok()?;
-            Some((path, metadata.len()))
-        })
-        .collect();
-    files.sort_by_key(|(path, _)| {
-        std::fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::UNIX_EPOCH)
-    });
-    let total: u64 = files.iter().map(|(_, len)| *len).sum();
-    if total <= limit_bytes {
-        return;
-    }
-    let mut freed = 0u64;
-    for (path, len) in files {
-        if total - freed <= limit_bytes {
-            break;
-        }
-        if std::fs::remove_file(&path).is_ok() {
-            freed += len;
-            eprintln!(
-                "[原生] 缓存淘汰：{}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-        }
-    }
-}
-
-fn enforce_audio_cache_limit(cache_root: &Path) {
-    enforce_audio_cache_limit_with_limit(cache_root, AUDIO_CACHE_LIMIT_BYTES);
+    let _ = ensure_audio_cache_capacity(cache_root, limit_bytes, 0, &[]);
 }
 
 fn remove_orphaned_partial_files(cache_root: &Path) {
@@ -1065,10 +1138,13 @@ fn prepare_progressive_decoder(
 async fn download_progressive_once(
     client: &reqwest::Client,
     url: &str,
+    cache_root: &Path,
     part_path: &Path,
     final_path: &Path,
     progress: &DownloadProgress,
     rate_limit_bytes_per_sec: Option<u64>,
+    cache_limit_bytes: &AtomicU64,
+    protected_paths: &[PathBuf],
 ) -> Result<u64, String> {
     if progress.cancelled.load(Ordering::SeqCst) {
         return Err("下载已取消".to_string());
@@ -1081,11 +1157,27 @@ async fn download_progressive_once(
         return Err(format!("下载返回 HTTP {}", response.status()));
     }
     let expected_total = response.content_length();
-    if expected_total.is_some_and(|bytes| bytes > AUDIO_CACHE_LIMIT_BYTES) {
+    let current_limit = cache_limit_bytes.load(Ordering::SeqCst);
+    if expected_total.is_some_and(|bytes| bytes > current_limit) {
         return Err(format!(
             "音频文件超过单文件缓存上限（{} MiB）",
-            AUDIO_CACHE_LIMIT_BYTES / 1024 / 1024
+            current_limit / 1024 / 1024
         ));
+    }
+    let mut capacity_limit = current_limit;
+    let mut capacity_checkpoint = expected_total.unwrap_or(CACHE_CAPACITY_CHECK_GRANULARITY);
+    if !ensure_audio_cache_capacity_excluding(
+        cache_root,
+        capacity_limit,
+        capacity_checkpoint,
+        protected_paths,
+        Some(part_path),
+    ) {
+        return Err(if expected_total.is_some() {
+            "缓存空间不足，已跳过本次音频下载".to_string()
+        } else {
+            "缓存空间不足，已停止本次音频下载".to_string()
+        });
     }
     progress
         .expected_len
@@ -1108,11 +1200,34 @@ async fn download_progressive_once(
         }
         let chunk =
             chunk.map_err(|error| format!("下载读取失败 ({})", http_error_category(&error)))?;
-        if total.saturating_add(chunk.len() as u64) > AUDIO_CACHE_LIMIT_BYTES {
+        let current_limit = cache_limit_bytes.load(Ordering::SeqCst);
+        if total.saturating_add(chunk.len() as u64) > current_limit {
             return Err(format!(
                 "音频文件超过单文件缓存上限（{} MiB）",
-                AUDIO_CACHE_LIMIT_BYTES / 1024 / 1024
+                current_limit / 1024 / 1024
             ));
+        }
+        let next_total = total.saturating_add(chunk.len() as u64);
+        if current_limit != capacity_limit || next_total > capacity_checkpoint {
+            // A known Content-Length reserves the whole target up front. If
+            // the user changes the limit mid-download, repeat that reservation
+            // before writing another chunk. Unknown-length bodies reserve a
+            // moving window and replace, rather than double-count, their own
+            // existing partial file.
+            let required_total = expected_total
+                .map(|expected| expected.max(next_total))
+                .unwrap_or_else(|| next_total.saturating_add(CACHE_CAPACITY_CHECK_GRANULARITY));
+            if !ensure_audio_cache_capacity_excluding(
+                cache_root,
+                current_limit,
+                required_total,
+                protected_paths,
+                Some(part_path),
+            ) {
+                return Err("缓存空间不足，已停止本次音频下载".to_string());
+            }
+            capacity_limit = current_limit;
+            capacity_checkpoint = required_total;
         }
         file.write_all(&chunk)
             .await
@@ -1160,6 +1275,13 @@ async fn download_progressive_once(
     if progress.cancelled.load(Ordering::SeqCst) {
         return Err("下载已取消".to_string());
     }
+    // The user may have lowered the limit while the last body chunk was being
+    // paced or flushed. Re-check the actual partial footprint immediately
+    // before the irreversible atomic commit.
+    let current_limit = cache_limit_bytes.load(Ordering::SeqCst);
+    if !ensure_audio_cache_capacity(cache_root, current_limit, 0, protected_paths) {
+        return Err("缓存空间不足，已停止本次音频下载".to_string());
+    }
     drop(file);
     tokio::fs::rename(part_path, final_path)
         .await
@@ -1176,10 +1298,13 @@ async fn download_progressive_once(
 async fn download_progressive(
     client: &reqwest::Client,
     url: &str,
+    cache_root: &Path,
     part_path: &Path,
     final_path: &Path,
     progress: &DownloadProgress,
     rate_limit_bytes_per_sec: Option<u64>,
+    cache_limit_bytes: Arc<AtomicU64>,
+    protected_paths: Vec<PathBuf>,
     max_attempts: u32,
 ) -> Result<u64, String> {
     let _partial_cleanup = PartialDownloadCleanup::new(part_path);
@@ -1196,10 +1321,13 @@ async fn download_progressive(
         match download_progressive_once(
             client,
             url,
+            cache_root,
             part_path,
             final_path,
             progress,
             rate_limit_bytes_per_sec,
+            cache_limit_bytes.as_ref(),
+            &protected_paths,
         )
         .await
         {
@@ -1208,6 +1336,13 @@ async fn download_progressive(
                 last_error = Some(error.clone());
                 if progress.cancelled.load(Ordering::SeqCst) {
                     return Err("下载已取消".to_string());
+                }
+                if error.starts_with("缓存空间不足")
+                    || error.starts_with("音频文件超过单文件缓存上限")
+                {
+                    progress.failed.store(true, Ordering::SeqCst);
+                    progress.wake();
+                    return Err(error);
                 }
                 if attempt < attempts {
                     eprintln!("[原生] 下载失败，第 {attempt} 次重试：{error}");
@@ -1272,6 +1407,7 @@ pub struct NativeAudioEngine {
     sink: MixerDeviceSink,
     player: Mutex<Arc<Player>>,
     cache_root: PathBuf,
+    cache_limit_bytes: Arc<AtomicU64>,
     playback_generation: Arc<AtomicU64>,
     artwork_generation: Arc<AtomicU64>,
     transition_lock: Mutex<()>,
@@ -1623,6 +1759,7 @@ struct PlaybackSnapshot {
 /// Lazy engine slot so the device stream opens on first use.
 pub struct NativeAudioEngineSlot {
     cache_root: PathBuf,
+    cache_limit_bytes: AtomicU64,
     inner: Mutex<Option<Arc<NativeAudioEngine>>>,
     preferred_device: Mutex<Option<String>>,
     preferred_volume: Mutex<Option<f32>>,
@@ -1640,10 +1777,20 @@ impl Drop for SlotMaintenanceGuard<'_> {
 }
 
 impl NativeAudioEngineSlot {
+    #[cfg(test)]
     pub fn new(cache_root: PathBuf) -> Self {
+        Self::new_with_cache_limit(
+            cache_root,
+            audio_cache_limit_bytes(DEFAULT_AUDIO_CACHE_LIMIT_GIB),
+        )
+    }
+
+    pub fn new_with_cache_limit(cache_root: PathBuf, cache_limit_bytes: u64) -> Self {
         remove_orphaned_partial_files(&cache_root);
+        enforce_audio_cache_limit_with_limit(&cache_root, cache_limit_bytes);
         Self {
             cache_root,
+            cache_limit_bytes: AtomicU64::new(cache_limit_bytes),
             inner: Mutex::new(None),
             preferred_device: Mutex::new(None),
             preferred_volume: Mutex::new(None),
@@ -1655,6 +1802,34 @@ impl NativeAudioEngineSlot {
 
     pub fn cache_root(&self) -> &PathBuf {
         &self.cache_root
+    }
+
+    pub fn cache_limit_bytes(&self) -> u64 {
+        self.cache_limit_bytes.load(Ordering::SeqCst)
+    }
+
+    pub async fn set_cache_limit_bytes(&self, cache_limit_bytes: u64) -> Result<(), String> {
+        // Keep the limit change ordered with load, device-switch and account
+        // reset operations. The downloader also observes the engine's atomic
+        // value while it is running, so this does not require stopping the
+        // foreground decoder.
+        let _operation = self.output_switch_lock.lock().await;
+        self.cache_limit_bytes
+            .store(cache_limit_bytes, Ordering::SeqCst);
+        let Some(engine) = self.current() else {
+            enforce_audio_cache_limit_with_limit(&self.cache_root, cache_limit_bytes);
+            return Ok(());
+        };
+        engine
+            .cache_limit_bytes
+            .store(cache_limit_bytes, Ordering::SeqCst);
+        let _gate = engine.precache_gate.lock().await;
+        // A limit change is a user-directed cache maintenance action. Stop
+        // speculative work so the new budget takes effect immediately while
+        // leaving the foreground decoder alone.
+        engine.cancel_active_precache();
+        engine.enforce_audio_cache_limit();
+        Ok(())
     }
 
     fn current(&self) -> Option<Arc<NativeAudioEngine>> {
@@ -1742,6 +1917,7 @@ impl NativeAudioEngineSlot {
                 self.cache_root.clone(),
                 preferred_device.as_deref().unwrap_or(""),
                 Arc::clone(&self.health),
+                self.cache_limit_bytes(),
             )
             .map_err(|e| format!("原生引擎创建失败: {e}"))?,
         );
@@ -1833,6 +2009,7 @@ impl NativeAudioEngineSlot {
                 self.cache_root.clone(),
                 &device_id,
                 Arc::clone(&self.health),
+                self.cache_limit_bytes(),
             )
             .map_err(|e| format!("切换输出设备失败: {e}"))?,
         );
@@ -1963,14 +2140,32 @@ fn renderer_requires_heartbeat(is_visible: bool, is_minimized: bool) -> bool {
 impl NativeAudioEngine {
     #[allow(dead_code)]
     pub fn new(cache_root: PathBuf) -> anyhow::Result<Self> {
-        Self::new_with_device(cache_root, "")
+        Self::new_with_device_and_cache_limit(
+            cache_root,
+            "",
+            audio_cache_limit_bytes(DEFAULT_AUDIO_CACHE_LIMIT_GIB),
+        )
     }
 
+    #[cfg(test)]
     fn new_with_device(cache_root: PathBuf, device_id: &str) -> anyhow::Result<Self> {
+        Self::new_with_device_and_cache_limit(
+            cache_root,
+            device_id,
+            audio_cache_limit_bytes(DEFAULT_AUDIO_CACHE_LIMIT_GIB),
+        )
+    }
+
+    fn new_with_device_and_cache_limit(
+        cache_root: PathBuf,
+        device_id: &str,
+        cache_limit_bytes: u64,
+    ) -> anyhow::Result<Self> {
         Self::new_with_device_and_health(
             cache_root,
             device_id,
             Arc::new(NativeAudioHealth::default()),
+            cache_limit_bytes,
         )
     }
 
@@ -1978,6 +2173,7 @@ impl NativeAudioEngine {
         cache_root: PathBuf,
         device_id: &str,
         health: Arc<NativeAudioHealth>,
+        cache_limit_bytes: u64,
     ) -> anyhow::Result<Self> {
         use cpal::traits::{DeviceTrait, HostTrait};
         let builder = if device_id.is_empty() {
@@ -2023,6 +2219,7 @@ impl NativeAudioEngine {
             sink,
             player: Mutex::new(player),
             cache_root,
+            cache_limit_bytes: Arc::new(AtomicU64::new(cache_limit_bytes)),
             playback_generation: Arc::new(AtomicU64::new(0)),
             artwork_generation: Arc::new(AtomicU64::new(0)),
             transition_lock: Mutex::new(()),
@@ -2274,6 +2471,34 @@ impl NativeAudioEngine {
         cache_key: Option<String>,
     ) -> Result<(String, PathBuf, PathBuf), String> {
         resolve_audio_cache_paths(&self.cache_root, cache_key.as_deref())
+    }
+
+    fn protected_cache_paths(&self) -> Vec<PathBuf> {
+        let mut identities = Vec::new();
+        if let Ok(source) = self.current_source.lock() {
+            if let Some(cache_key) = source.as_ref().and_then(|source| source.cache_key.clone()) {
+                identities.push(cache_key);
+            }
+        }
+        if let Ok(pending) = self.pending.lock() {
+            if let Some(cache_key) = pending
+                .as_ref()
+                .and_then(|pending| pending.cache_key.clone())
+            {
+                identities.push(cache_key);
+            }
+        }
+        identities
+            .into_iter()
+            .filter_map(|identity| self.resolve_cache_paths(Some(identity)).ok())
+            .map(|(_, final_path, _)| final_path)
+            .collect()
+    }
+
+    fn enforce_audio_cache_limit(&self) {
+        let protected = self.protected_cache_paths();
+        let limit = self.cache_limit_bytes.load(Ordering::SeqCst);
+        let _ = ensure_audio_cache_capacity(&self.cache_root, limit, 0, &protected);
     }
 
     /// Background-fetch the album artwork bytes from the loopback artwork
@@ -2649,7 +2874,7 @@ impl NativeAudioEngine {
                 Ok(len) => {
                     eprintln!("[原生] 命中完整缓存 key={key}");
                     touch_cache_file(&final_path);
-                    enforce_audio_cache_limit(&self.cache_root);
+                    self.enforce_audio_cache_limit();
                     return Ok(len);
                 }
                 Err(error) => {
@@ -2666,6 +2891,9 @@ impl NativeAudioEngine {
         let part_for_task = part_path.clone();
         let final_for_task = final_path.clone();
         let source_for_task = source.to_string();
+        let cache_root_for_task = self.cache_root.clone();
+        let cache_limit_bytes = Arc::clone(&self.cache_limit_bytes);
+        let protected_paths = self.protected_cache_paths();
         let client = loopback_http_client(None)?;
         if !self.playback_is_current(generation) {
             return Err("播放加载已被新操作替代".to_string());
@@ -2685,10 +2913,13 @@ impl NativeAudioEngine {
             if let Err(error) = download_progressive(
                 &client,
                 &source_for_task,
+                &cache_root_for_task,
                 &part_for_task,
                 &final_for_task,
                 &progress_task,
                 None,
+                cache_limit_bytes,
+                protected_paths,
                 3,
             )
             .await
@@ -2850,9 +3081,16 @@ impl NativeAudioEngine {
             total,
         );
         let cache_root = self.cache_root.clone();
+        let cache_limit_bytes = Arc::clone(&self.cache_limit_bytes);
+        let protected_paths = self.protected_cache_paths();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            enforce_audio_cache_limit(&cache_root);
+            let _ = ensure_audio_cache_capacity(
+                &cache_root,
+                cache_limit_bytes.load(Ordering::SeqCst),
+                0,
+                &protected_paths,
+            );
         });
         Ok(player.len())
     }
@@ -2938,6 +3176,9 @@ impl NativeAudioEngine {
         let part_for_task = part_path.clone();
         let final_for_task = final_path;
         let source_for_task = source.to_string();
+        let cache_root_for_task = self.cache_root.clone();
+        let cache_limit_bytes = Arc::clone(&self.cache_limit_bytes);
+        let protected_paths = self.protected_cache_paths();
         let client = loopback_http_client(None)?;
         let (completion_tx, completion_rx) =
             tokio::sync::watch::channel::<Option<Result<(), String>>>(None);
@@ -2946,10 +3187,13 @@ impl NativeAudioEngine {
             let outcome = download_progressive(
                 &client,
                 &source_for_task,
+                &cache_root_for_task,
                 &part_for_task,
                 &final_for_task,
                 &progress_task,
                 rate_limit_bytes_per_sec,
+                cache_limit_bytes,
+                protected_paths,
                 3,
             )
             .await;
@@ -2983,7 +3227,7 @@ impl NativeAudioEngine {
         let outcome = await_precache_completion(completion_rx).await;
         self.clear_active_precache(&progress);
         outcome?;
-        enforce_audio_cache_limit(&self.cache_root);
+        self.enforce_audio_cache_limit();
         Ok(())
     }
 
@@ -3785,6 +4029,9 @@ pub fn native_audio_device_check() -> serde_json::Value {
 pub struct NativeCacheStatus {
     pub size_bytes: u64,
     pub file_count: usize,
+    pub partial_size_bytes: u64,
+    pub partial_file_count: usize,
+    pub limit_bytes: u64,
 }
 
 fn validate_now_playing_metadata(
@@ -3811,24 +4058,13 @@ fn validate_now_playing_metadata(
 pub fn native_audio_cache_status(
     state: tauri::State<'_, NativeAudioEngineSlot>,
 ) -> NativeCacheStatus {
-    let dir = audio_cache_dir(state.cache_root());
-    let mut size_bytes = 0u64;
-    let mut file_count = 0usize;
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.ends_with(".audio") {
-                continue;
-            }
-            if let Ok(metadata) = entry.metadata() {
-                size_bytes += metadata.len();
-                file_count += 1;
-            }
-        }
-    }
+    let usage = audio_cache_usage(state.cache_root());
     NativeCacheStatus {
-        size_bytes,
-        file_count,
+        size_bytes: usage.total_bytes(),
+        file_count: usage.complete_files,
+        partial_size_bytes: usage.partial_bytes,
+        partial_file_count: usage.partial_files,
+        limit_bytes: state.cache_limit_bytes(),
     }
 }
 
@@ -4651,11 +4887,65 @@ mod tests {
         filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(10, 0)).unwrap();
         filetime::set_file_mtime(&recent, filetime::FileTime::from_unix_time(20, 0)).unwrap();
 
-        enforce_audio_cache_limit_with_limit(&cache_root, 8);
+        enforce_audio_cache_limit_with_limit(&cache_root, 70);
 
         assert!(!old.exists(), "最旧的完整缓存应先淘汰");
         assert!(recent.exists(), "达到容量后应保留较新的完整缓存");
         assert!(active.exists(), "LRU 不得删除活动 .part");
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn cache_usage_includes_partial_files_and_protected_capacity_can_fail() {
+        let cache_root = unique_temp_path("cache-budget");
+        let downloads = audio_cache_dir(&cache_root);
+        std::fs::create_dir_all(&downloads).unwrap();
+        let old = downloads.join("old.audio");
+        let protected = downloads.join("protected.audio");
+        let partial = downloads.join("active.audio.part");
+        std::fs::write(&old, [1u8; 6]).unwrap();
+        std::fs::write(&protected, [2u8; 6]).unwrap();
+        std::fs::write(&partial, [3u8; 64]).unwrap();
+        filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(10, 0)).unwrap();
+
+        let usage = audio_cache_usage(&cache_root);
+        assert_eq!(usage.total_bytes(), 76);
+        assert_eq!(usage.complete_files, 2);
+        assert_eq!(usage.partial_files, 1);
+        assert!(!ensure_audio_cache_capacity(
+            &cache_root,
+            70,
+            10,
+            std::slice::from_ref(&protected),
+        ));
+        assert!(!old.exists(), "准入应先淘汰最旧的完整缓存");
+        assert!(protected.exists(), "当前来源不得被准入淘汰");
+        assert!(partial.exists(), "活动 .part 只能由下载任务清理");
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn retry_reservation_replaces_its_existing_partial_without_double_counting() {
+        let cache_root = unique_temp_path("retry-cache-budget");
+        let downloads = audio_cache_dir(&cache_root);
+        std::fs::create_dir_all(&downloads).unwrap();
+        let retained = downloads.join("retained.audio");
+        let retry_partial = downloads.join("retry.audio.part");
+        std::fs::write(&retained, [1u8; 40]).unwrap();
+        std::fs::write(&retry_partial, [2u8; 60]).unwrap();
+
+        assert!(ensure_audio_cache_capacity_excluding(
+            &cache_root,
+            100,
+            60,
+            &[],
+            Some(&retry_partial),
+        ));
+        assert!(retained.exists(), "重试不得因重复计算自身 .part 而淘汰缓存");
+        assert!(
+            retry_partial.exists(),
+            "实际截断由同 inode 的下一次写入负责"
+        );
         let _ = std::fs::remove_dir_all(cache_root);
     }
 
@@ -4673,6 +4963,25 @@ mod tests {
 
         assert!(complete.exists());
         assert!(!orphan.exists());
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn slot_startup_enforces_the_persisted_cache_limit() {
+        let cache_root = unique_temp_path("startup-cache-limit");
+        let downloads = audio_cache_dir(&cache_root);
+        std::fs::create_dir_all(&downloads).unwrap();
+        let old = downloads.join("old.audio");
+        let recent = downloads.join("recent.audio");
+        std::fs::write(&old, [1u8; 6]).unwrap();
+        std::fs::write(&recent, [2u8; 6]).unwrap();
+        filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(10, 0)).unwrap();
+        filetime::set_file_mtime(&recent, filetime::FileTime::from_unix_time(20, 0)).unwrap();
+
+        let _slot = NativeAudioEngineSlot::new_with_cache_limit(cache_root.clone(), 6);
+
+        assert!(!old.exists(), "启动时应先淘汰最旧的超额缓存");
+        assert!(recent.exists(), "启动时应保留限额内的最近缓存");
         let _ = std::fs::remove_dir_all(cache_root);
     }
 
@@ -5595,7 +5904,7 @@ mod tests {
                 axum::response::Response::builder()
                     .header(
                         axum::http::header::CONTENT_LENGTH,
-                        (AUDIO_CACHE_LIMIT_BYTES + 1).to_string(),
+                        (audio_cache_limit_bytes(DEFAULT_AUDIO_CACHE_LIMIT_GIB) + 1).to_string(),
                     )
                     .body(axum::body::Body::from_stream(
                         futures_util::stream::pending::<
@@ -5614,19 +5923,117 @@ mod tests {
         let (_, final_path, part_path) =
             resolve_audio_cache_paths(&cache_root, Some("oversized-media")).unwrap();
         let progress = DownloadProgress::new();
+        let limit = Arc::new(AtomicU64::new(audio_cache_limit_bytes(
+            DEFAULT_AUDIO_CACHE_LIMIT_GIB,
+        )));
         let error = download_progressive_once(
             &loopback_http_client(None).unwrap(),
             &format!("http://127.0.0.1:{}/oversized", addr.port()),
+            &cache_root,
             &part_path,
             &final_path,
             &progress,
             None,
+            limit.as_ref(),
+            &[],
         )
         .await
         .unwrap_err();
         assert!(error.contains("单文件缓存上限"), "实际错误：{error}");
         assert!(!part_path.exists());
         assert!(!final_path.exists());
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[tokio::test]
+    async fn lowering_cache_limit_during_download_aborts_before_commit() {
+        let first = vec![1_u8; 1024 * 1024];
+        let second = vec![2_u8; 1024 * 1024];
+        let app = axum::Router::new().route(
+            "/dynamic-limit",
+            axum::routing::get({
+                let first = first.clone();
+                let second = second.clone();
+                move || {
+                    let first = first.clone();
+                    let second = second.clone();
+                    async move {
+                        let total_length = first.len() + second.len();
+                        let first_chunk = futures_util::stream::once(async move {
+                            Ok::<_, std::io::Error>(axum::body::Bytes::from(first))
+                        });
+                        let second_chunk = futures_util::stream::once(async move {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            Ok::<_, std::io::Error>(axum::body::Bytes::from(second))
+                        });
+                        axum::response::Response::builder()
+                            .header(axum::http::header::CONTENT_LENGTH, total_length.to_string())
+                            .body(axum::body::Body::from_stream(
+                                first_chunk.chain(second_chunk),
+                            ))
+                            .unwrap()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let cache_root = unique_temp_path("dynamic-limit-cache");
+        let protected_path = audio_cache_dir(&cache_root).join("protected.audio");
+        std::fs::create_dir_all(audio_cache_dir(&cache_root)).unwrap();
+        std::fs::write(&protected_path, vec![3_u8; 2 * 1024 * 1024]).unwrap();
+        let (_, final_path, part_path) =
+            resolve_audio_cache_paths(&cache_root, Some("dynamic-limit-media")).unwrap();
+        let progress = DownloadProgress::new();
+        let limit = Arc::new(AtomicU64::new(4 * 1024 * 1024));
+        let progress_for_task = Arc::clone(&progress);
+        let limit_for_task = Arc::clone(&limit);
+        let root_for_task = cache_root.clone();
+        let part_for_task = part_path.clone();
+        let final_for_task = final_path.clone();
+        let protected_for_task = vec![protected_path.clone()];
+        let url = format!("http://127.0.0.1:{}/dynamic-limit", addr.port());
+        let client = loopback_http_client(None).unwrap();
+        let task = tokio::spawn(async move {
+            download_progressive(
+                &client,
+                &url,
+                &root_for_task,
+                &part_for_task,
+                &final_for_task,
+                &progress_for_task,
+                None,
+                limit_for_task,
+                protected_for_task,
+                1,
+            )
+            .await
+        });
+        let first_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while progress.downloaded.load(Ordering::SeqCst) < 1024 * 1024
+            && std::time::Instant::now() < first_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(progress.downloaded.load(Ordering::SeqCst), 1024 * 1024);
+        limit.store(3 * 1024 * 1024, Ordering::SeqCst);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("动态上限变化后下载应及时结束")
+            .expect("下载任务不应 panic");
+        assert!(result.unwrap_err().contains("空间"));
+        assert_eq!(
+            progress.downloaded.load(Ordering::SeqCst),
+            1024 * 1024,
+            "降低组合缓存上限后，第二个 chunk 应在写入前被拒绝"
+        );
+        assert!(!part_path.exists(), "动态限额失败后不得残留 .part");
+        assert!(!final_path.exists(), "动态限额失败后不得提交完整缓存");
         let _ = std::fs::remove_dir_all(cache_root);
     }
 
@@ -5669,10 +6076,15 @@ mod tests {
             download_progressive(
                 &loopback_http_client(None).unwrap(),
                 &format!("http://127.0.0.1:{}/cancel-final", addr.port()),
+                &cache_root,
                 &part_path,
                 &final_path,
                 &progress,
                 Some(1),
+                Arc::new(AtomicU64::new(audio_cache_limit_bytes(
+                    DEFAULT_AUDIO_CACHE_LIMIT_GIB,
+                ))),
+                Vec::new(),
                 1,
             ),
         )
