@@ -815,11 +815,20 @@ export async function nativeAudioPause(): Promise<void> {
 
 export interface NativeAudioStatus {
   is_playing: boolean;
+  is_buffering: boolean;
   position_seconds: number | null;
   duration_seconds: number | null;
   volume: number;
   item_count: number;
   current_index: number | null;
+  buffered_chunks: number;
+  buffer_capacity: number;
+  underflow_events: number;
+  underflow_frames: number;
+  output_stream_errors: number;
+  output_recoveries: number;
+  output_recovery_failures: number;
+  output_recovery_pending: boolean;
 }
 
 export async function nativeAudioStatus(): Promise<NativeAudioStatus | null> {

@@ -87,9 +87,10 @@ vi.mock("react", () => ({
   useState: hookRuntime.useState,
 }));
 
+import { LEGACY_OUTPUT_DEVICE_STORAGE_KEY, OUTPUT_DEVICE_STORAGE_KEY } from "./outputDevicePreference";
 import { useOutputDevices } from "./useOutputDevices";
 
-const OUTPUT_DEVICE_KEY = "cadilume-output-device";
+const OUTPUT_DEVICE_KEY = OUTPUT_DEVICE_STORAGE_KEY;
 const globalKeys = ["HTMLMediaElement", "localStorage", "navigator", "window"] as const;
 const originalDescriptors = new Map(
   globalKeys.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
@@ -221,11 +222,16 @@ async function settleAsyncWork(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
-async function mountOutputDevices(setOutputSinkId: (deviceId: string) => Promise<boolean>) {
-  let current = hookRuntime.render(() => useOutputDevices(setOutputSinkId));
+async function mountOutputDevices(
+  setOutputSinkId: (deviceId: string) => Promise<boolean>,
+  initialActiveOutputDeviceId?: string,
+) {
+  let activeOutputDeviceId = initialActiveOutputDeviceId;
+  const renderHook = () => useOutputDevices(setOutputSinkId, activeOutputDeviceId);
+  let current = hookRuntime.render(renderHook);
   hookRuntime.flushEffects();
   await settleAsyncWork();
-  current = hookRuntime.render(() => useOutputDevices(setOutputSinkId));
+  current = hookRuntime.render(renderHook);
   hookRuntime.flushEffects();
 
   return {
@@ -233,7 +239,12 @@ async function mountOutputDevices(setOutputSinkId: (deviceId: string) => Promise
       return current;
     },
     render() {
-      current = hookRuntime.render(() => useOutputDevices(setOutputSinkId));
+      current = hookRuntime.render(renderHook);
+      hookRuntime.flushEffects();
+    },
+    syncActiveDevice(deviceId: string) {
+      activeOutputDeviceId = deviceId;
+      current = hookRuntime.render(renderHook);
       hookRuntime.flushEffects();
     },
   };
@@ -321,6 +332,42 @@ describe("useOutputDevices on Windows", () => {
     expect(mounted.current.selectedDeviceId).toBe("speakers");
     expect(storage.getItem(OUTPUT_DEVICE_KEY)).toBe("speakers");
     expect(mounted.current.message).toBeUndefined();
+  });
+
+  it("migrates the legacy player sink preference into the single device key", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem(LEGACY_OUTPUT_DEVICE_STORAGE_KEY, "speakers");
+    const mediaDevices = new FakeMediaDevices([
+      audioDevice("default", "Default"),
+      audioDevice("speakers", "Speakers"),
+    ]);
+    installWindowsEnvironment(mediaDevices, storage);
+    const setSink = vi.fn(async (_deviceId: string) => true);
+
+    const mounted = await mountOutputDevices(setSink);
+
+    expect(setSink).toHaveBeenCalledWith("speakers");
+    expect(mounted.current.selectedDeviceId).toBe("speakers");
+    expect(storage.getItem(OUTPUT_DEVICE_KEY)).toBe("speakers");
+    expect(storage.getItem(LEGACY_OUTPUT_DEVICE_STORAGE_KEY)).toBeNull();
+  });
+
+  it("mirrors native recovery changes from the player authority immediately", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem(OUTPUT_DEVICE_KEY, "headset");
+    const mediaDevices = new FakeMediaDevices([
+      audioDevice("default", "Default"),
+      audioDevice("headset", "USB Headset"),
+    ]);
+    installWindowsEnvironment(mediaDevices, storage);
+    const setSink = vi.fn(async (_deviceId: string) => true);
+    const mounted = await mountOutputDevices(setSink, "headset");
+
+    mounted.syncActiveDevice("");
+    mounted.render();
+
+    expect(mounted.current.selectedDeviceId).toBe("");
+    expect(storage.getItem(OUTPUT_DEVICE_KEY)).toBeNull();
   });
 
   it("falls back to the system default when devicechange removes the selected output", async () => {

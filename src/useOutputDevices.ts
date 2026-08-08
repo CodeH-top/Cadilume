@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { isDesktopRuntime, nativeAudioOutputDevices } from "./api";
+import { readOutputDevicePreference, writeOutputDevicePreference } from "./outputDevicePreference";
 
 export type OutputPlatform = "macos" | "windows" | "other";
 
@@ -22,26 +23,6 @@ interface SelectAudioOutputOptions {
 type ExtendedMediaDevices = MediaDevices & {
   selectAudioOutput?: (options?: SelectAudioOutputOptions) => Promise<MediaDeviceInfo>;
 };
-
-const OUTPUT_DEVICE_KEY = "cadilume-output-device";
-
-function readOutputDevicePreference(): string {
-  try {
-    return typeof localStorage === "undefined" ? "" : localStorage.getItem(OUTPUT_DEVICE_KEY) || "";
-  } catch {
-    return "";
-  }
-}
-
-function writeOutputDevicePreference(deviceId: string): void {
-  try {
-    if (typeof localStorage === "undefined") return;
-    if (deviceId) localStorage.setItem(OUTPUT_DEVICE_KEY, deviceId);
-    else localStorage.removeItem(OUTPUT_DEVICE_KEY);
-  } catch {
-    // Restricted WebViews can reject storage access; device selection should still work.
-  }
-}
 
 export function detectOutputPlatform(info: NavigatorPlatformInfo): OutputPlatform {
   const identity = `${info.userAgentData?.platform || ""} ${info.platform || ""} ${info.userAgent || ""}`;
@@ -81,7 +62,10 @@ export function canSelectApplicationOutput(
   return desktopRuntime || (secureContext && webSinkSelection);
 }
 
-export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<boolean>) {
+export function useOutputDevices(
+  setOutputSinkId: (deviceId: string) => Promise<boolean>,
+  activeOutputDeviceId?: string,
+) {
   const platform = useMemo(() => detectOutputPlatform(navigator as Navigator & NavigatorPlatformInfo), []);
   const mediaDevices = navigator.mediaDevices as ExtendedMediaDevices | undefined;
   const desktopRuntime = isDesktopRuntime();
@@ -97,6 +81,12 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
   const [selectedDeviceId, setSelectedDeviceId] = useState(readOutputDevicePreference);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string>();
+
+  useEffect(() => {
+    if (activeOutputDeviceId === undefined) return;
+    setSelectedDeviceId(activeOutputDeviceId);
+    writeOutputDevicePreference(activeOutputDeviceId);
+  }, [activeOutputDeviceId]);
 
   const refresh = useCallback(async () => {
     if (!desktopRuntime && !mediaDevices?.enumerateDevices) return;

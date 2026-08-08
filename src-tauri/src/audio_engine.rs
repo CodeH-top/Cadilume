@@ -463,6 +463,22 @@ enum DecodedChunkSend {
     Disconnected,
 }
 
+#[derive(Default)]
+struct NativeAudioHealth {
+    underflow_events: AtomicU64,
+    underflow_frames: AtomicU64,
+    output_stream_errors: AtomicU64,
+    output_recoveries: AtomicU64,
+    output_recovery_failures: AtomicU64,
+}
+
+impl NativeAudioHealth {
+    fn record_output_stream_error(&self, recovery_pending: &AtomicBool) {
+        self.output_stream_errors.fetch_add(1, Ordering::SeqCst);
+        recovery_pending.store(true, Ordering::SeqCst);
+    }
+}
+
 struct DecodeBufferState {
     cancelled: AtomicBool,
     finished: AtomicBool,
@@ -482,6 +498,7 @@ struct DecodeBufferState {
     reader_progress: Option<Arc<DownloadProgress>>,
     worker_exited: AtomicBool,
     allocated_chunks: AtomicUsize,
+    health: Arc<NativeAudioHealth>,
 }
 
 impl DecodeBufferState {
@@ -489,6 +506,7 @@ impl DecodeBufferState {
         sample_rate: rodio::SampleRate,
         buffer_capacity: usize,
         reader_progress: Option<Arc<DownloadProgress>>,
+        health: Arc<NativeAudioHealth>,
     ) -> Self {
         let resume_frames = (sample_rate.get() as usize)
             .saturating_mul(DECODE_RESUME_BUFFER_MS)
@@ -515,6 +533,7 @@ impl DecodeBufferState {
             reader_progress,
             worker_exited: AtomicBool::new(false),
             allocated_chunks: AtomicUsize::new(0),
+            health,
         }
     }
 
@@ -540,6 +559,14 @@ impl DecodeBufferState {
     fn notify_worker(&self) {
         self.worker_signal_epoch.fetch_add(1, Ordering::SeqCst);
         self.worker_signal.notify_all();
+    }
+
+    fn cancel_worker(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.notify_worker();
+        if let Some(progress) = self.reader_progress.as_ref() {
+            progress.interrupt_reader();
+        }
     }
 
     fn wait_for_worker_signal(&self, observed_epoch: u64, timeout: Option<Duration>) {
@@ -640,11 +667,7 @@ impl Drop for ThreadedDecoderSource {
         while let Ok(chunk) = self.receiver.try_recv() {
             self.release_chunk(chunk);
         }
-        self.state.cancelled.store(true, Ordering::SeqCst);
-        self.state.notify_worker();
-        if let Some(progress) = self.state.reader_progress.as_ref() {
-            progress.interrupt_reader();
-        }
+        self.state.cancel_worker();
     }
 }
 
@@ -682,8 +705,17 @@ impl Iterator for ThreadedDecoderSource {
         }
         // Emit at most one frame of silence before the event forwarder pauses
         // the Player. Completing the whole frame preserves channel alignment.
-        self.state.underflowing.store(true, Ordering::SeqCst);
+        if !self.state.underflowing.swap(true, Ordering::SeqCst) {
+            self.state
+                .health
+                .underflow_events
+                .fetch_add(1, Ordering::SeqCst);
+        }
         self.state.underflow_frames.fetch_add(1, Ordering::SeqCst);
+        self.state
+            .health
+            .underflow_frames
+            .fetch_add(1, Ordering::SeqCst);
         self.silence_remaining = self.channels.get() as usize - 1;
         Some(0.0)
     }
@@ -764,18 +796,35 @@ fn send_decoded_chunk(
     }
 }
 
+#[cfg(test)]
 fn spawn_threaded_decoder<S>(
     source: S,
 ) -> Result<(ThreadedDecoderSource, Arc<DecodeBufferState>), String>
 where
     S: Source + Send + 'static,
 {
-    spawn_threaded_decoder_with_progress(source, None)
+    spawn_threaded_decoder_with_health(source, None, Arc::new(NativeAudioHealth::default()))
 }
 
+#[cfg(test)]
 fn spawn_threaded_decoder_with_progress<S>(
+    source: S,
+    reader_progress: Option<Arc<DownloadProgress>>,
+) -> Result<(ThreadedDecoderSource, Arc<DecodeBufferState>), String>
+where
+    S: Source + Send + 'static,
+{
+    spawn_threaded_decoder_with_health(
+        source,
+        reader_progress,
+        Arc::new(NativeAudioHealth::default()),
+    )
+}
+
+fn spawn_threaded_decoder_with_health<S>(
     mut source: S,
     reader_progress: Option<Arc<DownloadProgress>>,
+    health: Arc<NativeAudioHealth>,
 ) -> Result<(ThreadedDecoderSource, Arc<DecodeBufferState>), String>
 where
     S: Source + Send + 'static,
@@ -795,6 +844,7 @@ where
         sample_rate,
         chunk_capacity,
         reader_progress,
+        health,
     ));
     let worker_state = Arc::clone(&state);
     let worker_id = NEXT_DECODE_WORKER_ID.fetch_add(1, Ordering::Relaxed);
@@ -1129,6 +1179,8 @@ pub struct NativeAudioEngine {
     active_download: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
     active_precache: Arc<Mutex<Option<ActivePrecache>>>,
     active_progress: Arc<Mutex<Option<Arc<DownloadProgress>>>>,
+    health: Arc<NativeAudioHealth>,
+    output_recovery_pending: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1428,6 +1480,14 @@ struct CurrentSource {
     metadata: NowPlayingMetadata,
 }
 
+#[derive(Clone, Debug)]
+struct PendingSourceSnapshot {
+    index: usize,
+    source: String,
+    cache_key: Option<String>,
+    metadata: NowPlayingMetadata,
+}
+
 /// State captured before rebuilding the player on another output device.
 #[derive(Clone, Debug)]
 struct PlaybackSnapshot {
@@ -1437,6 +1497,7 @@ struct PlaybackSnapshot {
     duration_seconds: Option<f64>,
     metadata: Option<NowPlayingMetadata>,
     source: Option<CurrentSource>,
+    pending: Option<PendingSourceSnapshot>,
     queue: QueueState,
 }
 
@@ -1448,6 +1509,7 @@ pub struct NativeAudioEngineSlot {
     preferred_volume: Mutex<Option<f32>>,
     output_switch_lock: tokio::sync::Mutex<()>,
     maintenance_in_progress: AtomicBool,
+    health: Arc<NativeAudioHealth>,
 }
 
 struct SlotMaintenanceGuard<'a>(&'a AtomicBool);
@@ -1468,6 +1530,7 @@ impl NativeAudioEngineSlot {
             preferred_volume: Mutex::new(None),
             output_switch_lock: tokio::sync::Mutex::new(()),
             maintenance_in_progress: AtomicBool::new(false),
+            health: Arc::new(NativeAudioHealth::default()),
         }
     }
 
@@ -1556,9 +1619,10 @@ impl NativeAudioEngineSlot {
             .map(|guard| *guard)
             .unwrap_or(None);
         let engine = Arc::new(
-            NativeAudioEngine::new_with_device(
+            NativeAudioEngine::new_with_device_and_health(
                 self.cache_root.clone(),
                 preferred_device.as_deref().unwrap_or(""),
+                Arc::clone(&self.health),
             )
             .map_err(|e| format!("原生引擎创建失败: {e}"))?,
         );
@@ -1576,9 +1640,51 @@ impl NativeAudioEngineSlot {
     pub async fn set_output_device(
         &self,
         app: &AppHandle,
-        device_name: String,
+        device_id: String,
     ) -> Result<(), String> {
         let _switch = self.output_switch_lock.lock().await;
+        self.replace_output_device(app, device_id, None)
+            .await
+            .map(|_| ())
+    }
+
+    async fn recover_output_stream(
+        &self,
+        app: &AppHandle,
+        failed_engine: &Arc<NativeAudioEngine>,
+    ) -> Result<Option<String>, String> {
+        let _switch = self.output_switch_lock.lock().await;
+        let preferred = self
+            .preferred_device
+            .lock()
+            .map(|device| device.clone().unwrap_or_default())
+            .unwrap_or_default();
+        match self
+            .replace_output_device(app, preferred.clone(), Some(failed_engine))
+            .await
+        {
+            Ok(true) => Ok(Some(preferred)),
+            Ok(false) => Ok(None),
+            Err(preferred_error) if !preferred.is_empty() => {
+                eprintln!("[原生] 所选输出设备恢复失败，尝试系统默认：{preferred_error}");
+                self.replace_output_device(app, String::new(), Some(failed_engine))
+                    .await
+                    .and_then(|replaced| {
+                        replaced
+                            .then_some(Some(String::new()))
+                            .ok_or_else(|| "输出流已由其他操作恢复".to_string())
+                    })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn replace_output_device(
+        &self,
+        app: &AppHandle,
+        device_id: String,
+        expected_engine: Option<&Arc<NativeAudioEngine>>,
+    ) -> Result<bool, String> {
         let _maintenance = self.begin_maintenance();
         let old = {
             let guard = self
@@ -1586,11 +1692,17 @@ impl NativeAudioEngineSlot {
                 .lock()
                 .map_err(|_| "原生引擎状态锁失败".to_string())?;
             let Some(old) = guard.as_ref() else {
-                if let Ok(mut preferred) = self.preferred_device.lock() {
-                    *preferred = Some(device_name);
+                if expected_engine.is_some() {
+                    return Ok(false);
                 }
-                return Ok(());
+                if let Ok(mut preferred) = self.preferred_device.lock() {
+                    *preferred = Some(device_id);
+                }
+                return Ok(false);
             };
+            if expected_engine.is_some_and(|expected| !Arc::ptr_eq(expected, old)) {
+                return Ok(false);
+            }
             Arc::clone(old)
         };
         if let Some(queued) = old.consume_started_handoff() {
@@ -1598,8 +1710,12 @@ impl NativeAudioEngineSlot {
         }
         let snapshot = old.capture_playback_snapshot();
         let new_engine = Arc::new(
-            NativeAudioEngine::new_with_device(self.cache_root.clone(), &device_name)
-                .map_err(|e| format!("切换输出设备失败: {e}"))?,
+            NativeAudioEngine::new_with_device_and_health(
+                self.cache_root.clone(),
+                &device_id,
+                Arc::clone(&self.health),
+            )
+            .map_err(|e| format!("切换输出设备失败: {e}"))?,
         );
         // Stop and cancel the old progressive source before the new engine
         // touches the shared cache path. Merely stopping its event forwarder
@@ -1607,31 +1723,40 @@ impl NativeAudioEngineSlot {
         old.accepting_work.store(false, Ordering::SeqCst);
         let stopped_generation = old.stop_immediately_and_wait().await;
         if let Err(error) = new_engine.restore_playback_snapshot(&snapshot).await {
+            new_engine.accepting_work.store(false, Ordering::SeqCst);
+            new_engine.stop_immediately_and_wait().await;
+            new_engine.stopped.store(true, Ordering::SeqCst);
             old.accepting_work.store(true, Ordering::SeqCst);
             if old.playback_generation.load(Ordering::SeqCst) == stopped_generation {
                 let _ = old.restore_playback_snapshot(&snapshot).await;
             }
             return Err(format!("在新输出设备上恢复播放失败: {error}"));
         }
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| "原生引擎状态锁失败".to_string())?;
-        let still_current = guard
-            .as_ref()
-            .map(|current| Arc::ptr_eq(current, &old))
-            .unwrap_or(false)
-            && old.playback_generation.load(Ordering::SeqCst) == stopped_generation;
-        if !still_current {
-            new_engine.stop_immediately();
+        let installed = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| "原生引擎状态锁失败".to_string())?;
+            let still_current = guard
+                .as_ref()
+                .map(|current| Arc::ptr_eq(current, &old))
+                .unwrap_or(false)
+                && old.playback_generation.load(Ordering::SeqCst) == stopped_generation;
+            if still_current {
+                old.stopped.store(true, Ordering::SeqCst);
+                *guard = Some(Arc::clone(&new_engine));
+            }
+            still_current
+        };
+        if !installed {
+            new_engine.accepting_work.store(false, Ordering::SeqCst);
+            new_engine.stop_immediately_and_wait().await;
+            new_engine.stopped.store(true, Ordering::SeqCst);
             old.accepting_work.store(true, Ordering::SeqCst);
             return Err("播放状态在输出设备切换期间发生变化，请重试".to_string());
         }
-        old.stopped.store(true, Ordering::SeqCst);
-        *guard = Some(Arc::clone(&new_engine));
-        drop(guard);
         if let Ok(mut preferred) = self.preferred_device.lock() {
-            *preferred = Some(device_name);
+            *preferred = Some(device_id);
         }
         if let Ok(preferred) = self.preferred_volume.lock() {
             if let Some(volume) = *preferred {
@@ -1639,7 +1764,7 @@ impl NativeAudioEngineSlot {
             }
         }
         new_engine.start_event_forwarder(app.clone());
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1723,6 +1848,18 @@ impl NativeAudioEngine {
     }
 
     fn new_with_device(cache_root: PathBuf, device_id: &str) -> anyhow::Result<Self> {
+        Self::new_with_device_and_health(
+            cache_root,
+            device_id,
+            Arc::new(NativeAudioHealth::default()),
+        )
+    }
+
+    fn new_with_device_and_health(
+        cache_root: PathBuf,
+        device_id: &str,
+        health: Arc<NativeAudioHealth>,
+    ) -> anyhow::Result<Self> {
         use cpal::traits::{DeviceTrait, HostTrait};
         let builder = if device_id.is_empty() {
             DeviceSinkBuilder::from_default_device()
@@ -1747,7 +1884,14 @@ impl NativeAudioEngine {
             DeviceSinkBuilder::from_device(device)
                 .map_err(|e| anyhow::anyhow!("打开所选输出设备失败: {e}"))?
         };
+        let health_for_stream = Arc::clone(&health);
+        let output_recovery_pending = Arc::new(AtomicBool::new(false));
+        let recovery_pending_for_stream = Arc::clone(&output_recovery_pending);
         let mut sink = builder
+            .with_error_callback(move |error| {
+                health_for_stream.record_output_stream_error(&recovery_pending_for_stream);
+                eprintln!("[原生] 音频输出流错误，等待自动恢复：{error}");
+            })
             .open_stream()
             .map_err(|e| anyhow::anyhow!("音频流启动失败: {e}"))?;
         // Engine replacement and app shutdown intentionally drop this owned
@@ -1783,6 +1927,8 @@ impl NativeAudioEngine {
             active_download: Arc::new(Mutex::new(None)),
             active_precache: Arc::new(Mutex::new(None)),
             active_progress: Arc::new(Mutex::new(None)),
+            health,
+            output_recovery_pending,
         })
     }
 
@@ -1894,10 +2040,14 @@ impl NativeAudioEngine {
             *observation = None;
         }
         if let Ok(mut pending) = self.pending.lock() {
-            *pending = None;
+            if let Some(pending) = pending.take() {
+                pending.decode_state.cancel_worker();
+            }
         }
         if let Ok(mut decode_state) = self.decode_state.lock() {
-            *decode_state = None;
+            if let Some(decode_state) = decode_state.take() {
+                decode_state.cancel_worker();
+            }
         }
         let handles = self.take_active_work();
         self.replace_player();
@@ -2136,7 +2286,8 @@ impl NativeAudioEngine {
                     .duration_ms
                     .map(|milliseconds| milliseconds as f64 / 1000.0)
             });
-        let (decoder, decode_state) = spawn_threaded_decoder(decoder)?;
+        let (decoder, decode_state) =
+            spawn_threaded_decoder_with_health(decoder, None, Arc::clone(&self.health))?;
         let player = self
             .player
             .lock()
@@ -2382,14 +2533,17 @@ impl NativeAudioEngine {
                     .and_then(|metadata| metadata.duration_ms)
                     .map(|milliseconds| milliseconds as f64 / 1000.0)
             });
-        let (decoder, decode_state) =
-            match spawn_threaded_decoder_with_progress(decoder, Some(Arc::clone(&progress))) {
-                Ok(threaded) => threaded,
-                Err(error) => {
-                    self.cancel_active_download();
-                    return Err(error);
-                }
-            };
+        let (decoder, decode_state) = match spawn_threaded_decoder_with_health(
+            decoder,
+            Some(Arc::clone(&progress)),
+            Arc::clone(&self.health),
+        ) {
+            Ok(threaded) => threaded,
+            Err(error) => {
+                self.cancel_active_download();
+                return Err(error);
+            }
+        };
         let player = self
             .player
             .lock()
@@ -2625,7 +2779,8 @@ impl NativeAudioEngine {
             .total_duration()
             .map(|duration| duration.as_secs_f64());
         let (decoder, decode_state) =
-            spawn_threaded_decoder(decoder).map_err(|error| format!("预排{error}"))?;
+            spawn_threaded_decoder_with_health(decoder, None, Arc::clone(&self.health))
+                .map_err(|error| format!("预排{error}"))?;
         let mut metadata = metadata.unwrap_or_default();
         if metadata.title.as_deref().unwrap_or("").is_empty() {
             metadata.title = Some(track.title);
@@ -2794,6 +2949,16 @@ impl NativeAudioEngine {
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        let pending = self.pending.lock().ok().and_then(|guard| {
+            guard.as_ref().and_then(|pending| {
+                (!pending.started.load(Ordering::SeqCst)).then(|| PendingSourceSnapshot {
+                    index: pending.index,
+                    source: pending.source.clone(),
+                    cache_key: pending.cache_key.clone(),
+                    metadata: pending.metadata.clone(),
+                })
+            })
+        });
         PlaybackSnapshot {
             playing: self.desired_playing.load(Ordering::SeqCst) && !self.player().empty(),
             position: self.playback_position_seconds(),
@@ -2813,6 +2978,7 @@ impl NativeAudioEngine {
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or(None),
+            pending,
             queue,
         }
     }
@@ -2849,6 +3015,18 @@ impl NativeAudioEngine {
             if !snapshot.playing {
                 self.player().pause();
                 self.desired_playing.store(false, Ordering::SeqCst);
+            }
+            if let Some(pending) = snapshot.pending.as_ref() {
+                if let Err(error) = self.queue_next_source(
+                    pending.index as i64,
+                    &pending.source,
+                    pending.cache_key.clone(),
+                    Some(pending.metadata.clone()),
+                ) {
+                    // Current playback recovery is more important than a stale
+                    // speculative tail; ordinary queue advance can load it.
+                    eprintln!("[原生] 输出设备恢复后重新预排下一首失败：{error}");
+                }
             }
         }
         Ok(())
@@ -2916,6 +3094,8 @@ impl NativeAudioEngine {
         let mut last_now_playing_signature: Option<NowPlayingSignature> = None;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let mut last_now_playing_at: Option<std::time::Instant> = None;
+        let mut next_output_recovery_at = std::time::Instant::now();
+        let mut output_recovery_delay = Duration::from_secs(1);
         // 引擎可能在同步 Tauri 命令（native_queue_set 等）里首次创建，
         // tokio::spawn 在无运行时上下文的主线程会 panic；用 Tauri 全局
         // 运行时可同时兼容同步/异步调用。
@@ -2924,6 +3104,55 @@ impl NativeAudioEngine {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 if engine.stopped.load(Ordering::SeqCst) {
                     break;
+                }
+                let now = std::time::Instant::now();
+                if engine.output_recovery_pending.load(Ordering::SeqCst)
+                    && now >= next_output_recovery_at
+                {
+                    // Keep the recovery future on Tauri's async runtime; it
+                    // rebuilds CPAL without any WebView timer dependency.
+                    let recovery =
+                        if let Some(slot) = app_for_task.try_state::<NativeAudioEngineSlot>() {
+                            slot.recover_output_stream(&app_for_task, &engine).await
+                        } else {
+                            Err("原生引擎状态尚未注册".to_string())
+                        };
+                    match recovery {
+                        Ok(Some(device_id)) => {
+                            engine
+                                .output_recovery_pending
+                                .store(false, Ordering::SeqCst);
+                            engine
+                                .health
+                                .output_recoveries
+                                .fetch_add(1, Ordering::SeqCst);
+                            let _ = app_for_task.emit(
+                                "native-audio://event",
+                                serde_json::json!({
+                                    "type": "output-device-recovered",
+                                    "deviceId": device_id,
+                                }),
+                            );
+                            eprintln!("[原生] 音频输出流已自动恢复");
+                            break;
+                        }
+                        Ok(None) => {
+                            engine
+                                .output_recovery_pending
+                                .store(false, Ordering::SeqCst);
+                            break;
+                        }
+                        Err(error) => {
+                            engine
+                                .health
+                                .output_recovery_failures
+                                .fetch_add(1, Ordering::SeqCst);
+                            eprintln!("[原生] 音频输出流自动恢复失败：{error}");
+                            next_output_recovery_at = now + output_recovery_delay;
+                            output_recovery_delay =
+                                (output_recovery_delay * 2).min(Duration::from_secs(30));
+                        }
+                    }
                 }
                 let player = engine.player();
                 let mut position = engine.playback_position_seconds();
@@ -3137,11 +3366,20 @@ impl NativeAudioEngine {
 #[derive(Serialize)]
 pub struct NativeStatus {
     pub is_playing: bool,
+    pub is_buffering: bool,
     pub position_seconds: Option<f64>,
     pub duration_seconds: Option<f64>,
     pub volume: f32,
     pub item_count: usize,
     pub current_index: Option<usize>,
+    pub buffered_chunks: usize,
+    pub buffer_capacity: usize,
+    pub underflow_events: u64,
+    pub underflow_frames: u64,
+    pub output_stream_errors: u64,
+    pub output_recoveries: u64,
+    pub output_recovery_failures: u64,
+    pub output_recovery_pending: bool,
 }
 
 #[derive(Serialize)]
@@ -3491,16 +3729,31 @@ pub fn native_audio_status(
     let Some(engine) = state.current() else {
         return NativeStatus {
             is_playing: false,
+            is_buffering: false,
             position_seconds: None,
             duration_seconds: None,
             volume: state.volume(),
             item_count: 0,
             current_index: None,
+            buffered_chunks: 0,
+            buffer_capacity: 0,
+            underflow_events: state.health.underflow_events.load(Ordering::SeqCst),
+            underflow_frames: state.health.underflow_frames.load(Ordering::SeqCst),
+            output_stream_errors: state.health.output_stream_errors.load(Ordering::SeqCst),
+            output_recoveries: state.health.output_recoveries.load(Ordering::SeqCst),
+            output_recovery_failures: state.health.output_recovery_failures.load(Ordering::SeqCst),
+            output_recovery_pending: false,
         };
     };
     let player = engine.player();
+    let decode_state = engine
+        .decode_state
+        .lock()
+        .ok()
+        .and_then(|state| state.clone());
     NativeStatus {
         is_playing: !player.empty() && engine.desired_playing.load(Ordering::SeqCst),
+        is_buffering: engine.buffer_paused.load(Ordering::SeqCst),
         position_seconds: Some(engine.playback_position_seconds()),
         duration_seconds: engine
             .duration_seconds
@@ -3514,6 +3767,20 @@ pub fn native_audio_status(
             .lock()
             .ok()
             .and_then(|queue| usize::try_from(queue.current_index).ok()),
+        buffered_chunks: decode_state
+            .as_ref()
+            .map(|state| state.buffered_chunks.load(Ordering::SeqCst))
+            .unwrap_or(0),
+        buffer_capacity: decode_state
+            .as_ref()
+            .map(|state| state.buffer_capacity)
+            .unwrap_or(0),
+        underflow_events: state.health.underflow_events.load(Ordering::SeqCst),
+        underflow_frames: state.health.underflow_frames.load(Ordering::SeqCst),
+        output_stream_errors: state.health.output_stream_errors.load(Ordering::SeqCst),
+        output_recoveries: state.health.output_recoveries.load(Ordering::SeqCst),
+        output_recovery_failures: state.health.output_recovery_failures.load(Ordering::SeqCst),
+        output_recovery_pending: engine.output_recovery_pending.load(Ordering::SeqCst),
     }
 }
 
@@ -3817,6 +4084,16 @@ mod tests {
         assert!(state.underflowing.load(Ordering::SeqCst));
         assert!(state.underflow_frames.load(Ordering::SeqCst) > 0);
         assert_eq!(
+            state.health.underflow_events.load(Ordering::SeqCst),
+            1,
+            "一次连续欠载只能累计一个事件"
+        );
+        assert_eq!(
+            state.health.underflow_frames.load(Ordering::SeqCst),
+            state.underflow_frames.load(Ordering::SeqCst),
+            "进程级健康计数必须覆盖解码器欠载帧"
+        );
+        assert_eq!(
             state.position_seconds(),
             media_position_before_stall,
             "欠载静音不得推进媒体时间轴"
@@ -4029,6 +4306,21 @@ mod tests {
             true,
             first_check + HEARTBEAT_STALL_CONFIRMATION + Duration::from_millis(1),
         ));
+    }
+
+    #[test]
+    fn output_stream_errors_are_latched_for_async_recovery() {
+        let health = NativeAudioHealth::default();
+        let failed_stream = AtomicBool::new(false);
+        let healthy_stream = AtomicBool::new(false);
+        health.record_output_stream_error(&failed_stream);
+        health.record_output_stream_error(&failed_stream);
+        assert_eq!(health.output_stream_errors.load(Ordering::SeqCst), 2);
+        assert!(failed_stream.load(Ordering::SeqCst));
+        assert!(
+            !healthy_stream.load(Ordering::SeqCst),
+            "旧输出流错误不能把新输出流标记为待恢复"
+        );
     }
 
     #[test]
@@ -5062,6 +5354,7 @@ mod tests {
                 std::num::NonZeroU32::new(48_000).unwrap(),
                 8,
                 None,
+                Arc::new(NativeAudioHealth::default()),
             )),
         }
     }
@@ -5602,9 +5895,11 @@ mod tests {
     #[tokio::test]
     async fn output_device_switch_resumes_playback_from_position() {
         use cpal::traits::{DeviceTrait, HostTrait};
-        let wav = std::env::temp_dir().join("cadilume-device-switch.wav");
+        let wav = unique_temp_path("device-switch.wav");
+        let next_wav = unique_temp_path("device-switch-next.wav");
         write_test_wav(&wav);
-        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-device");
+        write_test_wav(&next_wav);
+        let cache_root = unique_temp_path("rodio-cache-device");
         let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
         engine.player().set_volume(0.0);
         {
@@ -5619,10 +5914,28 @@ mod tests {
             queue.history_cursor = Some(1);
         }
         engine.load_and_play(wav.to_str().unwrap()).unwrap();
+        let (next_cache, _) = test_cache_paths(&cache_root, "device-next");
+        std::fs::copy(&next_wav, next_cache).unwrap();
+        engine
+            .queue_next_source(
+                2,
+                next_wav.to_str().unwrap(),
+                Some("device-next".into()),
+                Some(NowPlayingMetadata {
+                    title: Some("next".into()),
+                    duration_ms: Some(3_000),
+                    ..NowPlayingMetadata::default()
+                }),
+            )
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(600)).await;
         let snapshot = engine.capture_playback_snapshot();
         assert!(snapshot.position > 0.1, "切换前播放进度应已前进");
         assert!(snapshot.playing, "切换前应处于播放中");
+        assert_eq!(
+            snapshot.pending.as_ref().map(|pending| pending.index),
+            Some(2)
+        );
 
         let host = cpal::default_host();
         let device_id = host
@@ -5644,6 +5957,16 @@ mod tests {
             resumed
         );
         assert!(!rebuilt.player().empty(), "切换设备后应继续播放");
+        assert_eq!(rebuilt.player().len(), 2, "设备重建后应保留 gapless 预排");
+        assert_eq!(
+            rebuilt
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|pending| pending.index),
+            Some(2)
+        );
         {
             let queue = rebuilt.queue.lock().unwrap();
             assert_eq!(queue.current_index, 1);
@@ -5654,6 +5977,8 @@ mod tests {
         }
         rebuilt.stop_immediately();
         let _ = std::fs::remove_file(&wav);
+        let _ = std::fs::remove_file(&next_wav);
+        let _ = std::fs::remove_dir_all(&cache_root);
     }
 
     /// 真实 PMS 回归共享的拉取逻辑：读取开发 token → 发现服务器 → 选可达连接

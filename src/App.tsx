@@ -509,7 +509,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const deferredQueueOpenTimerRef = useRef<number | undefined>(undefined);
   const preferredPlaybackServerId = initialPlaybackSession?.serverId;
   const player = usePlayer(serverId, quality);
-  const outputDevices = useOutputDevices(player.setOutputSinkId);
+  const outputDevices = useOutputDevices(player.setOutputSinkId, player.outputSinkId);
   const lyrics = useLyrics(serverId, player.current, player.progress, player.duration);
   const previewLyricsCountParam = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("now-playing-preview-lines")

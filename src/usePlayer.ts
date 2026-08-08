@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
 import { plexMusicGateway } from "./musicGateway";
+import { readOutputDevicePreference, writeOutputDevicePreference } from "./outputDevicePreference";
 import { playbackLog } from "./playbackLog";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
 
@@ -24,7 +25,6 @@ export class NativeQueueCommandBarrier {
 
 const VOLUME_STORAGE_KEY = "cadilume-volume";
 const PREBUFFER_STORAGE_KEY = "cadilume-prebuffer-next";
-const OUTPUT_SINK_STORAGE_KEY = "cadilume-output-sink-id";
 export const PLAYBACK_SESSION_STORAGE_KEY = "cadilume-playback-session";
 export const PLAYBACK_SESSION_VERSION = 1 as const;
 export const PLAYBACK_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -615,7 +615,7 @@ const storedVolume = (): number => {
 };
 
 const storedPrebufferNext = (): boolean => readStorage(PREBUFFER_STORAGE_KEY, "true") !== "false";
-const storedOutputSinkId = (): string => readStorage(OUTPUT_SINK_STORAGE_KEY, "");
+const storedOutputSinkId = (): string => readOutputDevicePreference();
 
 export type FallbackStreamQuality = Exclude<StreamQuality, "auto" | "original">;
 
@@ -1262,7 +1262,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const commit = () => {
       outputSinkIdRef.current = normalized;
       setOutputSinkIdState(normalized);
-      writeStorage(OUTPUT_SINK_STORAGE_KEY, normalized);
+      writeOutputDevicePreference(normalized);
     };
     if (!isDesktopRuntime()) {
       commit();
@@ -1390,7 +1390,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("native-audio://event", (event) => {
-      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; reason?: string; buffering?: boolean } | null;
+      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; reason?: string; buffering?: boolean; deviceId?: string } | null;
       if (!payload) return;
       if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
         // 加载期间忽略旧歌的残留进度事件，保证切歌瞬间进度归 0 不被覆盖。
@@ -1416,6 +1416,15 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         schedulePersistedSession(true);
       } else if (payload.type === "buffering" && typeof payload.buffering === "boolean") {
         setBuffering(payload.buffering);
+      } else if (payload.type === "output-device-recovered") {
+        const recoveredDeviceId = typeof payload.deviceId === "string"
+          ? payload.deviceId
+          : outputSinkIdRef.current;
+        outputSinkIdRef.current = recoveredDeviceId;
+        setOutputSinkIdState(recoveredDeviceId);
+        writeOutputDevicePreference(recoveredDeviceId);
+        setBuffering(false);
+        playbackLog("info", `音频输出流已恢复：${recoveredDeviceId ? "所选设备" : "系统默认"}`);
       } else if (payload.type === "queue-item" && typeof payload.index === "number") {
         void loadAt(payload.index, true);
       } else if (payload.type === "track" && typeof payload.index === "number") {
