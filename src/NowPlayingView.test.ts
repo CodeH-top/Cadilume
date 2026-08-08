@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getLyricProgress, getPlexLyricsScrollTop } from "./NowPlayingView";
+import { getCenteredLyricsScrollTop, getLyricProgress } from "./NowPlayingView";
 
 describe("expanded player lyric progress", () => {
   const line = { id: "line-1", startMs: 1_000, endMs: 3_000, texts: ["Line"] };
@@ -16,44 +16,60 @@ describe("expanded player lyric progress", () => {
 });
 
 describe("expanded player lyric scrolling", () => {
-  it("keeps the list still while the active lyric remains visible", () => {
-    expect(getPlexLyricsScrollTop({
+  it("keeps an active lyric centered even when it was already visible", () => {
+    expect(getCenteredLyricsScrollTop({
       scrollTop: 100,
       viewportHeight: 200,
       contentHeight: 1_000,
       targetTop: 150,
       targetHeight: 40,
-    })).toBe(100);
+    })).toBe(170);
 
-    expect(getPlexLyricsScrollTop({
+    expect(getCenteredLyricsScrollTop({
       scrollTop: 100,
       viewportHeight: 200,
       contentHeight: 1_000,
       targetTop: -10,
       targetHeight: 40,
-    })).toBe(100);
+    })).toBe(10);
   });
 
-  it("moves an offscreen lyric to the top and clamps the scroll range", () => {
-    expect(getPlexLyricsScrollTop({
+  it("centers an offscreen lyric and clamps both scroll boundaries", () => {
+    expect(getCenteredLyricsScrollTop({
+      scrollTop: 0,
+      viewportHeight: 200,
+      contentHeight: 800,
+      targetTop: 360,
+      targetHeight: 40,
+    })).toBe(280);
+
+    expect(getCenteredLyricsScrollTop({
       scrollTop: 100,
       viewportHeight: 200,
       contentHeight: 800,
       targetTop: 220,
       targetHeight: 20,
-    })).toBe(320);
+    })).toBe(230);
 
-    expect(getPlexLyricsScrollTop({
+    expect(getCenteredLyricsScrollTop({
       scrollTop: 550,
       viewportHeight: 200,
       contentHeight: 800,
       targetTop: 220,
       targetHeight: 30,
     })).toBe(600);
+
+    expect(getCenteredLyricsScrollTop({
+      scrollTop: 0,
+      viewportHeight: 200,
+      contentHeight: 800,
+      targetTop: 12,
+      targetHeight: 30,
+    })).toBe(0);
   });
 
   it("returns zero when the lyrics do not overflow their viewport", () => {
-    expect(getPlexLyricsScrollTop({
+    expect(getCenteredLyricsScrollTop({
       scrollTop: 40,
       viewportHeight: 300,
       contentHeight: 180,

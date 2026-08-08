@@ -99,7 +99,7 @@ import { isCurrentLibraryDetailRoute, libraryDetailRoute, libraryRouteHash, libr
 import { createCadilumeEntryState, historyEntryCacheKey, routeEntryId, routeParentEntryId } from "./routeEntry";
 import { routeScrollBehavior, shouldShowRouteBackToTop } from "./routeScroll";
 import { hasDisplayableLyrics } from "./lyrics";
-import { getPlexLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
+import { getCenteredLyricsScrollTop, NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from "./NowPlayingView";
 import { getLyricsActionPresentation } from "./playerActions";
 import { playbackControlLabel, rangeFillPercent, usableDurationSeconds } from "./playerUi";
 import { homeRecommendationHubs, isRecentlyAddedHub, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
@@ -131,6 +131,7 @@ import { GlobalNotificationQueue, useGlobalNotificationQueue } from "./Notificat
 import type { GlobalNotificationLevel } from "./notifications";
 import { applyThemeMode, readInitialThemeMode } from "./theme";
 import { SharedVolumeControl } from "./VolumeControl";
+import { rasterizeAppearanceSnapshotImages } from "./appearanceTransition";
 
 type Icon = typeof Album;
 
@@ -343,12 +344,12 @@ function MainApplication({
     if (session?.brandPreset) syncBrandPreset(session.brandPreset);
   }, [session, syncBrandPreset]);
 
-  if (uiPreview === "splash") return <AppFrame><SplashScreen /></AppFrame>;
+  if (uiPreview === "splash") return <AppFrame fullBleed><SplashScreen /></AppFrame>;
   if (uiPreview === "login") {
     return <AppFrame><LoginScreen clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>;
   }
   if (uiPreview === "notifications") return <AppFrame><NotificationFixture /></AppFrame>;
-  if (!session && !error) return <AppFrame><SplashScreen /></AppFrame>;
+  if (!session && !error) return <AppFrame fullBleed><SplashScreen /></AppFrame>;
   if (!session || error) return <AppFrame><FatalError message={error || "无法启动 Cadilume"} retry={load} /></AppFrame>;
   if (!session.authenticated || !session.account) {
     return <AppFrame><LoginScreen clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>;
@@ -356,13 +357,19 @@ function MainApplication({
   return <AppFrame integrated><MusicShell initialSession={session} themeMode={themeMode} resolvedTheme={resolvedTheme} brandPreset={brandPreset} onThemeMode={onThemeMode} onBrandPreset={onBrandPreset} /></AppFrame>;
 }
 
-function AppFrame({ children, integrated = false }: { children: ReactNode; integrated?: boolean }) {
+function AppFrame({ children, integrated = false, fullBleed = false }: {
+  children: ReactNode;
+  integrated?: boolean;
+  fullBleed?: boolean;
+}) {
   return (
     <div
-      className={`app-frame ${integrated ? "is-integrated" : ""}`.trim()}
+      className={`app-frame ${integrated ? "is-integrated" : ""} ${fullBleed ? "is-full-bleed" : ""}`.trim()}
       data-platform={detectOutputPlatform(navigator)}
     >
-      {!integrated && <AppTitlebar />}
+      {fullBleed
+        ? <div className="app-frame__full-bleed-drag-region" data-tauri-drag-region aria-hidden="true" />
+        : !integrated && <AppTitlebar />}
       <div className="app-frame-content">{children}</div>
       <TooltipLayer />
     </div>
@@ -3705,9 +3712,7 @@ function LyricsPanel({ open, track, lyrics, onSeek }: {
 
     if (previousTrackIdentityRef.current !== trackIdentity) {
       previousTrackIdentityRef.current = trackIdentity;
-      lineRefs.current = {};
       list.scrollTop = 0;
-      return;
     }
 
     if (!lyrics.document?.timed) return;
@@ -3717,7 +3722,7 @@ function LyricsPanel({ open, track, lyrics, onSeek }: {
     if (!node || typeof list.scrollTo !== "function") return;
     const listRect = list.getBoundingClientRect();
     const nodeRect = node.getBoundingClientRect();
-    const nextScrollTop = getPlexLyricsScrollTop({
+    const nextScrollTop = getCenteredLyricsScrollTop({
       scrollTop: list.scrollTop,
       viewportHeight: list.clientHeight,
       contentHeight: list.scrollHeight,
@@ -4592,9 +4597,9 @@ function SearchLoadingState({ query }: { query: string }) {
 
 function SplashScreen() {
   return (
-    <main className="splash-screen">
-      <section className="splash-card" aria-live="polite" aria-busy="true">
-        <div className="splash-card-heading"><div className="splash-brand"><span className="brand-mark splash-mark"><BrandIcon size={32} /></span><span><strong>Cadilume</strong><small>桌面音乐空间</small></span></div><span className="splash-stage"><span className="splash-stage-dot" />正在启动</span></div>
+    <main className="splash-screen" data-testid="splash-screen">
+      <section className="splash-content" aria-live="polite" aria-busy="true">
+        <div className="splash-header"><div className="splash-brand"><span className="brand-mark splash-mark"><BrandIcon size={32} /></span><span><strong>Cadilume</strong><small>桌面音乐空间</small></span></div><span className="splash-stage"><span className="splash-stage-dot" />正在启动</span></div>
         <div className="splash-main">
           <div className="splash-visual" aria-hidden="true">
             <div className="splash-orbit splash-orbit-one" /><div className="splash-orbit splash-orbit-two" />
@@ -4720,15 +4725,18 @@ function preserveSnapshotScrollAndMediaGeometry(appRoot: HTMLElement, snapshot: 
     }
 
     if (!source.matches(APPEARANCE_MEDIA_GEOMETRY_SELECTOR)) continue;
-    const bounds = source.getBoundingClientRect();
-    if (bounds.width <= 0 || bounds.height <= 0) continue;
     const style = window.getComputedStyle(source);
-    copy.style.width = `${bounds.width}px`;
-    copy.style.height = `${bounds.height}px`;
-    copy.style.minWidth = `${bounds.width}px`;
-    copy.style.minHeight = `${bounds.height}px`;
-    copy.style.maxWidth = `${bounds.width}px`;
-    copy.style.maxHeight = `${bounds.height}px`;
+    const computedWidth = Number.parseFloat(style.width);
+    const computedHeight = Number.parseFloat(style.height);
+    const layoutWidth = Number.isFinite(computedWidth) ? computedWidth : source.offsetWidth;
+    const layoutHeight = Number.isFinite(computedHeight) ? computedHeight : source.offsetHeight;
+    if (layoutWidth <= 0 || layoutHeight <= 0) continue;
+    copy.style.width = `${layoutWidth}px`;
+    copy.style.height = `${layoutHeight}px`;
+    copy.style.minWidth = `${layoutWidth}px`;
+    copy.style.minHeight = `${layoutHeight}px`;
+    copy.style.maxWidth = `${layoutWidth}px`;
+    copy.style.maxHeight = `${layoutHeight}px`;
     copy.style.objectFit = style.objectFit;
     copy.style.objectPosition = style.objectPosition;
     copy.style.filter = style.filter;
@@ -4752,6 +4760,7 @@ function createAppearanceSnapshot(appearance: AppearanceState) {
 
   const rootStyle = window.getComputedStyle(document.documentElement);
   const snapshot = appRoot.cloneNode(true) as HTMLElement;
+  rasterizeAppearanceSnapshotImages(appRoot, snapshot);
   snapshot.removeAttribute("id");
   snapshot.classList.add("theme-transition-snapshot");
   snapshot.dataset.theme = appearance.theme;
@@ -4785,15 +4794,9 @@ function nextAppearancePaint(): Promise<void> {
 }
 
 function settleAppearanceSnapshot(snapshot: HTMLElement): Promise<void> {
-  const images = Array.from(snapshot.querySelectorAll<HTMLImageElement>("img"));
-  const decoded = Promise.all(images.map((image) => {
-    if (!image.complete || image.naturalWidth <= 0 || typeof image.decode !== "function") return Promise.resolve();
-    return image.decode().catch(() => undefined);
-  }));
-  const maximumWait = new Promise<void>((resolve) => window.setTimeout(resolve, 120));
-  return Promise.race([decoded.then(() => undefined), maximumWait]).then(nextAppearancePaint).then(() => {
-    snapshot.classList.add("is-ready");
-    return nextAppearancePaint();
+  snapshot.classList.add("is-ready");
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
   });
 }
 

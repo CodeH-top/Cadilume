@@ -7,16 +7,18 @@
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use reqwest::{redirect::Policy, Client};
 use rodio::source::SeekError;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::AsyncWriteExt;
 
 /// Minimum bytes downloaded before progressive playback may start.
@@ -31,6 +33,17 @@ const MAX_AUDIO_CACHE_IDENTITY_BYTES: usize = 8 * 1024;
 /// treated as transiently failed and retried. This bounds precache tasks too;
 /// unlike foreground load they have no separate startup deadline.
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Decoder workers feed fixed, frame-aligned chunks to the real-time output.
+const DECODE_CHUNK_FRAMES: usize = 1024;
+/// Keep several seconds of decoded PCM ahead without allowing unbounded memory.
+const DECODE_BUFFER_SECONDS: usize = 4;
+/// After an underflow, wait for a useful amount of PCM before resuming. A
+/// single 1024-frame chunk is only ~21ms at 48kHz and would otherwise cause
+/// rapid pause/resume oscillation on an unstable connection.
+const DECODE_RESUME_BUFFER_MS: usize = 250;
+const DECODE_INITIAL_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
+const DECODE_SEND_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+static NEXT_DECODE_WORKER_ID: AtomicUsize = AtomicUsize::new(1);
 /// Background prefetch bandwidth cap (Plexamp desktop default ~5 Mbps).
 /// Only applies to far-ahead cache warming, never to the immediate next
 /// track (gapless handoff must not be delayed by throttling).
@@ -38,13 +51,48 @@ const PRECACHE_RATE_LIMIT_BYTES_PER_SEC: u64 = 5 * 1024 * 1024 / 8;
 /// 前端心跳超时：超过该时长没有收到 heartbeat 且引擎正在出声，就自动停止
 /// 播放，防止 WebView/主线程卡死或崩溃后音乐停不下来。
 const HEARTBEAT_STALL_TIMEOUT: Duration = Duration::from_secs(6);
+/// A stale heartbeat must remain unchanged for a second full interval before
+/// playback is stopped. This lets the WebView recover after system sleep or a
+/// transient main-thread stall without sacrificing the visible-window guard.
+const HEARTBEAT_STALL_CONFIRMATION: Duration = Duration::from_secs(6);
+static SHUFFLE_NONCE: AtomicU64 = AtomicU64::new(0x6a09_e667_f3bc_c909);
+
+fn loopback_http_client(timeout: Option<Duration>) -> Result<Client, String> {
+    let mut builder = Client::builder().redirect(Policy::none());
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("创建本机媒体客户端失败: {error}"))
+}
+
+fn http_error_category(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_request() {
+        "request"
+    } else {
+        "unknown"
+    }
+}
 
 fn audio_cache_dir(cache_root: &Path) -> PathBuf {
     cache_root.join("downloads")
 }
 
 fn audio_cache_key(cache_identity: Option<&str>) -> Result<String, String> {
-    let Some(identity) = cache_identity.map(str::trim).filter(|identity| !identity.is_empty())
+    let Some(identity) = cache_identity
+        .map(str::trim)
+        .filter(|identity| !identity.is_empty())
     else {
         return Ok(uuid::Uuid::new_v4().simple().to_string());
     };
@@ -181,11 +229,7 @@ fn remove_orphaned_partial_files(cache_root: &Path) {
         return;
     };
     for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .ends_with(".audio.part")
-        {
+        if entry.file_name().to_string_lossy().ends_with(".audio.part") {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -233,6 +277,7 @@ struct DownloadProgress {
     failed: AtomicBool,
     finished: AtomicBool,
     cancelled: AtomicBool,
+    reader_interrupt_epoch: AtomicU64,
     lock: Mutex<()>,
     notify: Condvar,
 }
@@ -266,17 +311,19 @@ impl DownloadProgress {
             failed: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
+            reader_interrupt_epoch: AtomicU64::new(0),
             lock: Mutex::new(()),
             notify: Condvar::new(),
         })
     }
 
-    fn wait_until(&self, bytes: u64) {
+    fn wait_until(&self, bytes: u64, reader_interrupt_epoch: u64) -> bool {
         let mut guard = self.lock.lock().unwrap();
         while self.downloaded.load(Ordering::SeqCst) < bytes
             && !self.failed.load(Ordering::SeqCst)
             && !self.finished.load(Ordering::SeqCst)
             && !self.cancelled.load(Ordering::SeqCst)
+            && self.reader_interrupt_epoch.load(Ordering::SeqCst) == reader_interrupt_epoch
         {
             let result = self
                 .notify
@@ -284,10 +331,16 @@ impl DownloadProgress {
                 .unwrap();
             guard = result.0;
         }
+        self.reader_interrupt_epoch.load(Ordering::SeqCst) != reader_interrupt_epoch
     }
 
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        self.wake();
+    }
+
+    fn interrupt_reader(&self) {
+        self.reader_interrupt_epoch.fetch_add(1, Ordering::SeqCst);
         self.wake();
     }
 
@@ -301,12 +354,21 @@ impl DownloadProgress {
 struct ProgressiveFile {
     file: std::fs::File,
     progress: Arc<DownloadProgress>,
+    reader_interrupt_epoch: u64,
 }
 
 impl Read for ProgressiveFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         loop {
             if self.progress.cancelled.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+            let interrupt_epoch = self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
+            if interrupt_epoch != self.reader_interrupt_epoch {
+                self.reader_interrupt_epoch = interrupt_epoch;
+                // A temporary EOF unwinds symphonia out of a blocking read.
+                // The decoder worker observes its seek epoch and immediately
+                // calls Decoder::try_seek on the still-open source.
                 return Ok(0);
             }
             let pos = self.file.stream_position()?;
@@ -317,7 +379,14 @@ impl Read for ProgressiveFile {
                     return Ok(n);
                 }
                 if downloaded > pos && !self.progress.finished.load(Ordering::SeqCst) {
-                    self.progress.wait_until(downloaded + 1);
+                    if self
+                        .progress
+                        .wait_until(downloaded.saturating_add(1), self.reader_interrupt_epoch)
+                    {
+                        self.reader_interrupt_epoch =
+                            self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
+                        return Ok(0);
+                    }
                     continue;
                 }
                 return Ok(0);
@@ -328,7 +397,14 @@ impl Read for ProgressiveFile {
             {
                 return Ok(0);
             }
-            self.progress.wait_until(pos + 1);
+            if self
+                .progress
+                .wait_until(pos.saturating_add(1), self.reader_interrupt_epoch)
+            {
+                self.reader_interrupt_epoch =
+                    self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
+                return Ok(0);
+            }
         }
     }
 }
@@ -341,11 +417,11 @@ impl Seek for ProgressiveFile {
                 "progressive playback was cancelled",
             ));
         }
+        self.reader_interrupt_epoch = self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
         let target = match pos {
             SeekFrom::Start(p) => p,
-            SeekFrom::Current(delta) => {
-                (self.file.stream_position()? as i128 + delta as i128).max(0) as u64
-            }
+            SeekFrom::Current(delta) => (self.file.stream_position()? as i128 + delta as i128)
+                .clamp(0, u64::MAX as i128) as u64,
             SeekFrom::End(_) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
@@ -360,10 +436,499 @@ impl Seek for ProgressiveFile {
             {
                 break;
             }
-            self.progress.wait_until(target + 1);
+            if self
+                .progress
+                .wait_until(target.saturating_add(1), self.reader_interrupt_epoch)
+            {
+                self.reader_interrupt_epoch =
+                    self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "progressive seek superseded",
+                ));
+            }
         }
         self.file.seek(SeekFrom::Start(target))
     }
+}
+
+struct DecodedChunk {
+    epoch: u64,
+    samples: Vec<f32>,
+}
+
+enum DecodedChunkSend {
+    Sent,
+    Superseded(Vec<f32>),
+    Disconnected,
+}
+
+struct DecodeBufferState {
+    cancelled: AtomicBool,
+    finished: AtomicBool,
+    underflowing: AtomicBool,
+    buffered_chunks: AtomicUsize,
+    buffer_capacity: usize,
+    resume_chunks: usize,
+    underflow_frames: AtomicU64,
+    played_media_frames: AtomicU64,
+    position_base_micros: AtomicU64,
+    sample_rate_hz: u32,
+    seek_epoch: AtomicU64,
+    seek_target: Mutex<Option<(u64, Duration)>>,
+    worker_signal_epoch: AtomicU64,
+    worker_signal_lock: Mutex<()>,
+    worker_signal: Condvar,
+    reader_progress: Option<Arc<DownloadProgress>>,
+    worker_exited: AtomicBool,
+    allocated_chunks: AtomicUsize,
+}
+
+impl DecodeBufferState {
+    fn new(
+        sample_rate: rodio::SampleRate,
+        buffer_capacity: usize,
+        reader_progress: Option<Arc<DownloadProgress>>,
+    ) -> Self {
+        let resume_frames = (sample_rate.get() as usize)
+            .saturating_mul(DECODE_RESUME_BUFFER_MS)
+            .div_ceil(1_000);
+        let resume_chunks = resume_frames
+            .div_ceil(DECODE_CHUNK_FRAMES)
+            .clamp(1, buffer_capacity);
+        Self {
+            cancelled: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            underflowing: AtomicBool::new(false),
+            buffered_chunks: AtomicUsize::new(0),
+            buffer_capacity,
+            resume_chunks,
+            underflow_frames: AtomicU64::new(0),
+            played_media_frames: AtomicU64::new(0),
+            position_base_micros: AtomicU64::new(0),
+            sample_rate_hz: sample_rate.get(),
+            seek_epoch: AtomicU64::new(0),
+            seek_target: Mutex::new(None),
+            worker_signal_epoch: AtomicU64::new(0),
+            worker_signal_lock: Mutex::new(()),
+            worker_signal: Condvar::new(),
+            reader_progress,
+            worker_exited: AtomicBool::new(false),
+            allocated_chunks: AtomicUsize::new(0),
+        }
+    }
+
+    fn release_buffered_chunk(&self) {
+        self.unreserve_buffered_chunk();
+        self.notify_worker();
+    }
+
+    fn unreserve_buffered_chunk(&self) {
+        let _ = self
+            .buffered_chunks
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                Some(count.saturating_sub(1))
+            });
+    }
+
+    fn ready_to_resume(&self) -> bool {
+        let buffered = self.buffered_chunks.load(Ordering::SeqCst);
+        debug_assert!(buffered <= self.buffer_capacity);
+        buffered >= self.resume_chunks || self.finished.load(Ordering::SeqCst)
+    }
+
+    fn notify_worker(&self) {
+        self.worker_signal_epoch.fetch_add(1, Ordering::SeqCst);
+        self.worker_signal.notify_all();
+    }
+
+    fn wait_for_worker_signal(&self, observed_epoch: u64, timeout: Option<Duration>) {
+        let guard = self
+            .worker_signal_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.worker_signal_epoch.load(Ordering::SeqCst) != observed_epoch {
+            return;
+        }
+        if let Some(timeout) = timeout {
+            let _ = self.worker_signal.wait_timeout(guard, timeout);
+        } else {
+            let _guard = self
+                .worker_signal
+                .wait(guard)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
+    fn add_played_media_samples(&self, samples: usize, channels: usize) {
+        let frames = samples / channels.max(1);
+        self.played_media_frames
+            .fetch_add(frames as u64, Ordering::Relaxed);
+    }
+
+    fn set_position_base(&self, position: Duration) {
+        let micros = position.as_micros().min(u64::MAX as u128) as u64;
+        self.position_base_micros.store(micros, Ordering::SeqCst);
+        self.played_media_frames.store(0, Ordering::SeqCst);
+    }
+
+    fn position_seconds(&self) -> f64 {
+        self.position_base_micros.load(Ordering::SeqCst) as f64 / 1_000_000.0
+            + self.played_media_frames.load(Ordering::Relaxed) as f64
+                / self.sample_rate_hz.max(1) as f64
+    }
+}
+
+struct DecodeWorkerExitGuard(Arc<DecodeBufferState>);
+
+impl Drop for DecodeWorkerExitGuard {
+    fn drop(&mut self) {
+        self.0.worker_exited.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A non-blocking rodio Source backed by a dedicated decoder worker. The
+/// CoreAudio/WASAPI callback only performs `try_recv`; file I/O, codec work and
+/// progressive-network waits remain on the worker thread.
+struct ThreadedDecoderSource {
+    receiver: Receiver<DecodedChunk>,
+    recycle_sender: SyncSender<Vec<f32>>,
+    state: Arc<DecodeBufferState>,
+    channels: rodio::ChannelCount,
+    sample_rate: rodio::SampleRate,
+    total_duration: Option<Duration>,
+    current: Option<DecodedChunk>,
+    current_index: usize,
+    silence_remaining: usize,
+}
+
+impl ThreadedDecoderSource {
+    fn release_chunk(&self, chunk: DecodedChunk) {
+        // Keep allocation/deallocation away from the realtime callback during
+        // steady-state playback. The decoder worker reuses these bounded Vecs.
+        let _ = self.recycle_sender.try_send(chunk.samples);
+        self.state.release_buffered_chunk();
+    }
+
+    fn next_ready_chunk(&mut self) -> Option<DecodedChunk> {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(chunk) if chunk.epoch == self.state.seek_epoch.load(Ordering::SeqCst) => {
+                    self.state.underflowing.store(false, Ordering::SeqCst);
+                    return Some(chunk);
+                }
+                Ok(stale) => {
+                    // Stale PCM belongs to a superseded seek epoch.
+                    self.release_chunk(stale);
+                    continue;
+                }
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => {
+                    self.state.finished.store(true, Ordering::SeqCst);
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ThreadedDecoderSource {
+    fn drop(&mut self) {
+        if let Some(chunk) = self.current.take() {
+            self.release_chunk(chunk);
+        }
+        while let Ok(chunk) = self.receiver.try_recv() {
+            self.release_chunk(chunk);
+        }
+        self.state.cancelled.store(true, Ordering::SeqCst);
+        self.state.notify_worker();
+        if let Some(progress) = self.state.reader_progress.as_ref() {
+            progress.interrupt_reader();
+        }
+    }
+}
+
+impl Iterator for ThreadedDecoderSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(chunk) = self.current.as_ref() {
+            if self.current_index < chunk.samples.len() {
+                let sample = chunk.samples[self.current_index];
+                self.current_index += 1;
+                if self.current_index == chunk.samples.len() {
+                    self.state.add_played_media_samples(
+                        chunk.samples.len(),
+                        self.channels.get() as usize,
+                    );
+                    let completed = self.current.take().expect("current chunk must exist");
+                    self.release_chunk(completed);
+                    self.current_index = 0;
+                }
+                return Some(sample);
+            }
+        }
+        if self.silence_remaining > 0 {
+            self.silence_remaining -= 1;
+            return Some(0.0);
+        }
+        if let Some(chunk) = self.next_ready_chunk() {
+            self.current = Some(chunk);
+            return self.next();
+        }
+        if self.state.finished.load(Ordering::SeqCst) || self.state.cancelled.load(Ordering::SeqCst)
+        {
+            return None;
+        }
+        // Emit at most one frame of silence before the event forwarder pauses
+        // the Player. Completing the whole frame preserves channel alignment.
+        self.state.underflowing.store(true, Ordering::SeqCst);
+        self.state.underflow_frames.fetch_add(1, Ordering::SeqCst);
+        self.silence_remaining = self.channels.get() as usize - 1;
+        Some(0.0)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, None)
+    }
+}
+
+impl Source for ThreadedDecoderSource {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.total_duration
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        let epoch = self.state.seek_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(chunk) = self.current.take() {
+            self.release_chunk(chunk);
+        }
+        self.current_index = 0;
+        self.silence_remaining = 0;
+        while let Ok(chunk) = self.receiver.try_recv() {
+            self.release_chunk(chunk);
+        }
+        self.state.finished.store(false, Ordering::SeqCst);
+        self.state.underflowing.store(false, Ordering::SeqCst);
+        self.state.set_position_base(pos);
+        *self
+            .state
+            .seek_target
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((epoch, pos));
+        self.state.notify_worker();
+        if let Some(progress) = self.state.reader_progress.as_ref() {
+            progress.interrupt_reader();
+        }
+        Ok(())
+    }
+}
+
+fn send_decoded_chunk(
+    sender: &SyncSender<DecodedChunk>,
+    state: &DecodeBufferState,
+    mut chunk: DecodedChunk,
+) -> DecodedChunkSend {
+    loop {
+        if state.cancelled.load(Ordering::SeqCst)
+            || state.seek_epoch.load(Ordering::SeqCst) != chunk.epoch
+        {
+            return DecodedChunkSend::Superseded(chunk.samples);
+        }
+        let observed_epoch = state.worker_signal_epoch.load(Ordering::SeqCst);
+        state.buffered_chunks.fetch_add(1, Ordering::SeqCst);
+        match sender.try_send(chunk) {
+            Ok(()) => return DecodedChunkSend::Sent,
+            Err(TrySendError::Full(returned)) => {
+                state.unreserve_buffered_chunk();
+                chunk = returned;
+                state.wait_for_worker_signal(observed_epoch, Some(DECODE_SEND_WAIT_TIMEOUT));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                state.unreserve_buffered_chunk();
+                return DecodedChunkSend::Disconnected;
+            }
+        }
+    }
+}
+
+fn spawn_threaded_decoder<S>(
+    source: S,
+) -> Result<(ThreadedDecoderSource, Arc<DecodeBufferState>), String>
+where
+    S: Source + Send + 'static,
+{
+    spawn_threaded_decoder_with_progress(source, None)
+}
+
+fn spawn_threaded_decoder_with_progress<S>(
+    mut source: S,
+    reader_progress: Option<Arc<DownloadProgress>>,
+) -> Result<(ThreadedDecoderSource, Arc<DecodeBufferState>), String>
+where
+    S: Source + Send + 'static,
+{
+    let channels = source.channels();
+    let sample_rate = source.sample_rate();
+    let total_duration = source.total_duration();
+    let chunks_per_second = (sample_rate.get() as usize).div_ceil(DECODE_CHUNK_FRAMES);
+    let chunk_capacity = (chunks_per_second * DECODE_BUFFER_SECONDS).clamp(8, 512);
+    // The realtime Source keeps one current chunk outside the channel. Reserve
+    // that slot so channel + current never exceeds the advertised hard cap.
+    let channel_capacity = chunk_capacity.saturating_sub(1).max(1);
+    let chunk_samples = DECODE_CHUNK_FRAMES * channels.get() as usize;
+    let (sender, receiver) = sync_channel::<DecodedChunk>(channel_capacity);
+    let (recycle_sender, recycle_receiver) = sync_channel::<Vec<f32>>(chunk_capacity);
+    let state = Arc::new(DecodeBufferState::new(
+        sample_rate,
+        chunk_capacity,
+        reader_progress,
+    ));
+    let worker_state = Arc::clone(&state);
+    let worker_id = NEXT_DECODE_WORKER_ID.fetch_add(1, Ordering::Relaxed);
+    std::thread::Builder::new()
+        .name(format!("cadilume-decode-{worker_id}"))
+        .spawn(move || {
+            let _exit = DecodeWorkerExitGuard(Arc::clone(&worker_state));
+            let mut spare_samples: Option<Vec<f32>> = None;
+            loop {
+                if worker_state.cancelled.load(Ordering::SeqCst) {
+                    return;
+                }
+                let seek = worker_state
+                    .seek_target
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+                if let Some((epoch, position)) = seek {
+                    if worker_state.seek_epoch.load(Ordering::SeqCst) != epoch {
+                        continue;
+                    }
+                    if let Err(error) = source.try_seek(position) {
+                        eprintln!("[原生] 解码线程定位失败：{error}");
+                    }
+                    worker_state.finished.store(false, Ordering::SeqCst);
+                }
+
+                let epoch = worker_state.seek_epoch.load(Ordering::SeqCst);
+                let mut samples = match spare_samples
+                    .take()
+                    .or_else(|| recycle_receiver.try_recv().ok())
+                {
+                    Some(mut samples) => {
+                        samples.clear();
+                        samples
+                    }
+                    None => {
+                        worker_state
+                            .allocated_chunks
+                            .fetch_add(1, Ordering::Relaxed);
+                        Vec::with_capacity(chunk_samples)
+                    }
+                };
+                let mut exhausted = false;
+                while samples.len() < chunk_samples {
+                    if worker_state.cancelled.load(Ordering::SeqCst)
+                        || worker_state.seek_epoch.load(Ordering::SeqCst) != epoch
+                    {
+                        break;
+                    }
+                    match source.next() {
+                        Some(sample) => samples.push(sample),
+                        None => {
+                            exhausted = true;
+                            break;
+                        }
+                    }
+                }
+                if worker_state.seek_epoch.load(Ordering::SeqCst) != epoch {
+                    samples.clear();
+                    spare_samples = Some(samples);
+                    continue;
+                }
+                if samples.is_empty() {
+                    spare_samples = Some(samples);
+                } else {
+                    let channel_count = channels.get() as usize;
+                    let remainder = samples.len() % channel_count;
+                    if remainder != 0 {
+                        samples.resize(samples.len() + channel_count - remainder, 0.0);
+                    }
+                    match send_decoded_chunk(
+                        &sender,
+                        &worker_state,
+                        DecodedChunk { epoch, samples },
+                    ) {
+                        DecodedChunkSend::Sent => {}
+                        DecodedChunkSend::Superseded(mut samples) => {
+                            samples.clear();
+                            spare_samples = Some(samples);
+                            continue;
+                        }
+                        DecodedChunkSend::Disconnected => return,
+                    }
+                }
+                if exhausted {
+                    worker_state.finished.store(true, Ordering::SeqCst);
+                    // Keep the decoder object alive while buffered PCM is still
+                    // owned by the Player. A later backward seek must be able to
+                    // reposition an already-decoded short track instead of
+                    // finding that its worker exited at EOF.
+                    loop {
+                        let observed_epoch =
+                            worker_state.worker_signal_epoch.load(Ordering::SeqCst);
+                        if worker_state.cancelled.load(Ordering::SeqCst)
+                            || worker_state
+                                .seek_target
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .is_some()
+                        {
+                            break;
+                        }
+                        worker_state.wait_for_worker_signal(observed_epoch, None);
+                    }
+                }
+            }
+        })
+        .map_err(|error| format!("启动解码线程失败: {error}"))?;
+
+    let initial = receiver
+        .recv_timeout(DECODE_INITIAL_CHUNK_TIMEOUT)
+        .map_err(|_| {
+            state.cancelled.store(true, Ordering::SeqCst);
+            state.notify_worker();
+            if let Some(progress) = state.reader_progress.as_ref() {
+                progress.interrupt_reader();
+            }
+            "解码线程未能及时产生首个 PCM 缓冲".to_string()
+        })?;
+    Ok((
+        ThreadedDecoderSource {
+            receiver,
+            recycle_sender,
+            state: Arc::clone(&state),
+            channels,
+            sample_rate,
+            total_duration,
+            current: Some(initial),
+            current_index: 0,
+            silence_remaining: 0,
+        },
+        state,
+    ))
 }
 
 /// One download attempt: stream the loopback media URL into `part_path`,
@@ -382,11 +947,17 @@ async fn download_progressive_once(
     let response = tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, client.get(url).send())
         .await
         .map_err(|_| "下载请求超时".to_string())?
-        .map_err(|e| format!("下载请求失败: {e}"))?;
+        .map_err(|error| format!("下载请求失败 ({})", http_error_category(&error)))?;
     if !response.status().is_success() {
         return Err(format!("下载返回 HTTP {}", response.status()));
     }
     let expected_total = response.content_length();
+    if expected_total.is_some_and(|bytes| bytes > AUDIO_CACHE_LIMIT_BYTES) {
+        return Err(format!(
+            "音频文件超过单文件缓存上限（{} MiB）",
+            AUDIO_CACHE_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
     progress
         .expected_len
         .store(expected_total.unwrap_or(0), Ordering::SeqCst);
@@ -406,7 +977,14 @@ async fn download_progressive_once(
         if progress.cancelled.load(Ordering::SeqCst) {
             return Err("下载已取消".to_string());
         }
-        let chunk = chunk.map_err(|e| format!("下载读取失败: {e}"))?;
+        let chunk =
+            chunk.map_err(|error| format!("下载读取失败 ({})", http_error_category(&error)))?;
+        if total.saturating_add(chunk.len() as u64) > AUDIO_CACHE_LIMIT_BYTES {
+            return Err(format!(
+                "音频文件超过单文件缓存上限（{} MiB）",
+                AUDIO_CACHE_LIMIT_BYTES / 1024 / 1024
+            ));
+        }
         file.write_all(&chunk)
             .await
             .map_err(|e| format!("缓存写入失败: {e}"))?;
@@ -423,7 +1001,6 @@ async fn download_progressive_once(
     }
     if let Some(expected) = expected_total {
         if total != expected {
-            let _ = std::fs::remove_file(part_path);
             return Err(format!(
                 "下载不完整：期望 {expected} 字节，实际 {total} 字节"
             ));
@@ -536,8 +1113,13 @@ pub struct NativeAudioEngine {
     pending: Arc<Mutex<Option<PendingTrack>>>,
     current_source: Arc<Mutex<Option<CurrentSource>>>,
     artwork_bytes: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
+    decode_state: Arc<Mutex<Option<Arc<DecodeBufferState>>>>,
+    desired_playing: Arc<AtomicBool>,
+    buffer_paused: Arc<AtomicBool>,
+    accepting_work: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
     last_heartbeat: Arc<Mutex<Option<std::time::Instant>>>,
+    heartbeat_stale_observation: Arc<Mutex<Option<(std::time::Instant, std::time::Instant)>>>,
     /// 真实 PMS 单流限制：同一时刻只允许一条下载，播放优先，预取可被抢占。
     download_permit: Arc<tokio::sync::Semaphore>,
     /// Serializes precache admission. An immediate-next request holds this gate
@@ -566,113 +1148,155 @@ pub enum NativeRepeatMode {
     One,
 }
 
-#[derive(Debug, Default)]
+fn shuffle_indices(indices: &mut [usize]) {
+    let nonce = SHUFFLE_NONCE.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
+    let time_seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut state = nonce ^ time_seed ^ (indices.len() as u64).rotate_left(17);
+    if state == 0 {
+        state = 0xa409_3822_299f_31d0;
+    }
+    for upper in (1..indices.len()).rev() {
+        // xorshift64*: sufficient for queue ordering and avoids adding a
+        // runtime dependency solely for non-cryptographic shuffle behavior.
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        let random = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        indices.swap(upper, (random as usize) % (upper + 1));
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct QueueState {
     tracks: Vec<QueueTrack>,
     current_index: i64,
     repeat: NativeRepeatMode,
     shuffle: bool,
+    /// Remaining, randomly ordered tracks in the current shuffle round.
     bag: Vec<usize>,
-    /// Shuffle playback history (origins), so Previous works even after the
-    /// WebView re-syncs the queue on every load.
+    shuffle_initialized: bool,
+    /// Playback path plus cursor, so Previous -> Next is reversible.
     history: Vec<usize>,
+    history_cursor: Option<usize>,
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            tracks: Vec::new(),
+            current_index: -1,
+            repeat: NativeRepeatMode::Off,
+            shuffle: false,
+            bag: Vec::new(),
+            shuffle_initialized: false,
+            history: Vec::new(),
+            history_cursor: None,
+        }
+    }
 }
 
 impl QueueState {
-    fn next_index(&mut self, natural_ended: bool) -> Option<usize> {
-        if self.tracks.is_empty() {
-            return None;
+    fn current(&self) -> Option<usize> {
+        usize::try_from(self.current_index)
+            .ok()
+            .filter(|index| *index < self.tracks.len())
+    }
+
+    fn sync_shuffle_history(&mut self) {
+        let Some(current) = self.current() else {
+            return;
+        };
+        if self
+            .history_cursor
+            .and_then(|cursor| self.history.get(cursor))
+            == Some(&current)
+        {
+            return;
         }
-        let current = self.current_index.max(0) as usize;
+        if let Some(found) = self.history.iter().rposition(|index| *index == current) {
+            self.history_cursor = Some(found);
+            return;
+        }
+        if let Some(cursor) = self.history_cursor {
+            self.history.truncate(cursor + 1);
+        }
+        self.history.push(current);
+        self.history_cursor = Some(self.history.len() - 1);
+    }
+
+    fn refill_shuffle_bag(&mut self, current: usize) {
+        self.bag = (0..self.tracks.len())
+            .filter(|index| *index != current)
+            .collect();
+        shuffle_indices(&mut self.bag);
+        self.shuffle_initialized = true;
+    }
+
+    fn peek_next_index(&mut self, natural_ended: bool) -> Option<usize> {
+        let current = self.current()?;
         if natural_ended && self.repeat == NativeRepeatMode::One {
             return Some(current);
         }
-        if self.shuffle {
-            if self.history.last() != Some(&current) {
-                self.history.push(current);
-            }
-            if self.history.len() > self.tracks.len() {
-                self.history.remove(0);
-            }
-            let mut available: Vec<usize> = (0..self.tracks.len())
-                .filter(|index| *index != current)
-                .collect();
-            if !available.is_empty() {
-                if let Some(last) = self.bag.last() {
-                    if available.len() > 1 {
-                        available.retain(|index| index != last);
-                    }
-                }
-                let index = available[0];
-                self.bag.push(index);
-                if self.bag.len() > self.tracks.len() {
-                    self.bag.remove(0);
-                }
-                return Some(index);
-            }
-            return None;
+        if !self.shuffle {
+            let next = current + 1;
+            return if next < self.tracks.len() {
+                Some(next)
+            } else if !natural_ended || self.repeat == NativeRepeatMode::All {
+                Some(0)
+            } else {
+                None
+            };
         }
-        let next = current + 1;
-        if next < self.tracks.len() {
-            Some(next)
-        } else if self.repeat == NativeRepeatMode::All {
-            Some(0)
-        } else {
-            None
+
+        self.sync_shuffle_history();
+        if let Some(forward) = self
+            .history_cursor
+            .and_then(|cursor| self.history.get(cursor + 1))
+            .copied()
+        {
+            return Some(forward);
         }
+        if self.tracks.len() == 1 {
+            return (natural_ended && self.repeat == NativeRepeatMode::All).then_some(current);
+        }
+        if !self.shuffle_initialized {
+            self.refill_shuffle_bag(current);
+        } else if self.bag.is_empty() {
+            if natural_ended && self.repeat != NativeRepeatMode::All {
+                return None;
+            }
+            self.refill_shuffle_bag(current);
+        }
+        self.bag.last().copied()
     }
 
-    fn previous_index(&self) -> Option<usize> {
-        if self.tracks.is_empty() {
-            return None;
-        }
-        let current = self.current_index.max(0) as usize;
+    fn next_index(&mut self, natural_ended: bool) -> Option<usize> {
+        let next = self.peek_next_index(natural_ended)?;
+        self.commit_index(next);
+        Some(next)
+    }
+
+    fn previous_index(&mut self) -> Option<usize> {
+        let current = self.current()?;
         if self.shuffle {
-            let mut used: Vec<usize> = self.history.iter().rev().copied().collect();
-            if let Some(found) = used.iter().position(|index| *index == current) {
-                used.remove(found);
+            self.sync_shuffle_history();
+            let cursor = self.history_cursor?;
+            if cursor == 0 {
+                return None;
             }
-            return used.first().copied();
+            let previous_cursor = cursor - 1;
+            let previous = *self.history.get(previous_cursor)?;
+            self.history_cursor = Some(previous_cursor);
+            self.current_index = previous as i64;
+            return Some(previous);
         }
         if current > 0 {
             Some(current - 1)
-        } else if self.repeat != NativeRepeatMode::Off {
-            Some(self.tracks.len() - 1)
-        } else {
-            None
-        }
-    }
-
-    /// Compute the next index for a natural end without mutating the queue.
-    /// `queue_next_source` uses this to verify that the frontend's prefetch
-    /// target still matches the Rust queue decision before appending it.
-    fn peek_next_index(&self, natural_ended: bool) -> Option<usize> {
-        if self.tracks.is_empty() {
-            return None;
-        }
-        let current = self.current_index.max(0) as usize;
-        if natural_ended && self.repeat == NativeRepeatMode::One {
-            return Some(current);
-        }
-        if self.shuffle {
-            let mut available: Vec<usize> = (0..self.tracks.len())
-                .filter(|index| *index != current)
-                .collect();
-            if !available.is_empty() {
-                if let Some(last) = self.bag.last() {
-                    if available.len() > 1 {
-                        available.retain(|index| index != last);
-                    }
-                }
-                return available.first().copied();
-            }
-            return None;
-        }
-        let next = current + 1;
-        if next < self.tracks.len() {
-            Some(next)
         } else if self.repeat == NativeRepeatMode::All {
-            Some(0)
+            Some(self.tracks.len() - 1)
         } else {
             None
         }
@@ -685,20 +1309,29 @@ impl QueueState {
         if index >= self.tracks.len() {
             return;
         }
-        let origin = self.current_index.max(0) as usize;
-        self.current_index = index as i64;
-        if self.shuffle && self.tracks.len() > 1 {
-            if self.history.last() != Some(&origin) {
-                self.history.push(origin);
-            }
-            if self.history.len() > self.tracks.len() {
-                self.history.remove(0);
-            }
-            self.bag.push(index);
-            if self.bag.len() > self.tracks.len() {
-                self.bag.remove(0);
+        let origin = self.current();
+        if self.shuffle && origin != Some(index) {
+            self.sync_shuffle_history();
+            let forward_matches = self
+                .history_cursor
+                .and_then(|cursor| self.history.get(cursor + 1))
+                == Some(&index);
+            if forward_matches {
+                self.history_cursor = self.history_cursor.map(|cursor| cursor + 1);
+            } else {
+                if let Some(position) = self.bag.iter().position(|candidate| *candidate == index) {
+                    self.bag.remove(position);
+                }
+                if let Some(cursor) = self.history_cursor {
+                    self.history.truncate(cursor + 1);
+                } else {
+                    self.history.clear();
+                }
+                self.history.push(index);
+                self.history_cursor = Some(self.history.len() - 1);
             }
         }
+        self.current_index = index as i64;
     }
 
     /// Re-sync the queue snapshot from the WebView. The shuffle history bag is
@@ -717,13 +1350,16 @@ impl QueueState {
                 .iter()
                 .zip(&tracks)
                 .any(|(current, next)| current.rating_key != next.rating_key);
+        let shuffle_changed = self.shuffle != shuffle;
         self.tracks = tracks;
         self.current_index = current_index;
         self.repeat = repeat;
         self.shuffle = shuffle;
-        if tracks_changed {
+        if tracks_changed || shuffle_changed {
             self.bag.clear();
+            self.shuffle_initialized = false;
             self.history.clear();
+            self.history_cursor = None;
         }
     }
 }
@@ -735,18 +1371,51 @@ pub struct NowPlayingMetadata {
     pub artist: Option<String>,
     pub album: Option<String>,
     #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
     pub artwork_url: Option<String>,
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type NowPlayingSignature = (
+    NowPlayingMetadata,
+    Option<u64>,
+    crate::now_playing::PlaybackState,
+    Option<(usize, usize)>,
+);
+
 /// A fully-downloaded next track already appended to the rodio queue.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct PendingTrack {
     index: usize,
+    rating_key: String,
     duration_seconds: Option<f64>,
     source: String,
     cache_key: Option<String>,
     metadata: NowPlayingMetadata,
     started: Arc<AtomicBool>,
+    decode_state: Arc<DecodeBufferState>,
+}
+
+/// Re-index a queued source after a queue edit when it is still the exact
+/// native next decision. Returning `true` means rodio already owns a stale
+/// appended source and the current player must be rebuilt to remove it.
+fn reconcile_pending_track(pending: &mut Option<PendingTrack>, queue: &mut QueueState) -> bool {
+    let Some(queued) = pending.as_mut() else {
+        return false;
+    };
+    let new_index = queue
+        .tracks
+        .iter()
+        .position(|track| track.rating_key == queued.rating_key);
+    if let Some(index) = new_index {
+        if queue.peek_next_index(true) == Some(index) {
+            queued.index = index;
+            return false;
+        }
+    }
+    *pending = None;
+    true
 }
 
 /// Where the current track is being read from, so a device switch can rebuild
@@ -768,10 +1437,7 @@ struct PlaybackSnapshot {
     duration_seconds: Option<f64>,
     metadata: Option<NowPlayingMetadata>,
     source: Option<CurrentSource>,
-    queue_tracks: Vec<QueueTrack>,
-    queue_index: i64,
-    repeat: NativeRepeatMode,
-    shuffle: bool,
+    queue: QueueState,
 }
 
 /// Lazy engine slot so the device stream opens on first use.
@@ -781,6 +1447,15 @@ pub struct NativeAudioEngineSlot {
     preferred_device: Mutex<Option<String>>,
     preferred_volume: Mutex<Option<f32>>,
     output_switch_lock: tokio::sync::Mutex<()>,
+    maintenance_in_progress: AtomicBool,
+}
+
+struct SlotMaintenanceGuard<'a>(&'a AtomicBool);
+
+impl Drop for SlotMaintenanceGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl NativeAudioEngineSlot {
@@ -792,6 +1467,7 @@ impl NativeAudioEngineSlot {
             preferred_device: Mutex::new(None),
             preferred_volume: Mutex::new(None),
             output_switch_lock: tokio::sync::Mutex::new(()),
+            maintenance_in_progress: AtomicBool::new(false),
         }
     }
 
@@ -806,7 +1482,15 @@ impl NativeAudioEngineSlot {
             .and_then(|guard| guard.as_ref().map(Arc::clone))
     }
 
+    fn begin_maintenance(&self) -> SlotMaintenanceGuard<'_> {
+        self.maintenance_in_progress.store(true, Ordering::SeqCst);
+        SlotMaintenanceGuard(&self.maintenance_in_progress)
+    }
+
     fn set_volume(&self, volume: f32) {
+        if !volume.is_finite() {
+            return;
+        }
         let volume = volume.clamp(0.0, 1.0);
         if let Ok(mut preferred) = self.preferred_volume.lock() {
             *preferred = Some(volume);
@@ -829,24 +1513,35 @@ impl NativeAudioEngineSlot {
     /// the engine gate prevents a new precache from appearing mid-cleanup.
     pub(crate) async fn reset_and_clear_cache(&self) -> Result<(), String> {
         let _operation = self.output_switch_lock.lock().await;
-        if let Some(engine) = self.current() {
+        let _maintenance = self.begin_maintenance();
+        let engine = self
+            .inner
+            .lock()
+            .map_err(|_| "原生引擎状态锁失败".to_string())?
+            .take();
+        if let Some(engine) = engine {
+            engine.accepting_work.store(false, Ordering::SeqCst);
             let _precache = engine.precache_gate.lock().await;
-            engine.cancel_active_work_and_wait().await;
-            engine.clear_session_state();
-            clear_audio_cache_files(&self.cache_root).await?;
-        } else {
-            clear_audio_cache_files(&self.cache_root).await?;
+            engine.clear_session_state_and_wait().await;
+            engine.stopped.store(true, Ordering::SeqCst);
         }
+        clear_audio_cache_files(&self.cache_root).await?;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         crate::now_playing::clear();
         Ok(())
     }
 
     pub fn ensure(&self, app: &AppHandle) -> Result<Arc<NativeAudioEngine>, String> {
+        if self.maintenance_in_progress.load(Ordering::SeqCst) {
+            return Err("原生引擎正在切换或清理".to_string());
+        }
         let mut guard = self
             .inner
             .lock()
             .map_err(|_| "原生引擎状态锁失败".to_string())?;
+        if self.maintenance_in_progress.load(Ordering::SeqCst) {
+            return Err("原生引擎正在切换或清理".to_string());
+        }
         if let Some(engine) = guard.as_ref() {
             return Ok(Arc::clone(engine));
         }
@@ -884,6 +1579,7 @@ impl NativeAudioEngineSlot {
         device_name: String,
     ) -> Result<(), String> {
         let _switch = self.output_switch_lock.lock().await;
+        let _maintenance = self.begin_maintenance();
         let old = {
             let guard = self
                 .inner
@@ -897,6 +1593,9 @@ impl NativeAudioEngineSlot {
             };
             Arc::clone(old)
         };
+        if let Some(queued) = old.consume_started_handoff() {
+            publish_started_handoff(&old, &queued, app);
+        }
         let snapshot = old.capture_playback_snapshot();
         let new_engine = Arc::new(
             NativeAudioEngine::new_with_device(self.cache_root.clone(), &device_name)
@@ -905,9 +1604,11 @@ impl NativeAudioEngineSlot {
         // Stop and cancel the old progressive source before the new engine
         // touches the shared cache path. Merely stopping its event forwarder
         // leaves rodio's output stream audible and can corrupt a shared `.part`.
-        let stopped_generation = old.stop_immediately();
+        old.accepting_work.store(false, Ordering::SeqCst);
+        let stopped_generation = old.stop_immediately_and_wait().await;
         if let Err(error) = new_engine.restore_playback_snapshot(&snapshot).await {
-            if old.playback_is_current(stopped_generation) {
+            old.accepting_work.store(true, Ordering::SeqCst);
+            if old.playback_generation.load(Ordering::SeqCst) == stopped_generation {
                 let _ = old.restore_playback_snapshot(&snapshot).await;
             }
             return Err(format!("在新输出设备上恢复播放失败: {error}"));
@@ -920,9 +1621,10 @@ impl NativeAudioEngineSlot {
             .as_ref()
             .map(|current| Arc::ptr_eq(current, &old))
             .unwrap_or(false)
-            && old.playback_is_current(stopped_generation);
+            && old.playback_generation.load(Ordering::SeqCst) == stopped_generation;
         if !still_current {
             new_engine.stop_immediately();
+            old.accepting_work.store(true, Ordering::SeqCst);
             return Err("播放状态在输出设备切换期间发生变化，请重试".to_string());
         }
         old.stopped.store(true, Ordering::SeqCst);
@@ -972,35 +1674,85 @@ fn publish_natural_ended(
     }
 }
 
+fn publish_started_handoff(engine: &NativeAudioEngine, queued: &PendingTrack, app: &AppHandle) {
+    let _ = app.emit(
+        "native-audio://event",
+        serde_json::json!({
+            "type": "track",
+            "index": queued.index,
+            "duration": queued.duration_seconds,
+            "position": engine.playback_position_seconds(),
+        }),
+    );
+}
+
+fn heartbeat_watchdog_should_stop(
+    last_heartbeat: Option<std::time::Instant>,
+    observation: &mut Option<(std::time::Instant, std::time::Instant)>,
+    renderer_visible: bool,
+    now: std::time::Instant,
+) -> bool {
+    let Some(last_heartbeat) = last_heartbeat else {
+        *observation = None;
+        return false;
+    };
+    if !renderer_visible || now.saturating_duration_since(last_heartbeat) < HEARTBEAT_STALL_TIMEOUT
+    {
+        *observation = None;
+        return false;
+    }
+    match *observation {
+        Some((observed_heartbeat, first_seen)) if observed_heartbeat == last_heartbeat => {
+            now.saturating_duration_since(first_seen) >= HEARTBEAT_STALL_CONFIRMATION
+        }
+        _ => {
+            *observation = Some((last_heartbeat, now));
+            false
+        }
+    }
+}
+
+fn renderer_requires_heartbeat(is_visible: bool, is_minimized: bool) -> bool {
+    is_visible && !is_minimized
+}
+
 impl NativeAudioEngine {
     #[allow(dead_code)]
     pub fn new(cache_root: PathBuf) -> anyhow::Result<Self> {
         Self::new_with_device(cache_root, "")
     }
 
-    fn new_with_device(cache_root: PathBuf, device_name: &str) -> anyhow::Result<Self> {
+    fn new_with_device(cache_root: PathBuf, device_id: &str) -> anyhow::Result<Self> {
         use cpal::traits::{DeviceTrait, HostTrait};
-        let builder = if device_name.is_empty() {
+        let builder = if device_id.is_empty() {
             DeviceSinkBuilder::from_default_device()
                 .map_err(|e| anyhow::anyhow!("打开默认音频设备失败: {e}"))?
         } else {
             let host = cpal::default_host();
-            let device = host
-                .output_devices()
-                .map_err(|e| anyhow::anyhow!("枚举输出设备失败: {e}"))?
-                .find(|device| {
-                    device
-                        .description()
-                        .map(|description| description.name() == device_name)
-                        .unwrap_or(false)
+            let stable_id = device_id.parse::<cpal::DeviceId>().ok();
+            let device = stable_id
+                .as_ref()
+                .and_then(|id| host.device_by_id(id))
+                .or_else(|| {
+                    // One-time migration for preferences written before cpal's
+                    // stable DeviceId replaced the human-readable name.
+                    host.output_devices().ok()?.find(|device| {
+                        device
+                            .description()
+                            .map(|description| description.name() == device_id)
+                            .unwrap_or(false)
+                    })
                 })
-                .ok_or_else(|| anyhow::anyhow!("找不到输出设备: {device_name}"))?;
+                .ok_or_else(|| anyhow::anyhow!("找不到所选输出设备"))?;
             DeviceSinkBuilder::from_device(device)
                 .map_err(|e| anyhow::anyhow!("打开所选输出设备失败: {e}"))?
         };
-        let sink = builder
+        let mut sink = builder
             .open_stream()
             .map_err(|e| anyhow::anyhow!("音频流启动失败: {e}"))?;
+        // Engine replacement and app shutdown intentionally drop this owned
+        // stream after playback has already been stopped.
+        sink.log_on_drop(false);
         let player = Arc::new(Player::connect_new(sink.mixer()));
         // 引擎不做默认音量：rodio Player 默认 1.0（100%），实际音量由前端
         // 缓存记录并在加载时同步（见 loadNativeTrack 的 nativeAudioSetVolume）。
@@ -1019,8 +1771,13 @@ impl NativeAudioEngine {
             pending: Arc::new(Mutex::new(None)),
             current_source: Arc::new(Mutex::new(None)),
             artwork_bytes: Arc::new(Mutex::new(None)),
+            decode_state: Arc::new(Mutex::new(None)),
+            desired_playing: Arc::new(AtomicBool::new(false)),
+            buffer_paused: Arc::new(AtomicBool::new(false)),
+            accepting_work: Arc::new(AtomicBool::new(true)),
             stopped: Arc::new(AtomicBool::new(false)),
             last_heartbeat: Arc::new(Mutex::new(None)),
+            heartbeat_stale_observation: Arc::new(Mutex::new(None)),
             download_permit: Arc::new(tokio::sync::Semaphore::new(1)),
             precache_gate: tokio::sync::Mutex::new(()),
             active_download: Arc::new(Mutex::new(None)),
@@ -1036,21 +1793,19 @@ impl NativeAudioEngine {
             .clone()
     }
 
-    fn cancel_active_work(&self) {
-        if let Ok(mut progress) = self.active_progress.lock() {
-            if let Some(progress) = progress.take() {
-                progress.cancel();
-            }
-        }
-        if let Ok(mut active) = self.active_download.lock() {
-            if let Some(handle) = active.take() {
-                handle.abort();
-            }
-        }
-        self.cancel_active_precache();
+    /// Media time excludes the silence emitted while a decoder worker is
+    /// temporarily empty. Rodio's own position counts every output sample,
+    /// which would otherwise make lyrics, scrobbling and system media state
+    /// drift ahead after repeated network underflows.
+    fn playback_position_seconds(&self) -> f64 {
+        self.decode_state
+            .lock()
+            .ok()
+            .and_then(|state| state.as_ref().map(|state| state.position_seconds()))
+            .unwrap_or_else(|| self.player().get_pos().as_secs_f64())
     }
 
-    async fn cancel_active_work_and_wait(&self) {
+    fn take_active_work(&self) -> Vec<tauri::async_runtime::JoinHandle<()>> {
         let mut handles = Vec::new();
         if let Ok(mut progress) = self.active_progress.lock() {
             if let Some(progress) = progress.take() {
@@ -1067,12 +1822,11 @@ impl NativeAudioEngine {
             if let Some(active) = active.take() {
                 active.progress.cancel();
                 active.handle.abort();
+                let _ = std::fs::remove_file(active.part_path);
                 handles.push(active.handle);
             }
         }
-        for handle in handles {
-            let _ = handle.await;
-        }
+        handles
     }
 
     fn cancel_active_precache(&self) {
@@ -1081,6 +1835,19 @@ impl NativeAudioEngine {
                 active.progress.cancel();
                 active.handle.abort();
                 let _ = std::fs::remove_file(active.part_path);
+            }
+        }
+    }
+
+    fn cancel_active_download(&self) {
+        if let Ok(mut progress) = self.active_progress.lock() {
+            if let Some(progress) = progress.take() {
+                progress.cancel();
+            }
+        }
+        if let Ok(mut active) = self.active_download.lock() {
+            if let Some(handle) = active.take() {
+                handle.abort();
             }
         }
     }
@@ -1113,7 +1880,7 @@ impl NativeAudioEngine {
         previous.stop();
     }
 
-    fn begin_playback_transition(&self) -> u64 {
+    fn prepare_playback_transition(&self) -> (u64, Vec<tauri::async_runtime::JoinHandle<()>>) {
         let _transition = self
             .transition_lock
             .lock()
@@ -1121,24 +1888,54 @@ impl NativeAudioEngine {
         let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.loaded.store(false, Ordering::SeqCst);
         self.ended_sent.store(true, Ordering::SeqCst);
+        self.desired_playing.store(false, Ordering::SeqCst);
+        self.buffer_paused.store(false, Ordering::SeqCst);
+        if let Ok(mut observation) = self.heartbeat_stale_observation.lock() {
+            *observation = None;
+        }
         if let Ok(mut pending) = self.pending.lock() {
             *pending = None;
         }
-        self.cancel_active_work();
+        if let Ok(mut decode_state) = self.decode_state.lock() {
+            *decode_state = None;
+        }
+        let handles = self.take_active_work();
         self.replace_player();
+        (generation, handles)
+    }
+
+    fn begin_playback_transition(&self) -> u64 {
+        let (generation, handles) = self.prepare_playback_transition();
+        drop(handles);
         generation
     }
 
     fn playback_is_current(&self, generation: u64) -> bool {
-        self.playback_generation.load(Ordering::SeqCst) == generation
+        self.accepting_work.load(Ordering::SeqCst)
+            && self.playback_generation.load(Ordering::SeqCst) == generation
+    }
+
+    fn ensure_accepting_work(&self) -> Result<(), String> {
+        self.accepting_work
+            .load(Ordering::SeqCst)
+            .then_some(())
+            .ok_or_else(|| "原生引擎正在切换或清理".to_string())
     }
 
     fn stop_immediately(&self) -> u64 {
         self.begin_playback_transition()
     }
 
-    fn clear_session_state(&self) {
-        self.begin_playback_transition();
+    async fn stop_immediately_and_wait(&self) -> u64 {
+        let (generation, handles) = self.prepare_playback_transition();
+        for handle in handles {
+            let _ = handle.await;
+        }
+        generation
+    }
+
+    async fn clear_session_state_and_wait(&self) {
+        self.stop_immediately_and_wait().await;
         self.artwork_generation.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut metadata) = self.metadata.lock() {
             *metadata = None;
@@ -1183,17 +1980,17 @@ impl NativeAudioEngine {
         let current_artwork_generation = Arc::clone(&self.artwork_generation);
         let url = artwork_url.to_string();
         tauri::async_runtime::spawn(async move {
-            let Ok(client) = reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-            else {
+            let Ok(client) = loopback_http_client(Some(Duration::from_secs(10))) else {
                 eprintln!("[播放] NowPlaying 封面客户端创建失败");
                 return;
             };
             let response = match client.get(&url).send().await {
                 Ok(response) => response,
                 Err(error) => {
-                    eprintln!("[播放] NowPlaying 封面读取失败：{error}");
+                    eprintln!(
+                        "[播放] NowPlaying 封面读取失败：{}",
+                        http_error_category(&error)
+                    );
                     return;
                 }
             };
@@ -1220,7 +2017,10 @@ impl NativeAudioEngine {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        eprintln!("[播放] NowPlaying 封面响应读取失败：{error}");
+                        eprintln!(
+                            "[播放] NowPlaying 封面响应读取失败：{}",
+                            http_error_category(&error)
+                        );
                         return;
                     }
                 };
@@ -1262,10 +2062,7 @@ impl NativeAudioEngine {
         let playback_generation = Arc::clone(&self.playback_generation);
         let url = artwork_url.to_string();
         tauri::async_runtime::spawn(async move {
-            let Ok(client) = reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-            else {
+            let Ok(client) = loopback_http_client(Some(Duration::from_secs(10))) else {
                 return;
             };
             let outcome = client.head(&url).send().await;
@@ -1278,13 +2075,22 @@ impl NativeAudioEngine {
                     "[播放] NowPlaying 预排封面票据激活失败：HTTP {}",
                     response.status()
                 ),
-                Err(error) => eprintln!("[播放] NowPlaying 预排封面票据激活失败：{error}"),
+                Err(error) => eprintln!(
+                    "[播放] NowPlaying 预排封面票据激活失败：{}",
+                    http_error_category(&error)
+                ),
             }
         });
     }
 
     /// Load a local media file and start playing it.
+    #[cfg(test)]
     pub fn load_and_play(&self, path: &str) -> Result<usize, String> {
+        self.load_file(path, true)
+    }
+
+    fn load_file(&self, path: &str, start_playing: bool) -> Result<usize, String> {
+        self.ensure_accepting_work()?;
         let generation = self.begin_playback_transition();
         let metadata = self
             .metadata
@@ -1301,6 +2107,7 @@ impl NativeAudioEngine {
                 cache_key: None,
                 metadata,
             },
+            start_playing,
         )
     }
 
@@ -1309,6 +2116,7 @@ impl NativeAudioEngine {
         path: &str,
         generation: u64,
         current_source: CurrentSource,
+        start_playing: bool,
     ) -> Result<usize, String> {
         let file = std::fs::File::open(path).map_err(|e| format!("打开媒体文件失败: {e}"))?;
         let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
@@ -1319,7 +2127,16 @@ impl NativeAudioEngine {
             .with_byte_len(len)
             .build()
             .map_err(|e| format!("媒体解码失败: {e}"))?;
-        let total = decoder.total_duration().map(|d| d.as_secs_f64());
+        let total = decoder
+            .total_duration()
+            .map(|duration| duration.as_secs_f64())
+            .or_else(|| {
+                current_source
+                    .metadata
+                    .duration_ms
+                    .map(|milliseconds| milliseconds as f64 / 1000.0)
+            });
+        let (decoder, decode_state) = spawn_threaded_decoder(decoder)?;
         let player = self
             .player
             .lock()
@@ -1335,8 +2152,21 @@ impl NativeAudioEngine {
             .duration_seconds
             .lock()
             .map_err(|_| "时长状态锁失败".to_string())? = total;
+        *self
+            .decode_state
+            .lock()
+            .map_err(|_| "解码缓冲状态锁失败".to_string())? = Some(decode_state);
+        if !start_playing {
+            // Pause before attaching the source so restoring a paused session or
+            // changing devices cannot leak even a single audible callback.
+            player.pause();
+        }
         player.append(decoder);
-        player.play();
+        if start_playing {
+            player.play();
+        }
+        self.desired_playing.store(start_playing, Ordering::SeqCst);
+        self.buffer_paused.store(false, Ordering::SeqCst);
         self.loaded.store(true, Ordering::SeqCst);
         self.ended_sent.store(false, Ordering::SeqCst);
         eprintln!(
@@ -1350,12 +2180,24 @@ impl NativeAudioEngine {
     /// Stream a loopback media URL into the local cache and start playing
     /// once the head is available (progressive download, kithara-stream
     /// style). Completed downloads are promoted to a reusable cache file.
+    #[cfg(test)]
     pub async fn load_cached_and_play(
         &self,
         source: &str,
         cache_key: Option<String>,
         metadata: Option<NowPlayingMetadata>,
     ) -> Result<usize, String> {
+        self.load_cached(source, cache_key, metadata, true).await
+    }
+
+    async fn load_cached(
+        &self,
+        source: &str,
+        cache_key: Option<String>,
+        metadata: Option<NowPlayingMetadata>,
+        start_playing: bool,
+    ) -> Result<usize, String> {
+        self.ensure_accepting_work()?;
         let generation = self.begin_playback_transition();
         let metadata_for_source = metadata.clone();
         *self
@@ -1376,6 +2218,7 @@ impl NativeAudioEngine {
                     cache_key,
                     metadata: metadata_for_source.unwrap_or_default(),
                 },
+                start_playing,
             );
         }
         // Foreground playback owns admission priority over all speculative
@@ -1397,6 +2240,7 @@ impl NativeAudioEngine {
                     cache_key: cache_key.clone(),
                     metadata: metadata_for_source.clone().unwrap_or_default(),
                 },
+                start_playing,
             ) {
                 Ok(len) => {
                     eprintln!("[原生] 命中完整缓存 key={key}");
@@ -1418,7 +2262,7 @@ impl NativeAudioEngine {
         let part_for_task = part_path.clone();
         let final_for_task = final_path.clone();
         let source_for_task = source.to_string();
-        let client = reqwest::Client::new();
+        let client = loopback_http_client(None)?;
         if !self.playback_is_current(generation) {
             return Err("播放加载已被新操作替代".to_string());
         }
@@ -1486,12 +2330,7 @@ impl NativeAudioEngine {
         if progress.downloaded.load(Ordering::SeqCst) < MIN_PROGRESSIVE_PRELOAD_BYTES
             && !progress.finished.load(Ordering::SeqCst)
         {
-            progress.cancel();
-            if let Ok(mut active) = self.active_download.lock() {
-                if let Some(handle) = active.take() {
-                    handle.abort();
-                }
-            }
+            self.cancel_active_download();
             return Err("下载歌曲超时，无法开始播放".to_string());
         }
         if progress.failed.load(Ordering::SeqCst) {
@@ -1507,20 +2346,50 @@ impl NativeAudioEngine {
                     cache_key,
                     metadata: metadata_for_source.unwrap_or_default(),
                 },
+                start_playing,
             );
         }
-        let file = std::fs::File::open(&part_path).map_err(|e| format!("打开渐进缓存失败: {e}"))?;
+        let file = match std::fs::File::open(&part_path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.cancel_active_download();
+                return Err(format!("打开渐进缓存失败: {error}"));
+            }
+        };
         let reader = ProgressiveFile {
             file,
             progress: Arc::clone(&progress),
+            reader_interrupt_epoch: progress.reader_interrupt_epoch.load(Ordering::SeqCst),
         };
         let expected_len = progress.expected_len.load(Ordering::SeqCst);
         let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
         if expected_len > 0 {
             builder = builder.with_byte_len(expected_len);
         }
-        let decoder = builder.build().map_err(|e| format!("媒体解码失败: {e}"))?;
-        let total = decoder.total_duration().map(|d| d.as_secs_f64());
+        let decoder = match builder.build() {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                self.cancel_active_download();
+                return Err(format!("媒体解码失败: {error}"));
+            }
+        };
+        let total = decoder
+            .total_duration()
+            .map(|duration| duration.as_secs_f64())
+            .or_else(|| {
+                metadata_for_source
+                    .as_ref()
+                    .and_then(|metadata| metadata.duration_ms)
+                    .map(|milliseconds| milliseconds as f64 / 1000.0)
+            });
+        let (decoder, decode_state) =
+            match spawn_threaded_decoder_with_progress(decoder, Some(Arc::clone(&progress))) {
+                Ok(threaded) => threaded,
+                Err(error) => {
+                    self.cancel_active_download();
+                    return Err(error);
+                }
+            };
         let player = self
             .player
             .lock()
@@ -1539,8 +2408,19 @@ impl NativeAudioEngine {
             .duration_seconds
             .lock()
             .map_err(|_| "时长状态锁失败".to_string())? = total;
+        *self
+            .decode_state
+            .lock()
+            .map_err(|_| "解码缓冲状态锁失败".to_string())? = Some(decode_state);
+        if !start_playing {
+            player.pause();
+        }
         player.append(decoder);
-        player.play();
+        if start_playing {
+            player.play();
+        }
+        self.desired_playing.store(start_playing, Ordering::SeqCst);
+        self.buffer_paused.store(false, Ordering::SeqCst);
         self.loaded.store(true, Ordering::SeqCst);
         self.ended_sent.store(false, Ordering::SeqCst);
         eprintln!(
@@ -1566,6 +2446,7 @@ impl NativeAudioEngine {
         cache_key: Option<String>,
         rate_limit_bytes_per_sec: Option<u64>,
     ) -> Result<(), String> {
+        self.ensure_accepting_work()?;
         let generation = self.playback_generation.load(Ordering::SeqCst);
         if !(source.starts_with("http://") || source.starts_with("https://")) {
             return Ok(());
@@ -1594,9 +2475,7 @@ impl NativeAudioEngine {
             .lock()
             .map_err(|_| "预缓存任务状态锁失败".to_string())?
             .as_ref()
-            .filter(|active| {
-                active.cache_key == key && !(immediate_next && active.rate_limited)
-            })
+            .filter(|active| active.cache_key == key && !(immediate_next && active.rate_limited))
             .map(|active| active.completion.clone());
         if let Some(completion) = shared_completion {
             drop(gate);
@@ -1622,13 +2501,23 @@ impl NativeAudioEngine {
         if !self.playback_is_current(generation) {
             return Ok(());
         }
+        // The previous owner can finish between the admission recheck and the
+        // permit handoff. Avoid issuing a duplicate request or replacing an
+        // already-committed file (notably invalid on Windows).
+        if std::fs::metadata(&final_path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+        {
+            touch_cache_file(&final_path);
+            return Ok(());
+        }
         let _ = std::fs::remove_file(&part_path);
         let progress = DownloadProgress::new();
         let progress_task = Arc::clone(&progress);
         let part_for_task = part_path.clone();
         let final_for_task = final_path;
         let source_for_task = source.to_string();
-        let client = reqwest::Client::new();
+        let client = loopback_http_client(None)?;
         let (completion_tx, completion_rx) =
             tokio::sync::watch::channel::<Option<Result<(), String>>>(None);
         let task = tauri::async_runtime::spawn(async move {
@@ -1689,6 +2578,7 @@ impl NativeAudioEngine {
         cache_key: Option<String>,
         metadata: Option<NowPlayingMetadata>,
     ) -> Result<(), String> {
+        self.ensure_accepting_work()?;
         let generation = self.playback_generation.load(Ordering::SeqCst);
         if !self.loaded.load(Ordering::SeqCst) {
             return Err("当前没有正在播放的曲目".to_string());
@@ -1703,7 +2593,7 @@ impl NativeAudioEngine {
         }
         let index = usize::try_from(index).map_err(|_| "无效的曲目序号".to_string())?;
         let track = {
-            let queue = self
+            let mut queue = self
                 .queue
                 .lock()
                 .map_err(|_| "队列状态锁失败".to_string())?;
@@ -1731,7 +2621,11 @@ impl NativeAudioEngine {
             .with_byte_len(len)
             .build()
             .map_err(|e| format!("预排解码失败: {e}"))?;
-        let total = decoder.total_duration().map(|d| d.as_secs_f64());
+        let decoded_total = decoder
+            .total_duration()
+            .map(|duration| duration.as_secs_f64());
+        let (decoder, decode_state) =
+            spawn_threaded_decoder(decoder).map_err(|error| format!("预排{error}"))?;
         let mut metadata = metadata.unwrap_or_default();
         if metadata.title.as_deref().unwrap_or("").is_empty() {
             metadata.title = Some(track.title);
@@ -1742,6 +2636,11 @@ impl NativeAudioEngine {
         if metadata.album.as_deref().unwrap_or("").is_empty() {
             metadata.album = Some(track.album);
         }
+        let total = decoded_total.or_else(|| {
+            metadata
+                .duration_ms
+                .map(|milliseconds| milliseconds as f64 / 1000.0)
+        });
         let artwork_url = metadata.artwork_url.clone().unwrap_or_default();
         let started = Arc::new(AtomicBool::new(false));
         let marker = HandoffMarker {
@@ -1765,11 +2664,13 @@ impl NativeAudioEngine {
             .lock()
             .map_err(|_| "预排状态锁失败".to_string())? = Some(PendingTrack {
             index,
+            rating_key: track.rating_key,
             duration_seconds: total,
             source: source.to_string(),
             cache_key,
             metadata,
             started,
+            decode_state,
         });
         eprintln!(
             "[原生] 已预排下一首 index={index} 时长={total:?} 队列={}",
@@ -1781,25 +2682,65 @@ impl NativeAudioEngine {
         Ok(())
     }
 
+    /// Replace an already-appended next source when its cache identity changed
+    /// (for example after switching stream quality). An identical request is
+    /// idempotent; a different request rebuilds the current source first because
+    /// rodio cannot remove only the tail of an existing Player queue.
+    async fn queue_next_source_replacing(
+        &self,
+        index: i64,
+        source: &str,
+        cache_key: Option<String>,
+        metadata: Option<NowPlayingMetadata>,
+    ) -> Result<(), String> {
+        let requested_index = usize::try_from(index).map_err(|_| "无效的曲目序号".to_string())?;
+        let replace = {
+            let mut pending = self
+                .pending
+                .lock()
+                .map_err(|_| "预排状态锁失败".to_string())?;
+            if let Some(queued) = pending.as_ref() {
+                let same_identity = queued.index == requested_index
+                    && match (&queued.cache_key, &cache_key) {
+                        (Some(current), Some(requested)) => current == requested,
+                        _ => queued.source == source,
+                    };
+                if same_identity {
+                    return Ok(());
+                }
+                if queued.started.load(Ordering::SeqCst) {
+                    return Err("下一首已经开始交接，请在交接完成后重试".to_string());
+                }
+                *pending = None;
+                true
+            } else {
+                false
+            }
+        };
+        if replace {
+            self.rebuild_after_pending_queue_change().await?;
+        }
+        self.queue_next_source(index, source, cache_key, metadata)
+    }
+
     /// Consume a queued source whose gapless handoff has started (the previous
     /// track exhausted and rodio pulled the first sample of the queued one).
     /// Commits it as the current track and returns it so the caller can
     /// publish the `track` event.
     fn consume_started_handoff(&self) -> Option<PendingTrack> {
-        let queued = self
-            .pending
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        let Some(queued) = queued else {
-            return None;
-        };
-        if !queued.started.load(Ordering::SeqCst) {
-            if let Ok(mut pending) = self.pending.lock() {
-                *pending = Some(queued);
+        let queued = {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !pending
+                .as_ref()
+                .is_some_and(|queued| queued.started.load(Ordering::SeqCst))
+            {
+                return None;
             }
-            return None;
-        }
+            pending.take()?
+        };
         if let Ok(mut queue_guard) = self.queue.lock() {
             queue_guard.commit_index(queued.index);
         }
@@ -1816,6 +2757,10 @@ impl NativeAudioEngine {
                 metadata: queued.metadata.clone(),
             });
         }
+        if let Ok(mut decode_state) = self.decode_state.lock() {
+            *decode_state = Some(Arc::clone(&queued.decode_state));
+        }
+        self.buffer_paused.store(false, Ordering::SeqCst);
         let generation = self.playback_generation.load(Ordering::SeqCst);
         self.start_artwork_fetch(
             queued.metadata.artwork_url.as_deref().unwrap_or(""),
@@ -1844,21 +2789,14 @@ impl NativeAudioEngine {
 
     /// Capture everything needed to rebuild the player on another device.
     fn capture_playback_snapshot(&self) -> PlaybackSnapshot {
-        let queue_state = self
+        let queue = self
             .queue
             .lock()
-            .map(|guard| {
-                (
-                    guard.tracks.clone(),
-                    guard.current_index,
-                    guard.repeat,
-                    guard.shuffle,
-                )
-            })
+            .map(|guard| guard.clone())
             .unwrap_or_default();
         PlaybackSnapshot {
-            playing: !self.player().is_paused() && !self.player().empty(),
-            position: self.player().get_pos().as_secs_f64(),
+            playing: self.desired_playing.load(Ordering::SeqCst) && !self.player().empty(),
+            position: self.playback_position_seconds(),
             volume: self.player().volume(),
             duration_seconds: self
                 .duration_seconds
@@ -1875,21 +2813,14 @@ impl NativeAudioEngine {
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or(None),
-            queue_tracks: queue_state.0,
-            queue_index: queue_state.1,
-            repeat: queue_state.2,
-            shuffle: queue_state.3,
+            queue,
         }
     }
 
     /// Restore a captured snapshot on a freshly built engine (device switch).
     async fn restore_playback_snapshot(&self, snapshot: &PlaybackSnapshot) -> Result<(), String> {
         if let Ok(mut queue) = self.queue.lock() {
-            queue.tracks = snapshot.queue_tracks.clone();
-            queue.current_index = snapshot.queue_index;
-            queue.repeat = snapshot.repeat;
-            queue.shuffle = snapshot.shuffle;
-            queue.bag.clear();
+            *queue = snapshot.queue.clone();
         }
         if let Ok(mut metadata) = self.metadata.lock() {
             *metadata = snapshot.metadata.clone();
@@ -1900,23 +2831,78 @@ impl NativeAudioEngine {
         self.player().set_volume(snapshot.volume);
         if let Some(source) = snapshot.source.as_ref() {
             if source.source.starts_with("http://") || source.source.starts_with("https://") {
-                self.load_cached_and_play(
+                self.load_cached(
                     &source.source,
                     source.cache_key.clone(),
                     Some(source.metadata.clone()),
+                    snapshot.playing,
                 )
                 .await?;
             } else {
-                self.load_and_play(&source.source)?;
+                self.load_file(&source.source, snapshot.playing)?;
             }
-            if snapshot.position > 0.5 {
+            if snapshot.position > 0.0 {
                 let _ = self
                     .player()
                     .try_seek(Duration::from_secs_f64(snapshot.position));
             }
             if !snapshot.playing {
                 self.player().pause();
+                self.desired_playing.store(false, Ordering::SeqCst);
             }
+        }
+        Ok(())
+    }
+
+    async fn rebuild_after_pending_queue_change(&self) -> Result<(), String> {
+        let snapshot = self.capture_playback_snapshot();
+        let generation = self.stop_immediately_and_wait().await;
+        if self.playback_generation.load(Ordering::SeqCst) != generation {
+            return Err("播放状态在队列同步期间发生变化".to_string());
+        }
+        self.restore_playback_snapshot(&snapshot).await
+    }
+
+    /// Apply a queue mutation while preserving a still-valid gapless source.
+    /// If the appended rodio source no longer matches the native next decision,
+    /// rebuild the current player from its media-time snapshot so stale PCM can
+    /// never become audible after the queue edit.
+    async fn apply_queue_update<F>(&self, app: Option<&AppHandle>, update: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut QueueState),
+    {
+        // The output callback can begin a gapless handoff just before a queue
+        // mutation reaches Rust. Settle it first so a stale WebView index cannot
+        // rebuild or resume the previous track.
+        let mut started_handoff = self.consume_started_handoff();
+        let rebuild = {
+            // Keep this order aligned with the event forwarder and handoff path.
+            let mut pending = self
+                .pending
+                .lock()
+                .map_err(|_| "预排状态锁失败".to_string())?;
+            let mut queue = self
+                .queue
+                .lock()
+                .map_err(|_| "队列状态锁失败".to_string())?;
+            update(&mut queue);
+            if let Some(queued) = started_handoff.as_mut() {
+                if let Some(index) = queue
+                    .tracks
+                    .iter()
+                    .position(|track| track.rating_key == queued.rating_key)
+                {
+                    queued.index = index;
+                    queue.commit_index(index);
+                }
+            }
+            reconcile_pending_track(&mut pending, &mut queue)
+        };
+        if rebuild {
+            self.rebuild_after_pending_queue_change().await?;
+        }
+        if let (Some(app), Some(queued)) = (app, started_handoff.as_ref()) {
+            publish_started_handoff(self, queued, app);
         }
         Ok(())
     }
@@ -1927,12 +2913,7 @@ impl NativeAudioEngine {
         let app_for_task = app.clone();
         let mut last_position = -1.0f64;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let mut last_now_playing_signature: Option<(
-            NowPlayingMetadata,
-            Option<u64>,
-            crate::now_playing::PlaybackState,
-            Option<(usize, usize)>,
-        )> = None;
+        let mut last_now_playing_signature: Option<NowPlayingSignature> = None;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let mut last_now_playing_at: Option<std::time::Instant> = None;
         // 引擎可能在同步 Tauri 命令（native_queue_set 等）里首次创建，
@@ -1945,7 +2926,7 @@ impl NativeAudioEngine {
                     break;
                 }
                 let player = engine.player();
-                let position = player.get_pos().as_secs_f64();
+                let mut position = engine.playback_position_seconds();
                 // Commit a sample-level handoff before publishing system media
                 // state, otherwise one poll can expose track B's position with
                 // track A's metadata and artwork.
@@ -1962,25 +2943,63 @@ impl NativeAudioEngine {
                     .unwrap_or((false, false));
                 if engine.loaded.load(Ordering::SeqCst) && pending_exists && pending_started {
                     if let Some(queued) = engine.consume_started_handoff() {
-                        let _ = app_for_task.emit(
-                            "native-audio://event",
-                            serde_json::json!({
-                                "type": "track",
-                                "index": queued.index,
-                                "duration": queued.duration_seconds,
-                                "position": position,
-                            }),
-                        );
+                        position = engine.playback_position_seconds();
+                        publish_started_handoff(&engine, &queued, &app_for_task);
                         last_position = position;
                         if player.empty() {
                             publish_natural_ended(&engine.queue, &engine.ended_sent, &app_for_task);
                             continue;
                         }
                     }
-                } else if engine.loaded.load(Ordering::SeqCst) && pending_exists && player.empty() {
-                    if engine.consume_failed_handoff().is_some() {
-                        publish_natural_ended(&engine.queue, &engine.ended_sent, &app_for_task);
-                        continue;
+                } else if engine.loaded.load(Ordering::SeqCst)
+                    && pending_exists
+                    && player.empty()
+                    && engine.consume_failed_handoff().is_some()
+                {
+                    publish_natural_ended(&engine.queue, &engine.ended_sent, &app_for_task);
+                    continue;
+                }
+                let decode_state = engine
+                    .decode_state
+                    .lock()
+                    .map(|state| state.clone())
+                    .unwrap_or(None);
+                if let Some(decode_state) = decode_state {
+                    let desired = engine.desired_playing.load(Ordering::SeqCst);
+                    let finished = decode_state.finished.load(Ordering::SeqCst);
+                    let buffered_chunks = decode_state.buffered_chunks.load(Ordering::SeqCst);
+                    let underflowing = decode_state.underflowing.load(Ordering::SeqCst);
+                    if engine.buffer_paused.load(Ordering::SeqCst) {
+                        if !desired {
+                            engine.buffer_paused.store(false, Ordering::SeqCst);
+                            let _ = app_for_task.emit(
+                                "native-audio://event",
+                                serde_json::json!({ "type": "buffering", "buffering": false }),
+                            );
+                        } else if decode_state.ready_to_resume() {
+                            player.play();
+                            engine.buffer_paused.store(false, Ordering::SeqCst);
+                            let _ = app_for_task.emit(
+                                "native-audio://event",
+                                serde_json::json!({ "type": "buffering", "buffering": false }),
+                            );
+                        }
+                    } else if desired
+                        && !player.is_paused()
+                        && underflowing
+                        && buffered_chunks == 0
+                        && !finished
+                    {
+                        player.pause();
+                        engine.buffer_paused.store(true, Ordering::SeqCst);
+                        eprintln!(
+                            "[原生] PCM 缓冲欠载，等待解码线程恢复（累计帧={}）",
+                            decode_state.underflow_frames.load(Ordering::SeqCst),
+                        );
+                        let _ = app_for_task.emit(
+                            "native-audio://event",
+                            serde_json::json!({ "type": "buffering", "buffering": true }),
+                        );
                     }
                 }
                 let duration_value = engine
@@ -1993,7 +3012,7 @@ impl NativeAudioEngine {
                     let playback_state = if !engine.loaded.load(Ordering::SeqCst) || player.empty()
                     {
                         crate::now_playing::PlaybackState::Stopped
-                    } else if player.is_paused() {
+                    } else if !engine.desired_playing.load(Ordering::SeqCst) {
                         crate::now_playing::PlaybackState::Paused
                     } else {
                         crate::now_playing::PlaybackState::Playing
@@ -2044,21 +3063,49 @@ impl NativeAudioEngine {
                     && player.empty()
                     && position > 0.05;
                 if ended {
+                    engine.desired_playing.store(false, Ordering::SeqCst);
                     publish_natural_ended(&engine.queue, &engine.ended_sent, &app_for_task);
                     continue;
                 }
-                // 心跳看门狗：WebView 崩溃或主线程被同步命令卡死时，前端心跳会
-                // 停止。只要此时还在出声就立刻清空播放器，绝不让音乐停不下来。
-                let heartbeat_lost = engine
+                // Visible-window safety guard: require the exact same stale
+                // heartbeat to survive a second full timeout. Hidden playback
+                // remains native and independent from WebView timer throttling;
+                // system sleep also gets a full recovery window after resume.
+                let last_heartbeat = engine
                     .last_heartbeat
                     .lock()
-                    .map(|heartbeat| {
-                        heartbeat
-                            .map(|at| at.elapsed() >= HEARTBEAT_STALL_TIMEOUT)
-                            .unwrap_or(false)
+                    .map(|heartbeat| *heartbeat)
+                    .unwrap_or(None);
+                let now = std::time::Instant::now();
+                let heartbeat_is_stale = last_heartbeat
+                    .is_some_and(|at| now.saturating_duration_since(at) >= HEARTBEAT_STALL_TIMEOUT);
+                let renderer_visible = if heartbeat_is_stale {
+                    app_for_task
+                        .get_webview_window("main")
+                        .and_then(|window| {
+                            Some(renderer_requires_heartbeat(
+                                window.is_visible().ok()?,
+                                window.is_minimized().ok()?,
+                            ))
+                        })
+                        .unwrap_or(true)
+                } else {
+                    true
+                };
+                let heartbeat_lost = engine
+                    .heartbeat_stale_observation
+                    .lock()
+                    .map(|mut observation| {
+                        heartbeat_watchdog_should_stop(
+                            last_heartbeat,
+                            &mut observation,
+                            renderer_visible,
+                            now,
+                        )
                     })
                     .unwrap_or(false);
-                let audibly_playing = !player.is_paused() && !player.empty();
+                let audibly_playing =
+                    engine.desired_playing.load(Ordering::SeqCst) && !player.empty();
                 if heartbeat_lost && audibly_playing {
                     engine.stop_immediately();
                     eprintln!("[原生] 前端心跳丢失，自动停止播放（保护）");
@@ -2108,30 +3155,24 @@ pub struct NativeOutputDevice {
 pub fn native_audio_output_devices() -> Result<Vec<NativeOutputDevice>, String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    let default_name = host
-        .default_output_device()
-        .and_then(|device| device.description().ok())
-        .map(|description| description.name().to_string())
-        .unwrap_or_default();
-    let devices = host
-        .output_devices()
-        .map_err(|e| format!("枚举输出设备失败: {e}"))?
-        .filter_map(|device| {
-            let name = device.description().ok()?.name().to_string();
-            Some(NativeOutputDevice {
-                device_id: name.clone(),
-                label: name.clone(),
-                is_default: default_name.is_empty() || name == default_name,
-            })
-        })
-        .collect::<Vec<_>>();
-    if devices.is_empty() {
-        return Ok(vec![NativeOutputDevice {
-            device_id: String::new(),
-            label: "系统默认".to_string(),
-            is_default: true,
-        }]);
-    }
+    let mut devices = vec![NativeOutputDevice {
+        device_id: String::new(),
+        label: "系统默认".to_string(),
+        is_default: true,
+    }];
+    devices.extend(
+        host.output_devices()
+            .map_err(|e| format!("枚举输出设备失败: {e}"))?
+            .filter_map(|device| {
+                let name = device.description().ok()?.name().to_string();
+                let id = device.id().ok()?.to_string();
+                Some(NativeOutputDevice {
+                    device_id: id,
+                    label: name,
+                    is_default: false,
+                })
+            }),
+    );
     Ok(devices)
 }
 
@@ -2241,6 +3282,26 @@ pub struct NativeCacheStatus {
     pub file_count: usize,
 }
 
+fn validate_now_playing_metadata(
+    proxy: &crate::stream_proxy::StreamProxy,
+    metadata: Option<NowPlayingMetadata>,
+) -> Result<Option<NowPlayingMetadata>, String> {
+    let Some(mut metadata) = metadata else {
+        return Ok(None);
+    };
+    if metadata.duration_ms == Some(0) {
+        metadata.duration_ms = None;
+    }
+    if let Some(artwork_url) = metadata.artwork_url.as_deref() {
+        if artwork_url.is_empty() {
+            metadata.artwork_url = None;
+        } else if !proxy.owns_artwork_url(artwork_url) {
+            return Err("封面地址不是当前 Cadilume 本机票据".to_string());
+        }
+    }
+    Ok(Some(metadata))
+}
+
 #[tauri::command]
 pub fn native_audio_cache_status(
     state: tauri::State<'_, NativeAudioEngineSlot>,
@@ -2276,27 +3337,37 @@ pub async fn native_audio_clear_cache(
 #[tauri::command]
 pub async fn native_audio_load(
     app: AppHandle,
-    state: tauri::State<'_, NativeAudioEngineSlot>,
+    audio_state: tauri::State<'_, NativeAudioEngineSlot>,
+    stream_proxy: tauri::State<'_, crate::stream_proxy::StreamProxy>,
     source: String,
     cache_key: Option<String>,
     metadata: Option<NowPlayingMetadata>,
+    autoplay: Option<bool>,
 ) -> Result<usize, String> {
-    let _operation = state.output_switch_lock.lock().await;
-    let engine = state.ensure(&app)?;
+    if !stream_proxy.owns_audio_url(&source) {
+        return Err("音频地址不是当前 Cadilume 本机票据".to_string());
+    }
+    let metadata = validate_now_playing_metadata(&stream_proxy, metadata)?;
+    let _operation = audio_state.output_switch_lock.lock().await;
+    let engine = audio_state.ensure(&app)?;
     engine
-        .load_cached_and_play(&source, cache_key, metadata)
+        .load_cached(&source, cache_key, metadata, autoplay.unwrap_or(true))
         .await
 }
 
 #[tauri::command]
 pub async fn native_audio_precache(
     app: AppHandle,
-    state: tauri::State<'_, NativeAudioEngineSlot>,
+    audio_state: tauri::State<'_, NativeAudioEngineSlot>,
+    stream_proxy: tauri::State<'_, crate::stream_proxy::StreamProxy>,
     source: String,
     cache_key: Option<String>,
     rate_limit: Option<bool>,
 ) -> Result<(), String> {
-    let engine = state.ensure(&app)?;
+    if !stream_proxy.owns_audio_url(&source) {
+        return Err("音频地址不是当前 Cadilume 本机票据".to_string());
+    }
+    let engine = audio_state.ensure(&app)?;
     let limit = if rate_limit.unwrap_or(false) {
         Some(PRECACHE_RATE_LIMIT_BYTES_PER_SEC)
     } else {
@@ -2306,16 +3377,24 @@ pub async fn native_audio_precache(
 }
 
 #[tauri::command]
-pub fn native_audio_queue_next_source(
+pub async fn native_audio_queue_next_source(
     app: AppHandle,
-    state: tauri::State<'_, NativeAudioEngineSlot>,
+    audio_state: tauri::State<'_, NativeAudioEngineSlot>,
+    stream_proxy: tauri::State<'_, crate::stream_proxy::StreamProxy>,
     index: i64,
     source: String,
     cache_key: Option<String>,
     metadata: Option<NowPlayingMetadata>,
 ) -> Result<(), String> {
-    let engine = state.ensure(&app)?;
-    engine.queue_next_source(index, &source, cache_key, metadata)
+    if !stream_proxy.owns_audio_url(&source) {
+        return Err("音频地址不是当前 Cadilume 本机票据".to_string());
+    }
+    let metadata = validate_now_playing_metadata(&stream_proxy, metadata)?;
+    let _operation = audio_state.output_switch_lock.lock().await;
+    let engine = audio_state.ensure(&app)?;
+    engine
+        .queue_next_source_replacing(index, &source, cache_key, metadata)
+        .await
 }
 
 #[tauri::command]
@@ -2326,23 +3405,33 @@ pub fn native_audio_play(
     let engine = state
         .current()
         .ok_or_else(|| "当前没有可恢复的播放".to_string())?;
+    engine.desired_playing.store(true, Ordering::SeqCst);
     engine.player().play();
     Ok(())
 }
 
 #[tauri::command]
 pub fn native_audio_pause(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
-    let _ = app;
     if let Some(engine) = state.current() {
+        engine.desired_playing.store(false, Ordering::SeqCst);
+        if engine.buffer_paused.swap(false, Ordering::SeqCst) {
+            let _ = app.emit(
+                "native-audio://event",
+                serde_json::json!({ "type": "buffering", "buffering": false }),
+            );
+        }
         engine.player().pause();
     }
 }
 
 #[tauri::command]
 pub fn native_audio_stop(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
-    let _ = app;
     if let Some(engine) = state.current() {
         engine.stop_immediately();
+        let _ = app.emit(
+            "native-audio://event",
+            serde_json::json!({ "type": "buffering", "buffering": false }),
+        );
     }
 }
 
@@ -2352,6 +3441,9 @@ pub fn native_audio_heartbeat(app: AppHandle, state: tauri::State<'_, NativeAudi
     if let Some(engine) = state.current() {
         if let Ok(mut heartbeat) = engine.last_heartbeat.lock() {
             *heartbeat = Some(std::time::Instant::now());
+        }
+        if let Ok(mut observation) = engine.heartbeat_stale_observation.lock() {
+            *observation = None;
         }
     }
 }
@@ -2363,15 +3455,18 @@ pub async fn native_audio_seek(
     seconds: f64,
 ) -> Result<(), String> {
     let _ = app;
+    if !seconds.is_finite() {
+        return Err("定位时间必须是有限数字".to_string());
+    }
+    let position = Duration::try_from_secs_f64(seconds.max(0.0))
+        .map_err(|_| "定位时间必须是有限数字".to_string())?;
     let _operation = state.output_switch_lock.lock().await;
     let player = state
         .current()
         .ok_or_else(|| "当前没有可定位的播放".to_string())?
         .player();
     tauri::async_runtime::spawn_blocking(move || {
-        player
-            .try_seek(Duration::from_secs_f64(seconds.max(0.0)))
-            .map_err(|error| error.to_string())
+        player.try_seek(position).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("定位播放任务失败: {error}"))?
@@ -2405,8 +3500,8 @@ pub fn native_audio_status(
     };
     let player = engine.player();
     NativeStatus {
-        is_playing: !player.empty() && !player.is_paused(),
-        position_seconds: Some(player.get_pos().as_secs_f64()),
+        is_playing: !player.empty() && engine.desired_playing.load(Ordering::SeqCst),
+        position_seconds: Some(engine.playback_position_seconds()),
         duration_seconds: engine
             .duration_seconds
             .lock()
@@ -2423,7 +3518,7 @@ pub fn native_audio_status(
 }
 
 #[tauri::command]
-pub fn native_queue_set(
+pub async fn native_queue_set(
     app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
     tracks: Vec<QueueTrack>,
@@ -2431,19 +3526,13 @@ pub fn native_queue_set(
     repeat: NativeRepeatMode,
     shuffle: bool,
 ) -> Result<(), String> {
+    let _operation = state.output_switch_lock.lock().await;
     let engine = state.ensure(&app)?;
-    // A full queue replacement invalidates any queued gapless source. Clear
-    // the pending slot before touching the queue to keep lock ordering with
-    // the event forwarder (pending -> queue) consistent.
-    if let Ok(mut pending) = engine.pending.lock() {
-        *pending = None;
-    }
-    let mut queue = engine
-        .queue
-        .lock()
-        .map_err(|_| "队列状态锁失败".to_string())?;
-    queue.resync(tracks, current_index, repeat, shuffle);
-    Ok(())
+    engine
+        .apply_queue_update(Some(&app), move |queue| {
+            queue.resync(tracks, current_index, repeat, shuffle);
+        })
+        .await
 }
 
 #[tauri::command]
@@ -2464,6 +3553,20 @@ pub fn native_queue_next(
 }
 
 #[tauri::command]
+pub fn native_queue_peek_next(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+    natural_ended: Option<bool>,
+) -> Result<Option<usize>, String> {
+    let engine = state.ensure(&app)?;
+    let mut queue = engine
+        .queue
+        .lock()
+        .map_err(|_| "队列状态锁失败".to_string())?;
+    Ok(queue.peek_next_index(natural_ended.unwrap_or(true)))
+}
+
+#[tauri::command]
 pub fn native_queue_previous(
     app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
@@ -2481,35 +3584,38 @@ pub fn native_queue_previous(
 }
 
 #[tauri::command]
-pub fn native_queue_set_repeat(
+pub async fn native_queue_set_repeat(
     app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
     repeat: NativeRepeatMode,
 ) -> Result<(), String> {
+    let _operation = state.output_switch_lock.lock().await;
     let engine = state.ensure(&app)?;
     engine
-        .queue
-        .lock()
-        .map_err(|_| "队列状态锁失败".to_string())?
-        .repeat = repeat;
-    Ok(())
+        .apply_queue_update(Some(&app), move |queue| queue.repeat = repeat)
+        .await
 }
 
 #[tauri::command]
-pub fn native_queue_set_shuffle(
+pub async fn native_queue_set_shuffle(
     app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
     shuffle: bool,
 ) -> Result<(), String> {
+    let _operation = state.output_switch_lock.lock().await;
     let engine = state.ensure(&app)?;
-    let mut queue = engine
-        .queue
-        .lock()
-        .map_err(|_| "队列状态锁失败".to_string())?;
-    queue.shuffle = shuffle;
-    queue.bag.clear();
-    queue.history.clear();
-    Ok(())
+    engine
+        .apply_queue_update(Some(&app), move |queue| {
+            if queue.shuffle == shuffle {
+                return;
+            }
+            queue.shuffle = shuffle;
+            queue.bag.clear();
+            queue.shuffle_initialized = false;
+            queue.history.clear();
+            queue.history_cursor = None;
+        })
+        .await
 }
 
 #[cfg(test)]
@@ -2587,6 +3693,344 @@ mod tests {
         (final_path, part_path)
     }
 
+    struct StallingSource {
+        initial_samples: usize,
+        stalled_once: bool,
+    }
+
+    impl Iterator for StallingSource {
+        type Item = f32;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.initial_samples > 0 {
+                self.initial_samples -= 1;
+                return Some(0.25);
+            }
+            if !self.stalled_once {
+                self.stalled_once = true;
+                std::thread::sleep(Duration::from_millis(300));
+                return Some(0.5);
+            }
+            None
+        }
+    }
+
+    impl Source for StallingSource {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+
+        fn channels(&self) -> rodio::ChannelCount {
+            std::num::NonZeroU16::new(1).unwrap()
+        }
+
+        fn sample_rate(&self) -> rodio::SampleRate {
+            std::num::NonZeroU32::new(48_000).unwrap()
+        }
+
+        fn total_duration(&self) -> Option<Duration> {
+            Some(Duration::from_secs(1))
+        }
+    }
+
+    struct EndlessSource;
+
+    impl Iterator for EndlessSource {
+        type Item = f32;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            Some(0.125)
+        }
+    }
+
+    impl Source for EndlessSource {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+
+        fn channels(&self) -> rodio::ChannelCount {
+            std::num::NonZeroU16::new(2).unwrap()
+        }
+
+        fn sample_rate(&self) -> rodio::SampleRate {
+            std::num::NonZeroU32::new(48_000).unwrap()
+        }
+
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+    }
+
+    struct SeekableLowRateSource;
+
+    impl Iterator for SeekableLowRateSource {
+        type Item = f32;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            Some(0.125)
+        }
+    }
+
+    impl Source for SeekableLowRateSource {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+
+        fn channels(&self) -> rodio::ChannelCount {
+            std::num::NonZeroU16::new(2).unwrap()
+        }
+
+        fn sample_rate(&self) -> rodio::SampleRate {
+            std::num::NonZeroU32::new(8_000).unwrap()
+        }
+
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+
+        fn try_seek(&mut self, _pos: Duration) -> Result<(), SeekError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn decoder_worker_keeps_realtime_source_nonblocking_during_stall() {
+        let (mut source, state) = spawn_threaded_decoder(StallingSource {
+            initial_samples: DECODE_CHUNK_FRAMES,
+            stalled_once: false,
+        })
+        .unwrap();
+        for _ in 0..DECODE_CHUNK_FRAMES {
+            assert_eq!(source.next(), Some(0.25));
+        }
+        let media_position_before_stall = state.position_seconds();
+
+        let started = std::time::Instant::now();
+        for _ in 0..4_096 {
+            assert_eq!(source.next(), Some(0.0));
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "实时 Source 不得等待解码线程，实际 {:?}",
+            started.elapsed()
+        );
+        assert!(state.underflowing.load(Ordering::SeqCst));
+        assert!(state.underflow_frames.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            state.position_seconds(),
+            media_position_before_stall,
+            "欠载静音不得推进媒体时间轴"
+        );
+
+        std::thread::sleep(Duration::from_millis(350));
+        assert_eq!(source.next(), Some(0.5), "解码恢复后应继续输出真实 PCM");
+    }
+
+    #[test]
+    fn threaded_source_seek_admission_is_nonblocking() {
+        let (mut source, _) = spawn_threaded_decoder(StallingSource {
+            initial_samples: DECODE_CHUNK_FRAMES,
+            stalled_once: false,
+        })
+        .unwrap();
+        let started = std::time::Instant::now();
+        source.try_seek(Duration::from_millis(500)).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(20));
+    }
+
+    #[test]
+    fn decoder_worker_pcm_queue_is_bounded_and_uses_a_resume_watermark() {
+        let (mut source, state) = spawn_threaded_decoder(EndlessSource).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while state.buffered_chunks.load(Ordering::SeqCst) < state.buffer_capacity
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let buffered = state.buffered_chunks.load(Ordering::SeqCst);
+        assert_eq!(
+            buffered, state.buffer_capacity,
+            "worker 应在有界队列满时背压"
+        );
+        assert!(
+            state.resume_chunks > 1,
+            "欠载恢复不能只等待一个短 PCM chunk"
+        );
+        assert!(state.ready_to_resume());
+
+        let chunk_samples = DECODE_CHUNK_FRAMES * source.channels().get() as usize;
+        for _ in 0..(state.buffer_capacity + 16) {
+            let ready_deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while state.buffered_chunks.load(Ordering::SeqCst) == 0
+                && std::time::Instant::now() < ready_deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(state.buffered_chunks.load(Ordering::SeqCst) > 0);
+            for _ in 0..chunk_samples {
+                assert!(source.next().is_some());
+            }
+        }
+        assert!(
+            state.allocated_chunks.load(Ordering::SeqCst) <= state.buffer_capacity + 1,
+            "steady-state PCM must reuse the bounded chunk pool"
+        );
+
+        drop(source);
+        let exit_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !state.worker_exited.load(Ordering::SeqCst)
+            && std::time::Instant::now() < exit_deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(state.worker_exited.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn decoder_worker_reuses_the_bounded_chunk_pool_across_seek_storms() {
+        let (mut source, state) = spawn_threaded_decoder(SeekableLowRateSource).unwrap();
+        for seek_index in 0..48u64 {
+            let fill_deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while state.buffered_chunks.load(Ordering::SeqCst)
+                < state.buffer_capacity.saturating_sub(1)
+                && std::time::Instant::now() < fill_deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(source.next().is_some(), "seek 前应能取得新的 current chunk");
+            while state.buffered_chunks.load(Ordering::SeqCst) < state.buffer_capacity
+                && std::time::Instant::now() < fill_deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(
+                state.buffered_chunks.load(Ordering::SeqCst),
+                state.buffer_capacity,
+                "每次 seek 前解码队列都应重新填满"
+            );
+            source
+                .try_seek(Duration::from_millis(seek_index * 17))
+                .unwrap();
+        }
+        assert!(
+            state.allocated_chunks.load(Ordering::SeqCst) <= state.buffer_capacity + 1,
+            "seek storm must reuse superseded worker buffers instead of reallocating"
+        );
+
+        drop(source);
+        let exit_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !state.worker_exited.load(Ordering::SeqCst)
+            && std::time::Instant::now() < exit_deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(state.worker_exited.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn backward_seek_interrupts_a_decoder_waiting_at_the_progressive_frontier() {
+        let full_wav = unique_temp_path("seek-interrupt-full.wav");
+        let partial_wav = unique_temp_path("seek-interrupt.audio.part");
+        write_test_wav_of_seconds(&full_wav, 30);
+        let bytes = std::fs::read(&full_wav).unwrap();
+        let partial_len = 64 * 1024;
+        std::fs::write(&partial_wav, &bytes[..partial_len]).unwrap();
+
+        let progress = DownloadProgress::new();
+        progress
+            .downloaded
+            .store(partial_len as u64, Ordering::SeqCst);
+        progress
+            .expected_len
+            .store(bytes.len() as u64, Ordering::SeqCst);
+        let reader = ProgressiveFile {
+            file: std::fs::File::open(&partial_wav).unwrap(),
+            progress: Arc::clone(&progress),
+            reader_interrupt_epoch: 0,
+        };
+        let decoder = Decoder::builder()
+            .with_data(reader)
+            .with_seekable(true)
+            .with_byte_len(bytes.len() as u64)
+            .build()
+            .unwrap();
+        let (mut source, state) =
+            spawn_threaded_decoder_with_progress(decoder, Some(Arc::clone(&progress))).unwrap();
+
+        std::thread::sleep(Duration::from_millis(100));
+        source.try_seek(Duration::from_millis(100)).unwrap();
+        let seek_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while (state.seek_target.lock().unwrap().is_some()
+            || state.buffered_chunks.load(Ordering::SeqCst) == 0)
+            && std::time::Instant::now() < seek_deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            state.seek_target.lock().unwrap().is_none(),
+            "向后 seek 不应继续等待尚未下载的前沿"
+        );
+        assert!(
+            state.buffered_chunks.load(Ordering::SeqCst) > 0,
+            "定位到已下载区域后应重新产生 PCM"
+        );
+
+        drop(source);
+        progress.cancel();
+        let exit_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !state.worker_exited.load(Ordering::SeqCst)
+            && std::time::Instant::now() < exit_deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(state.worker_exited.load(Ordering::SeqCst));
+        let _ = std::fs::remove_file(full_wav);
+        let _ = std::fs::remove_file(partial_wav);
+    }
+
+    #[test]
+    fn heartbeat_watchdog_requires_visible_two_phase_staleness() {
+        let base = std::time::Instant::now();
+        let heartbeat = base;
+        let first_check = base + HEARTBEAT_STALL_TIMEOUT;
+        let mut observation = None;
+        assert!(!heartbeat_watchdog_should_stop(
+            Some(heartbeat),
+            &mut observation,
+            true,
+            first_check,
+        ));
+        assert!(!heartbeat_watchdog_should_stop(
+            Some(heartbeat),
+            &mut observation,
+            false,
+            first_check + HEARTBEAT_STALL_CONFIRMATION,
+        ));
+        assert!(observation.is_none(), "隐藏窗口必须解除失联观察");
+        assert!(!heartbeat_watchdog_should_stop(
+            Some(heartbeat),
+            &mut observation,
+            true,
+            first_check,
+        ));
+        assert!(heartbeat_watchdog_should_stop(
+            Some(heartbeat),
+            &mut observation,
+            true,
+            first_check + HEARTBEAT_STALL_CONFIRMATION,
+        ));
+        assert!(renderer_requires_heartbeat(true, false));
+        assert!(!renderer_requires_heartbeat(true, true));
+        assert!(!renderer_requires_heartbeat(false, false));
+        let recovered = first_check + Duration::from_secs(1);
+        assert!(!heartbeat_watchdog_should_stop(
+            Some(recovered),
+            &mut observation,
+            true,
+            first_check + HEARTBEAT_STALL_CONFIRMATION + Duration::from_millis(1),
+        ));
+    }
+
     #[test]
     fn cache_identity_is_stable_isolated_and_not_exposed_in_paths() {
         let identity = "server-secret:account-a:track-7:original:/library/parts/99.flac";
@@ -2651,6 +4095,7 @@ mod tests {
             "title": "Track",
             "artist": "Artist",
             "album": "Album",
+            "durationMs": 180000,
             "artworkUrl": "http://127.0.0.1:1234/artwork/ticket"
         }))
         .unwrap();
@@ -2658,6 +4103,7 @@ mod tests {
             metadata.artwork_url.as_deref(),
             Some("http://127.0.0.1:1234/artwork/ticket")
         );
+        assert_eq!(metadata.duration_ms, Some(180_000));
     }
 
     #[test]
@@ -2672,6 +4118,7 @@ mod tests {
             let mut reader = ProgressiveFile {
                 file: std::fs::File::open(path_for_reader).unwrap(),
                 progress: progress_for_reader,
+                reader_interrupt_epoch: 0,
             };
             let mut byte = [0u8; 1];
             let result = reader.read(&mut byte);
@@ -2713,6 +4160,7 @@ mod tests {
         let reader = ProgressiveFile {
             file: std::fs::File::open(&partial_wav).unwrap(),
             progress,
+            reader_interrupt_epoch: 0,
         };
         let decoder = Decoder::builder()
             .with_data(reader)
@@ -2759,15 +4207,77 @@ mod tests {
         };
         assert!(
             engine
-                .load_file_for_generation(wav.to_str().unwrap(), stale_generation, source.clone(),)
+                .load_file_for_generation(
+                    wav.to_str().unwrap(),
+                    stale_generation,
+                    source.clone(),
+                    true,
+                )
                 .is_err(),
             "旧代加载不能反写播放器"
         );
         engine
-            .load_file_for_generation(wav.to_str().unwrap(), latest_generation, source)
+            .load_file_for_generation(wav.to_str().unwrap(), latest_generation, source, true)
             .expect("最后一代应能加载");
         assert!(engine.loaded.load(Ordering::SeqCst));
         engine.stop_immediately();
+        let _ = std::fs::remove_file(wav);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[tokio::test]
+    async fn rapid_local_load_stop_stress_keeps_latest_decoder_generation() {
+        let cache_root = unique_temp_path("decoder-load-stress-cache");
+        let wav = unique_temp_path("decoder-load-stress.wav");
+        write_test_wav_of_seconds(&wav, 1);
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        engine.player().set_volume(0.0);
+        let started = std::time::Instant::now();
+        let mut decoder_states = Vec::with_capacity(160);
+
+        for iteration in 0..160 {
+            engine
+                .load_and_play(wav.to_str().unwrap())
+                .expect("高频加载应始终产生首个 PCM 缓冲");
+            if iteration % 20 == 0 {
+                engine
+                    .player()
+                    .try_seek(Duration::from_millis(250))
+                    .expect("高频加载中的 seek 应被受理");
+            }
+            decoder_states.push(
+                engine
+                    .decode_state
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .cloned()
+                    .expect("加载后应记录解码 worker"),
+            );
+            engine.stop_immediately();
+        }
+
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "160 次加载/停止不应出现解码线程堆积，实际 {:?}",
+            started.elapsed()
+        );
+        assert!(!engine.loaded.load(Ordering::SeqCst));
+        assert!(engine.decode_state.lock().unwrap().is_none());
+        let exit_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while decoder_states
+            .iter()
+            .any(|state| !state.worker_exited.load(Ordering::SeqCst))
+            && std::time::Instant::now() < exit_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            decoder_states
+                .iter()
+                .all(|state| state.worker_exited.load(Ordering::SeqCst)),
+            "160 个被替换的解码 worker 都必须在有界时间内退出"
+        );
         let _ = std::fs::remove_file(wav);
         let _ = std::fs::remove_dir_all(cache_root);
     }
@@ -2833,12 +4343,12 @@ mod tests {
             started.elapsed()
         );
         let (next_cache, _) = test_cache_paths(&cache_root, "next");
-        assert_eq!(std::fs::metadata(next_cache).unwrap().len(), data.len() as u64);
-        let (_, ahead_partial) = test_cache_paths(&cache_root, "ahead");
-        assert!(
-            !ahead_partial.exists(),
-            "取消的 ahead 不得遗留 .part"
+        assert_eq!(
+            std::fs::metadata(next_cache).unwrap().len(),
+            data.len() as u64
         );
+        let (_, ahead_partial) = test_cache_paths(&cache_root, "ahead");
+        assert!(!ahead_partial.exists(), "取消的 ahead 不得遗留 .part");
         assert!(ahead.await.unwrap().is_err(), "被抢占的 ahead 应明确中止");
         let _ = std::fs::remove_file(wav);
         let _ = std::fs::remove_dir_all(cache_root);
@@ -2985,10 +4495,11 @@ mod tests {
         engine.player().set_volume(0.0);
         *slot.inner.lock().unwrap() = Some(Arc::clone(&engine));
         let url = format!("http://127.0.0.1:{}/slow.wav", addr.port());
+        let precache_url = url.clone();
         let precache_engine = Arc::clone(&engine);
         let precache = tokio::spawn(async move {
             precache_engine
-                .precache(&url, Some("account-a-media".into()), Some(1024))
+                .precache(&precache_url, Some("account-a-media".into()), Some(1024))
                 .await
         });
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -3015,6 +4526,15 @@ mod tests {
         assert_eq!(remaining, 0, "账号清理后不得残留完整或部分音频缓存");
         assert!(!engine.loaded.load(Ordering::SeqCst));
         assert!(engine.queue.lock().unwrap().tracks.is_empty());
+        assert!(slot.current().is_none(), "账号清理后旧引擎必须从 slot 移除");
+        assert!(!engine.accepting_work.load(Ordering::SeqCst));
+        assert!(
+            engine
+                .precache(&url, Some("stale-account-media".into()), None)
+                .await
+                .is_err(),
+            "已经移除的账号引擎不得重新创建缓存"
+        );
         let _ = std::fs::remove_file(wav);
         let _ = std::fs::remove_dir_all(cache_root);
     }
@@ -3136,6 +4656,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paused_load_never_advances_before_explicit_play() {
+        let wav = unique_temp_path("paused-load.wav");
+        let cache_root = unique_temp_path("paused-load-cache");
+        write_test_wav(&wav);
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        engine.player().set_volume(0.0);
+
+        engine.load_file(wav.to_str().unwrap(), false).unwrap();
+        assert!(engine.player().is_paused());
+        assert!(!engine.desired_playing.load(Ordering::SeqCst));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(engine.playback_position_seconds(), 0.0);
+
+        engine.stop_immediately();
+        let _ = std::fs::remove_file(wav);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[tokio::test]
     async fn play_local_flac_advances() {
         let flac = PathBuf::from("/tmp/sample.flac");
         if !flac.exists() {
@@ -3228,9 +4767,8 @@ mod tests {
                                 "simulated truncated response",
                             )),
                         ]);
-                        let mut response = axum::response::Response::new(
-                            axum::body::Body::from_stream(stream),
-                        );
+                        let mut response =
+                            axum::response::Response::new(axum::body::Body::from_stream(stream));
                         response.headers_mut().insert(
                             axum::http::header::CONTENT_LENGTH,
                             axum::http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
@@ -3287,7 +4825,9 @@ mod tests {
                     Ok::<_, std::io::Error>(axum::body::Bytes::copy_from_slice(
                         &data_for_server[..split],
                     )),
-                    Ok(axum::body::Bytes::copy_from_slice(&data_for_server[split..])),
+                    Ok(axum::body::Bytes::copy_from_slice(
+                        &data_for_server[split..],
+                    )),
                 ];
                 async move {
                     axum::response::Response::new(axum::body::Body::from_stream(
@@ -3346,10 +4886,57 @@ mod tests {
             .await;
 
         assert!(outcome.is_err());
-        assert_eq!(requests.load(AtomicOrdering::SeqCst), 3, "空响应应按策略重试");
+        assert_eq!(
+            requests.load(AtomicOrdering::SeqCst),
+            3,
+            "空响应应按策略重试"
+        );
         let (cached, partial) = test_cache_paths(&cache_root, "empty-media");
         assert!(!cached.exists());
         assert!(!partial.exists());
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[tokio::test]
+    async fn oversized_download_is_rejected_before_allocating_cache_space() {
+        let app = axum::Router::new().route(
+            "/oversized",
+            axum::routing::get(|| async {
+                axum::response::Response::builder()
+                    .header(
+                        axum::http::header::CONTENT_LENGTH,
+                        (AUDIO_CACHE_LIMIT_BYTES + 1).to_string(),
+                    )
+                    .body(axum::body::Body::from_stream(
+                        futures_util::stream::pending::<
+                            Result<axum::body::Bytes, std::convert::Infallible>,
+                        >(),
+                    ))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let cache_root = unique_temp_path("oversized-cache");
+        let (_, final_path, part_path) =
+            resolve_audio_cache_paths(&cache_root, Some("oversized-media")).unwrap();
+        let progress = DownloadProgress::new();
+        let error = download_progressive_once(
+            &loopback_http_client(None).unwrap(),
+            &format!("http://127.0.0.1:{}/oversized", addr.port()),
+            &part_path,
+            &final_path,
+            &progress,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("单文件缓存上限"), "实际错误：{error}");
+        assert!(!part_path.exists());
+        assert!(!final_path.exists());
         let _ = std::fs::remove_dir_all(cache_root);
     }
 
@@ -3462,15 +5049,30 @@ mod tests {
         }
     }
 
+    fn pending_track(index: usize, rating_key: &str) -> PendingTrack {
+        PendingTrack {
+            index,
+            rating_key: rating_key.to_string(),
+            duration_seconds: Some(3.0),
+            source: format!("source-{rating_key}"),
+            cache_key: Some(format!("cache-{rating_key}")),
+            metadata: NowPlayingMetadata::default(),
+            started: Arc::new(AtomicBool::new(false)),
+            decode_state: Arc::new(DecodeBufferState::new(
+                std::num::NonZeroU32::new(48_000).unwrap(),
+                8,
+                None,
+            )),
+        }
+    }
+
     #[test]
     fn queue_peek_next_index_matches_natural_advance() {
         let mut queue = QueueState {
             tracks: vec![queue_track("a"), queue_track("b"), queue_track("c")],
             current_index: 0,
             repeat: NativeRepeatMode::All,
-            shuffle: false,
-            bag: vec![],
-            history: vec![],
+            ..QueueState::default()
         };
         assert_eq!(queue.peek_next_index(true), Some(1));
         assert_eq!(queue.next_index(true), Some(1));
@@ -3491,8 +5093,21 @@ mod tests {
     }
 
     #[test]
-    fn queue_shuffle_peek_is_pure_and_avoids_last() {
-        let queue = QueueState {
+    fn manual_next_wraps_even_when_natural_repeat_is_off() {
+        let mut queue = QueueState {
+            tracks: vec![queue_track("a"), queue_track("b")],
+            current_index: 1,
+            repeat: NativeRepeatMode::Off,
+            ..QueueState::default()
+        };
+        assert_eq!(queue.peek_next_index(true), None);
+        assert_eq!(queue.next_index(false), Some(0));
+        assert_eq!(queue.current_index, 0);
+    }
+
+    #[test]
+    fn queue_shuffle_peek_is_stable_and_visits_a_full_round_without_repeats() {
+        let mut queue = QueueState {
             tracks: vec![
                 queue_track("a"),
                 queue_track("b"),
@@ -3500,21 +5115,28 @@ mod tests {
                 queue_track("d"),
             ],
             current_index: 0,
-            repeat: NativeRepeatMode::All,
+            repeat: NativeRepeatMode::Off,
             shuffle: true,
-            bag: vec![2],
-            history: vec![],
+            ..QueueState::default()
         };
-        let first = queue.peek_next_index(true).unwrap();
-        let second = queue.peek_next_index(true).unwrap();
-        assert_eq!(first, second, "peek 不应推进 bag");
-        assert_ne!(first, 0, "不应选当前曲目");
-        assert_ne!(first, 2, "不应重复上一条 bag 记录");
+        let mut visited = std::collections::HashSet::from([0usize]);
+        for _ in 0..3 {
+            let preview = queue.peek_next_index(true).expect("本轮仍应有候选");
+            assert_eq!(
+                queue.peek_next_index(true),
+                Some(preview),
+                "重复 peek 必须保留同一预排候选"
+            );
+            assert_eq!(queue.next_index(true), Some(preview));
+            assert!(visited.insert(preview), "同一 shuffle 轮不得重复曲目");
+        }
+        assert_eq!(visited.len(), 4);
+        assert_eq!(queue.peek_next_index(true), None, "repeat-off 一轮后应结束");
 
-        let mut queue = queue;
-        queue.commit_index(first);
-        assert_eq!(queue.current_index, first as i64);
-        assert_eq!(queue.bag, vec![2, first], "提交后 bag 应记录实际播放的曲目");
+        queue.repeat = NativeRepeatMode::All;
+        let previous = queue.current().unwrap();
+        let wrapped = queue.next_index(true).expect("repeat-all 应开启新一轮");
+        assert_ne!(wrapped, previous, "新一轮第一首不能立即重复当前曲目");
     }
 
     #[test]
@@ -3529,15 +5151,18 @@ mod tests {
             current_index: 0,
             repeat: NativeRepeatMode::All,
             shuffle: true,
-            bag: vec![],
-            history: vec![],
+            ..QueueState::default()
         };
         let next = queue.next_index(false).expect("随机下一首应存在");
-        queue.current_index = next as i64;
         assert_eq!(
             queue.previous_index(),
             Some(0),
             "切到下一首后应能回到上一首"
+        );
+        assert_eq!(
+            queue.next_index(false),
+            Some(next),
+            "Previous 后 Next 应可逆"
         );
         // 前端每次加载都会 nativeQueueSet 同一队列：bag 不能被清掉。
         let tracks = queue.tracks.clone();
@@ -3548,7 +5173,10 @@ mod tests {
         changed[3].rating_key = "z".to_string();
         queue.resync(changed, queue.current_index, NativeRepeatMode::All, true);
         assert!(
-            queue.bag.is_empty() && queue.history.is_empty(),
+            queue.bag.is_empty()
+                && queue.history.is_empty()
+                && queue.history_cursor.is_none()
+                && !queue.shuffle_initialized,
             "队列变化后应清空 shuffle 历史"
         );
         assert_eq!(queue.previous_index(), None, "历史清空后没有上一首");
@@ -3560,9 +5188,7 @@ mod tests {
             tracks: vec![queue_track("a"), queue_track("b"), queue_track("c")],
             current_index: 0,
             repeat: NativeRepeatMode::All,
-            shuffle: false,
-            bag: vec![],
-            history: vec![],
+            ..QueueState::default()
         };
         assert_eq!(
             queue.previous_index(),
@@ -3571,6 +5197,212 @@ mod tests {
         );
         queue.current_index = 1;
         assert_eq!(queue.previous_index(), Some(0));
+    }
+
+    #[test]
+    fn pending_gapless_source_is_reindexed_or_invalidated_by_queue_identity() {
+        let mut queue = QueueState {
+            tracks: vec![
+                queue_track("removed-before"),
+                queue_track("a"),
+                queue_track("b"),
+            ],
+            current_index: 1,
+            repeat: NativeRepeatMode::All,
+            ..QueueState::default()
+        };
+        let mut pending = Some(pending_track(2, "b"));
+
+        queue.resync(
+            vec![queue_track("a"), queue_track("b"), queue_track("c")],
+            0,
+            NativeRepeatMode::All,
+            false,
+        );
+        assert!(!reconcile_pending_track(&mut pending, &mut queue));
+        assert_eq!(pending.as_ref().map(|track| track.index), Some(1));
+
+        queue.resync(
+            vec![queue_track("a"), queue_track("c"), queue_track("b")],
+            0,
+            NativeRepeatMode::All,
+            false,
+        );
+        assert!(reconcile_pending_track(&mut pending, &mut queue));
+        assert!(pending.is_none(), "已不是下一首的底层 Source 必须失效");
+    }
+
+    #[test]
+    fn repeat_change_invalidates_a_pending_repeat_one_source() {
+        let mut queue = QueueState {
+            tracks: vec![queue_track("a"), queue_track("b")],
+            current_index: 0,
+            repeat: NativeRepeatMode::One,
+            ..QueueState::default()
+        };
+        let mut pending = Some(pending_track(0, "a"));
+        assert_eq!(queue.peek_next_index(true), Some(0));
+
+        queue.repeat = NativeRepeatMode::Off;
+        assert!(reconcile_pending_track(&mut pending, &mut queue));
+        assert!(pending.is_none());
+        assert_eq!(queue.peek_next_index(true), Some(1));
+    }
+
+    #[tokio::test]
+    async fn started_handoff_wins_over_a_stale_webview_queue_index() {
+        let cache_root = unique_temp_path("handoff-resync-cache");
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        engine.queue.lock().unwrap().resync(
+            vec![queue_track("a"), queue_track("b")],
+            0,
+            NativeRepeatMode::All,
+            false,
+        );
+        let queued = pending_track(1, "b");
+        queued.started.store(true, Ordering::SeqCst);
+        *engine.pending.lock().unwrap() = Some(queued);
+
+        engine
+            .apply_queue_update(None, |queue| {
+                // This snapshot was captured before the sample-level handoff.
+                queue.resync(
+                    vec![queue_track("a"), queue_track("b"), queue_track("c")],
+                    0,
+                    NativeRepeatMode::All,
+                    false,
+                );
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(engine.queue.lock().unwrap().current_index, 1);
+        assert!(engine.pending.lock().unwrap().is_none());
+        assert_eq!(
+            engine
+                .current_source
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|source| source.source.as_str()),
+            Some("source-b")
+        );
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[tokio::test]
+    async fn queue_edits_preserve_valid_gapless_pcm_and_rebuild_stale_pcm() {
+        let cache_root = unique_temp_path("queue-reconcile-cache");
+        let wav_a = unique_temp_path("queue-reconcile-a.wav");
+        let wav_b = unique_temp_path("queue-reconcile-b.wav");
+        write_test_wav(&wav_a);
+        write_test_wav(&wav_b);
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        engine.player().set_volume(0.0);
+        engine.load_and_play(wav_a.to_str().unwrap()).unwrap();
+        {
+            let mut queue = engine.queue.lock().unwrap();
+            queue.resync(
+                vec![queue_track("a"), queue_track("b")],
+                0,
+                NativeRepeatMode::All,
+                false,
+            );
+        }
+        let (cached_b, _) = test_cache_paths(&cache_root, "queue-reconcile-b");
+        std::fs::copy(&wav_b, cached_b).unwrap();
+        engine
+            .queue_next_source(
+                1,
+                wav_b.to_str().unwrap(),
+                Some("queue-reconcile-b".into()),
+                None,
+            )
+            .unwrap();
+        let original_player = engine.player();
+        assert_eq!(original_player.len(), 2);
+
+        engine
+            .apply_queue_update(None, |queue| {
+                queue.resync(
+                    vec![queue_track("a"), queue_track("b"), queue_track("c")],
+                    0,
+                    NativeRepeatMode::All,
+                    false,
+                );
+            })
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&original_player, &engine.player()));
+        assert_eq!(engine.player().len(), 2, "有效预排不得破坏 gapless");
+        assert_eq!(
+            engine
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|track| track.index),
+            Some(1)
+        );
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let position_before_quality_change = engine.playback_position_seconds();
+        let (cached_b_new_quality, _) =
+            test_cache_paths(&cache_root, "queue-reconcile-b-new-quality");
+        std::fs::copy(&wav_b, cached_b_new_quality).unwrap();
+        engine
+            .queue_next_source_replacing(
+                1,
+                wav_b.to_str().unwrap(),
+                Some("queue-reconcile-b-new-quality".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        let quality_rebuilt_player = engine.player();
+        assert!(!Arc::ptr_eq(&original_player, &quality_rebuilt_player));
+        assert_eq!(quality_rebuilt_player.len(), 2);
+        assert_eq!(
+            engine
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|track| track.cache_key.clone()),
+            Some("queue-reconcile-b-new-quality".to_string())
+        );
+        assert!(
+            engine.playback_position_seconds() + 0.1 >= position_before_quality_change,
+            "更换预排音质不应重置当前媒体进度"
+        );
+
+        let position_before_queue_change = engine.playback_position_seconds();
+        engine
+            .apply_queue_update(None, |queue| {
+                queue.resync(
+                    vec![queue_track("a"), queue_track("c"), queue_track("b")],
+                    0,
+                    NativeRepeatMode::All,
+                    false,
+                );
+            })
+            .await
+            .unwrap();
+        let rebuilt_player = engine.player();
+        assert!(!Arc::ptr_eq(&quality_rebuilt_player, &rebuilt_player));
+        assert_eq!(rebuilt_player.len(), 1, "重建后不得残留旧预排 Source");
+        assert!(engine.pending.lock().unwrap().is_none());
+        assert_eq!(engine.queue.lock().unwrap().peek_next_index(true), Some(1));
+        assert!(
+            engine.playback_position_seconds() + 0.1 >= position_before_queue_change,
+            "队列重建应保留媒体进度"
+        );
+        assert!(engine.desired_playing.load(Ordering::SeqCst));
+
+        engine.stop_immediately();
+        let _ = std::fs::remove_file(wav_a);
+        let _ = std::fs::remove_file(wav_b);
+        let _ = std::fs::remove_dir_all(cache_root);
     }
 
     #[tokio::test]
@@ -3632,6 +5464,7 @@ mod tests {
                     title: Some("gapless b".into()),
                     artist: Some("artist b".into()),
                     album: Some("album b".into()),
+                    duration_ms: Some(3_000),
                     artwork_url: None,
                 }),
             )
@@ -3749,10 +5582,21 @@ mod tests {
         }
         let devices = native_audio_output_devices().expect("枚举输出设备应成功");
         assert!(!devices.is_empty(), "至少应返回系统默认设备");
+        assert_eq!(devices[0].device_id, "");
+        assert_eq!(devices[0].label, "系统默认");
+        assert!(devices[0].is_default);
         assert!(
-            devices.iter().any(|device| device.is_default),
-            "设备列表应标记默认设备"
+            devices
+                .iter()
+                .skip(1)
+                .all(|device| !device.device_id.is_empty()),
+            "物理设备必须使用稳定 cpal ID"
         );
+        let unique_ids = devices
+            .iter()
+            .map(|device| device.device_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique_ids.len(), devices.len(), "设备 ID 不得重复");
     }
 
     #[tokio::test]
@@ -3763,6 +5607,17 @@ mod tests {
         let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-device");
         let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
         engine.player().set_volume(0.0);
+        {
+            let mut queue = engine.queue.lock().unwrap();
+            queue.tracks = vec![queue_track("a"), queue_track("b"), queue_track("c")];
+            queue.current_index = 1;
+            queue.repeat = NativeRepeatMode::All;
+            queue.shuffle = true;
+            queue.bag = vec![2];
+            queue.shuffle_initialized = true;
+            queue.history = vec![0, 1];
+            queue.history_cursor = Some(1);
+        }
         engine.load_and_play(wav.to_str().unwrap()).unwrap();
         tokio::time::sleep(Duration::from_millis(600)).await;
         let snapshot = engine.capture_playback_snapshot();
@@ -3770,12 +5625,12 @@ mod tests {
         assert!(snapshot.playing, "切换前应处于播放中");
 
         let host = cpal::default_host();
-        let device_name = host
+        let device_id = host
             .default_output_device()
-            .and_then(|device| device.description().ok())
-            .map(|description| description.name().to_string())
+            .and_then(|device| device.id().ok())
+            .map(|id| id.to_string())
             .unwrap_or_default();
-        let rebuilt = NativeAudioEngine::new_with_device(cache_root.clone(), &device_name).unwrap();
+        let rebuilt = NativeAudioEngine::new_with_device(cache_root.clone(), &device_id).unwrap();
         rebuilt
             .restore_playback_snapshot(&snapshot)
             .await
@@ -3789,6 +5644,14 @@ mod tests {
             resumed
         );
         assert!(!rebuilt.player().empty(), "切换设备后应继续播放");
+        {
+            let queue = rebuilt.queue.lock().unwrap();
+            assert_eq!(queue.current_index, 1);
+            assert_eq!(queue.bag, vec![2]);
+            assert!(queue.shuffle_initialized);
+            assert_eq!(queue.history, vec![0, 1]);
+            assert_eq!(queue.history_cursor, Some(1));
+        }
         rebuilt.stop_immediately();
         let _ = std::fs::remove_file(&wav);
     }
@@ -4001,6 +5864,7 @@ mod tests {
                     title: Some(track_a.3.clone()),
                     artist: None,
                     album: None,
+                    duration_ms: Some(track_a.0),
                     artwork_url: None,
                 }),
             )
@@ -4035,13 +5899,14 @@ mod tests {
                     title: Some(track_b.3.clone()),
                     artist: None,
                     album: None,
+                    duration_ms: Some(track_b.0),
                     artwork_url: None,
                 }),
             )
             .expect("真实 PMS 曲目 B 应能预排");
 
         // A 完整落盘后 seek 到结尾附近，让真实曲目在几秒内自然结束。
-        let a_final = downloads_dir.join(format!("{}.audio", track_a.2));
+        let (a_final, _) = test_cache_paths(&cache_root, &track_a.2);
         let download_deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !a_final.exists() && std::time::Instant::now() < download_deadline {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -4148,7 +6013,7 @@ mod tests {
         // 两轮连续快速加载/切换，模拟用户高频点下一首；第二轮穿插 seek/暂停。
         let mut loads = 0usize;
         for round in 0..2 {
-            for (index, (_duration_ms, _size, rating_key, title, part_key)) in
+            for (index, (duration_ms, _size, rating_key, title, part_key)) in
                 selected.iter().enumerate()
             {
                 engine
@@ -4159,6 +6024,7 @@ mod tests {
                             title: Some(title.clone()),
                             artist: None,
                             album: None,
+                            duration_ms: Some(*duration_ms),
                             artwork_url: None,
                         }),
                     )
@@ -4185,7 +6051,7 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(120)).await;
                     assert!(!engine.player().is_paused(), "高频切歌中恢复应生效");
                 }
-                eprintln!("[回归] 高频切歌 #{loads} 曲目={title} 缓存命中");
+                eprintln!("[回归] 高频切歌 #{loads} 缓存命中");
             }
         }
 

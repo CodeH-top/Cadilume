@@ -3,6 +3,7 @@ import {
   PLAYBACK_SESSION_MAX_AGE_MS,
   PLAYBACK_SESSION_MAX_QUEUE,
   PLAYBACK_SESSION_STORAGE_KEY,
+  NativeQueueCommandBarrier,
   clearPersistedPlaybackSession,
   commitShuffleNext,
   createPersistedPlaybackSession,
@@ -47,6 +48,40 @@ describe("native audio cache identity", () => {
       ...source,
       Media: [{ ...source.Media![0], Part: [{ ...source.Media![0].Part![0], size: 5678 }] }],
     }, "original")).not.toBe(first);
+  });
+});
+
+describe("native queue command barrier", () => {
+  it("keeps queue edits and navigation ordered under load", async () => {
+    const barrier = new NativeQueueCommandBarrier();
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+
+    const first = barrier.enqueue(async () => {
+      order.push("edit:start");
+      await firstGate;
+      order.push("edit:end");
+    });
+    const second = barrier.enqueue(async () => {
+      order.push("next");
+      return 7;
+    });
+
+    await Promise.resolve();
+    expect(order).toEqual(["edit:start"]);
+    releaseFirst();
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBe(7);
+    expect(order).toEqual(["edit:start", "edit:end", "next"]);
+  });
+
+  it("continues after one rejected native command", async () => {
+    const barrier = new NativeQueueCommandBarrier();
+    await expect(barrier.enqueue(async () => {
+      throw new Error("stale queue");
+    })).rejects.toThrow("stale queue");
+    await expect(barrier.enqueue(async () => 3)).resolves.toBe(3);
   });
 });
 

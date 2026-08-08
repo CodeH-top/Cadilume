@@ -1,5 +1,16 @@
 # ERRORS
 
+## 2026-08-08 — 本地验收环境的三个可复用边界
+
+- 新的 ad-hoc 签名会改变 macOS 钥匙串访问者身份并可能再次触发 ACL 确认；这不代表凭证损坏。
+  Cadilume Debug 已使用 `~/.cadilume-dev-token` 避免该链路，Release 的本地验收包仍可能在
+  重签后要求用户确认。不要通过放宽钥匙串条目到任意应用来规避。
+- 本机 `/usr/bin/trash` 不接受 GNU 风格的 `--` 参数；清理已核对的临时路径时传入明确绝对
+  路径且不要拼接 `--`，并在操作前后验证目标，不要因此改用宽范围 `rm -rf`。
+- 内置浏览器的页面 `evaluate` 隔离环境不保证暴露 `HTMLElement` 构造器，使用
+  `node instanceof HTMLElement` 会抛出 `TypeError`；几何验收应先做 null 检查，再直接读取
+  `getBoundingClientRect` / `clientHeight` 等已确认节点能力。
+
 ## 2026-08-05 — 内置浏览器旧本地标签可能拒绝刷新
 
 - 已存在的 `http://[::1]:1420` Cadilume 内置浏览器标签在 `tab.reload()` 时会被 Browser URL

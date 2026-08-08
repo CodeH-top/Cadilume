@@ -1,5 +1,23 @@
 # LEARNINGS
 
+## 2026-08-08 — 原生播放实时边界、系统媒体契约与媒体 UI
+
+- CoreAudio/WASAPI 回调不能直接执行文件/网络读取或 symphonia 解码；解码线程应写入有界、
+  frame 对齐的 PCM 队列，实时 Source 只做非阻塞读取。欠载静音不推进媒体时钟；seek 代际
+  切换时把 worker 正在填充的 spare `Vec<f32>` 留在新代复用，避免 seek storm 让分配量随
+  代际持续增长。
+- macOS `MPNowPlayingInfoCenter` 字典必须使用 `objc2-media-player` 导出的 NSString 常量，
+  不能把 `MPMediaItemPropertyTitle` 等 Objective-C 符号名文本当作 key；错误字符串不会报错，
+  但控制中心会静默丢弃曲名、歌手、专辑、进度和封面。字典与 `MPMediaItemArtwork` 均在
+  主线程构造/发布，并显式同步 `playbackState`。
+- `Cache-Control: no-store` 的封面若保留在主题快照的克隆 `<img>` 中，WebKit 可能重新请求、
+  解码并在 live 媒体层交接时闪烁。挂载快照前应把已解码像素同步栅格化为 canvas；只为视口内
+  图片分配 Retina backing store，离屏图用 1x1 透明画布，尺寸取排除 transform 的 computed
+  layout width/height。
+- 歌词中心定位用“当前 scrollTop + 活动行相对视口 top + 行高/2 - 视口高/2”，再钳制到
+  `[0, scrollHeight-clientHeight]`。切歌重置 scrollTop 后应继续本轮定位；不要在 layout effect
+  中清空刚由 ref callback 挂载的行节点或提前返回，否则新曲首个活动行会漏居中。
+
 ## 2026-08-07 — 原生播放引擎替换完成（dev 分支，Phase 0-6）
 
 - 播放链路：PMS 票据 → Rust 流代理 → 渐进下载缓存（ProgressiveFile 等待式

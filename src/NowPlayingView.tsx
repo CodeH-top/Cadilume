@@ -134,11 +134,11 @@ export interface LyricsScrollMetrics {
 }
 
 /**
- * Match Plex Web's stable reading position: keep the list still while any part
- * of the active line remains visible, then move an offscreen line to the top.
+ * Keep the active lyric centered whenever the scroll range allows it. Near
+ * either edge, clamp to the available range instead of creating blank space.
  * `targetTop` is measured from the list's visible top edge.
  */
-export function getPlexLyricsScrollTop({
+export function getCenteredLyricsScrollTop({
   scrollTop,
   viewportHeight,
   contentHeight,
@@ -151,9 +151,9 @@ export function getPlexLyricsScrollTop({
   const current = Number.isFinite(scrollTop) ? Math.min(maximum, Math.max(0, scrollTop)) : 0;
   const offset = Number.isFinite(targetTop) ? targetTop : 0;
   const height = Number.isFinite(targetHeight) ? Math.max(0, targetHeight) : 0;
-  if (height > 0 && offset + height > 0 && offset < viewport) return current;
-  const alignedTop = current + offset;
-  return Math.min(maximum, Math.max(0, alignedTop));
+  const targetCenterInContent = current + offset + height / 2;
+  const centeredTop = targetCenterInContent - viewport / 2;
+  return Math.min(maximum, Math.max(0, centeredTop));
 }
 
 function clampUnit(value: number): number {
@@ -521,9 +521,7 @@ function ExpandedLyricsPanel({ track, lyrics, onSeek }: {
     if (!list) return;
     if (previousTrackIdentityRef.current !== trackIdentity) {
       previousTrackIdentityRef.current = trackIdentity;
-      lineRefs.current = {};
       list.scrollTop = 0;
-      return;
     }
     if (!lyrics?.document?.timed) return;
     const activeLine = lines[activeIndex];
@@ -532,7 +530,7 @@ function ExpandedLyricsPanel({ track, lyrics, onSeek }: {
     if (!node || typeof list.scrollTo !== "function") return;
     const listRect = list.getBoundingClientRect();
     const nodeRect = node.getBoundingClientRect();
-    const nextScrollTop = getPlexLyricsScrollTop({
+    const nextScrollTop = getCenteredLyricsScrollTop({
       scrollTop: list.scrollTop,
       viewportHeight: list.clientHeight,
       contentHeight: list.scrollHeight,

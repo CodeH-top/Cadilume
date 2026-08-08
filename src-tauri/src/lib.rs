@@ -40,7 +40,7 @@ pub fn run() {
                 // URIs, paths, tokens, tickets, or private track identifiers.
                 eprintln!("[播放] {}", event.payload());
             });
-            window::set_status_icon_enabled(&app.handle(), status_icon_enabled)?;
+            window::set_status_icon_enabled(app.handle(), status_icon_enabled)?;
             // Dev builds start with the window hidden (silent background);
             // the user brings it up via Dock (Reopen) or the tray menu.
             #[cfg(debug_assertions)]
@@ -87,6 +87,7 @@ pub fn run() {
             audio_engine::native_audio_output_devices,
             audio_engine::native_audio_set_output_device,
             audio_engine::native_queue_set,
+            audio_engine::native_queue_peek_next,
             audio_engine::native_queue_next,
             audio_engine::native_queue_previous,
             audio_engine::native_queue_set_repeat,

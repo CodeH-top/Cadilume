@@ -1,199 +1,144 @@
-# Cadilume：从 WebView 播放替换到 Rust 底层播放引擎的升级计划（2026-08-07）
+# Cadilume Rust 原生播放引擎升级记录（2026-08-07）
 
-## 1. 背景与目标
+本文由实施计划收口为完成记录。当前架构以 `ARCHITECTURE.md` 为准，后续问题与验收入口
+以 `NEXT_HANDOFF_AND_OPEN_ISSUES_PLAN_2026-08-07.md` 为准。
 
-- 现状：v0.1 采用 WebView `HTMLAudioElement` 播放（双元素预缓冲），受 WebKit/Chromium
-  解码边界影响，存在 `MediaError code 4`、高频切歌卡顿、后台/隐藏窗口播放与
-  Now Playing/SMTC 缺失等硬边界。
-- 2026-08-07 spike 结论：`rodio 0.22`（cpal 输出 + symphonia 解码）在 Tauri 进程中
-  播放真实 PMS 流（代理下载落盘后播放本地文件）连续正常、无卡顿；`kithara` 的
-  firewheel/cpal 管线在 Tauri 进程约 1 秒后卡死且输出噪声，暂缓待上游稳定。
-- 目标：把播放权威从 WebView 迁移到 Rust `AudioEngine`，覆盖队列、进度、seek、磁盘
-  缓存、后台播放、输出设备选择、macOS Now Playing 与 Windows SMTC。
-- 硬约束：完全集成（禁止系统安装依赖）；许可与 MIT 应用兼容（不使用 BASS、GPL 组件、
-  libmpv）；macOS + Windows 双端；不进行客户端转码（PMS universal transcode 兜底）；
-  日志/事件脱敏。
+## 目标与硬边界
 
-## 1.5 执行进度（2026-08-07 更新）
+- 把播放权威从 WebView 迁入 Rust，覆盖下载、缓存、解码、队列、gapless、seek、后台
+  播放、输出设备、macOS Now Playing 与 Windows SMTC。
+- 应用必须独立运行：不要求用户安装 SDK、Homebrew 包、动态库、播放器或后台服务。
+- 不使用 BASS、`treble.node`、libmpv、FFmpeg 二进制或 GPL 播放组件；不复制 Plexamp
+  私有实现。Plexamp 只提供 clean-room 行为基线。
+- 客户端不转码；兼容转换和降码率由 PMS universal transcode 完成。
+- token、PMS URI、媒体路径和 cache identity 不进入日志或 WebView 持久化。
 
-- Phase 0 ✅ 完成：spike 清理、基础 bug/UI 修复、开发/生产凭证隔离、开发态静默启动。
-- Phase 1 ✅ 完成：rodio AudioEngine 正式化；进度/结束事件；队列权威迁入 Rust
-  （曲目列表/当前索引/repeat/shuffle 决策在 Rust，前端负责票据加载与 UI 镜像）。
-- Phase 2 ✅ 完成：磁盘缓存 512MB LRU（按 mtime 淘汰、`.part` 优先清理、命中刷新），
-  设置页展示并清理封面+音频缓存。
-- Phase 2 增强 ✅：缓存损坏自愈——命中缓存解码失败时删除坏文件并自动重下；
-  顺带修复小文件（<256KB）下载完成后 `.part` 已被改名、主路径仍打开 `.part`
-  导致播放失败的竞态（改为先 rename 再标记 finished，等待方优先读 final）。
-- Phase 3 ✅ 完成：边下边播（渐进 Reader + 后台下载，头部 256KB 就绪即开播）。
-- Phase 3 增强 ✅：顺序模式下 prebuffer 额外预热第二首 ahead（2 首 ahead，
-  符合 Plexamp“建议 2–3 首”）；远前置缓存限速 5 Mbps（`PRECACHE_RATE_LIMIT_`
-  `BYTES_PER_SEC`），即时下一首保持全速下载以保障 gapless 预排不被拖慢。
-- Phase 4 ✅ 完成：ahead 预取下一首到缓存；严格 gapless 已实现——预取完成后把
-  下一首解码器直接挂入 rodio 顺序队列（`HandoffMarker` 在样本级交接时翻转），
-  当前曲目结束即无间隙 PCM 衔接；MP3 编码延迟由 rodio 队列的帧对齐处理，
-  FLAC 天然无缝。重复一首/队列不一致时自动降级为普通顺序播放。
-- 真实 PMS 自动化回归 ✅（`cargo test -- --ignored real_pms_engine_regression`）：
-  用开发态明文 token 从真实资料库取两首 FLAC，串行下载 → 磁盘缓存 → 渐进播放 →
-  预排下一首 → 自然结束无缝交接 → seek → 暂停/恢复，已在本机通过。
-  同时给 `download_progressive` 增加 Content-Length 完整性校验：静默截断的下载
-  不再被当作完整缓存提交（修复缓存命中半截文件的风险）。
-- 真实 PMS 高频切歌回归 ✅（`cargo test -- --ignored
-  real_pms_engine_rapid_switch_regression`）：串行预缓存最多 10 首真实曲目后
-  连续快速加载/切换两轮共 20 次，第二轮穿插 seek/暂停/恢复，全部无失败，
-  覆盖历史上 WebView 高频切歌 error4/卡顿场景。
-- Phase 5 ✅ 完成：macOS Now Playing/Remote Command Center + Windows SMTC
-  （Windows 目标已用 `cargo xwin build --target x86_64-pc-windows-msvc`
-  真实编译并链接出 `Cadilume.exe`，期间修复 block2 未按 macOS 目标隔离、
-  windows 0.58 PascalCase API 等编译问题；运行时交互验收待 Windows 实机）；
-  输出设备选择已补完——cpal 枚举设备、`native_audio_set_output_device` 重建
-  播放器并从原进度恢复（缓存命中优先，否则重新渐进下载），前端
-  `setOutputSinkId` 与设备列表走原生通道，旧事件线程干净退出。
-- Phase 6 ✅ 完成：WebView/HTMLAudio 播放路径全部移除（usePlayer native-only，
-  删除 DualAudioPool/预缓冲/媒体错误回退等约 1400 行及对应单测）。
+## 最终选型
 
-剩余事项：真实 PMS 听感回归（用户实听：主观无间隙、歌词对时与 UI 层高频操作）、
-Windows 实机运行时验收（SMTC 交互、隐藏窗口后台播放；编译与链接已通过）。
+保留 `rodio 0.22 + cpal 0.17 + symphonia 0.5`：
 
-### 遗留代码项：Now Playing / SMTC 封面
+- rodio 提供 Player、队列、格式/声道转换和 cpal mixer 接入；
+- cpal 直接使用 CoreAudio/WASAPI；
+- symphonia 负责 FLAC、MP3、MP4/AAC、Vorbis 与 WAV 解码；
+- crates 静态编入应用，运行时只链接操作系统框架；
+- PMS 转码为本地不支持的媒体格式提供服务端兼容兜底。
 
-- 计划 Phase 5 验收含“封面”，当前 macOS/Windows 系统媒体控制只更新
-  标题/歌手/专辑/时长/进度，未设置封面图。
-- 设计说明（待用户可验证的会话落地）：`NowPlayingMetadata` 增加
-  `artwork_url`（前端传 loopback 票据地址，不暴露 PMS），Rust 下载图片字节后
-  在**主线程**构造 `NSImage` + `MPMediaItemArtwork`（objc2 将 AppKit 类标记为
-  MainThreadOnly，跨线程持有是 UB），之后每次 200ms 轮询更新都须在主线程
-  重建含封面的字典；Windows 端需开启 `Storage_Streams` 并用
-  `RandomAccessStreamReference` 包装字节。实现后须在 macOS 实机确认 Now Playing
-  封面显示、切歌后封面更新、无内存问题。
+本机 Plexamp 的 `treble.node + BASS` 具有闭源授权、私有模块和 bundle 动态库边界，
+不满足 Cadilume 的开源与独立发行要求。libmpv/FFmpeg 会引入额外动态库、签名、许可和
+分发复杂度。完全自写 CPAL 队列/混音层会重复 rodio 已验证能力并扩大实时音频风险。
 
-### Windows 实机验收清单（待 Windows 环境执行）
+只有出现无法由 PMS 转码兜底的主流格式缺口、rodio/cpal 无法修复的跨平台设备故障，
+或有界 PCM 模型在真实负载下持续欠载，才重新打开换核评估。
 
-1. `pnpm tauri build` 完整构建（macOS 上 MSVC 交叉构建被 `aws-lc-sys` 的 C
-   工具链挡住，需在 Windows 机器上构建）。
-2. 播放一首真实 PMS 曲目，确认任务栏 SMTC 显示标题/歌手/专辑/封面与进度；
-   按媒体键 play/pause/next/previous/seek 均生效且不泄露 PMS 信息。
-3. 最小化窗口后继续播放不中断（引擎在 Rust 进程，不依赖 WebView 定时器）。
-4. 隐藏窗口（任务栏隐藏/关闭到托盘）播放保持；通过托盘恢复窗口不打断播放。
-5. 设置页输出设备列表可枚举并切换，切设备后从原进度恢复。
+## 已完成阶段
 
-### 用户实听回归清单（macOS 开发态即可执行）
+### Phase 1：播放与队列权威
 
-1. 播放一张连续专辑（含现场专辑），自然跨曲确认无明显间隙（gapless 生效）。
-2. 打开歌词，跨曲后歌词与播放进度对齐（track 事件只切 UI 不重载流）。
-3. 连续点击“下一首”20 次以上，确认播放按钮不长时间转圈、不卡死、无报错。
-4. 随机播放下高频切歌，确认 shuffle 决策由 Rust 队列驱动、无重复/漏曲。
-5. 拖动进度条 seek、暂停/恢复、切到下一首再切回，确认位置与时长正确。
-6. 最小化/隐藏窗口后播放不中断；点 Dock/托盘恢复窗口不打断播放。
-7. 设置页切换输出设备（如扬声器/耳机），播放从原进度继续。
-8. 音量默认 20% 合适，调节/静音即时生效。
+- `native_audio_load/play/pause/stop/seek/volume/status` 和原生事件闭环。
+- Rust 管理队列索引、repeat、shuffle、自然结束和系统远程命令；前端只镜像状态。
+- shuffle 使用随机化 remaining bag，同一轮不重复，带历史 cursor；Rust 预览接口保证
+  gapless 预排和自然推进使用同一候选。
 
-## 2. 现状盘点（dev 分支起点）
+### Phase 2：磁盘缓存
 
-| 层 | 现状 |
-| --- | --- |
-| 前端播放 | `usePlayer` 状态机 + `HTMLAudioElement`（双元素预缓冲、票据在途去重、回退 320/256/192） |
-| Rust 票据 | `StreamProxy`：loopback 票据、连接并行测试/降级、503/429 退避、`audio/*` 白名单、脱敏诊断 |
-| Rust 引擎 | `audio_engine.rs` 骨架：rodio 命令（load/play/pause/seek/volume/status/device_check）、下载落盘缓存、默认音量 20% |
-| 磁盘缓存 | 雏形：`native-audio/downloads/{ratingKey}.{ext}` 全量下载 + `.part` 原子提交 + 重复命中 |
+- 512 MiB mtime LRU、命中刷新、原子 `.part -> .audio`、损坏首块自愈。
+- 缓存身份按 server/track/quality/codec/Part revision 隔离，再由 SHA-256 生成文件名。
+- LRU 不删除活动 `.part`；下载 guard 清理取消/失败/abort；启动清理崩溃残留。
+- 清缓存、登出、换账号会先取消并等待活动任务，再停播和删除，兼容 Windows 文件占用。
 
-## 3. 总体架构
+### Phase 3：渐进播放与预取
 
-```text
-前端 usePlayer（统一状态机与 UI）
-  └─ 播放后端抽象：WebViewBackend（现状） | NativeBackend（目标，可开关切换）
-        └─ Rust AudioEngine（命令 + 事件，脱敏）
-              ├─ 播放控制：load/play/pause/seek/volume/stop
-              ├─ 进度与状态事件：50ms 轮询 → native-audio://event
-              ├─ DiskCache：LRU、上限、原子写入、命中校验、Delete Caches
-              ├─ 边下边播与 ahead 预取（Phase 3）
-              └─ 系统集成：macOS Now Playing / Windows SMTC（Phase 5）
-```
+- 下载 256 KiB 头部后开始解码，后台继续同一文件；无 Content-Length 流可完整提交。
+- 单条 PMS 下载 permit，播放优先于即时下一首，即时下一首优先于远 ahead。
+- 同键并发预取共享任务；远 ahead 限速 5 Mbps，变成即时下一首时取消后全速升级。
+- 首包/body chunk 30 秒无进展超时，空响应拒绝，Content-Length 截断最多重试三次。
 
-- 前端保留统一 UI/歌词/队列展示；内核迁移后队列权威在 Rust，前端只做视图与命令。
-- 双后端并行期通过配置/开关切换，WebView 作为回退保留到 Phase 6 结束。
+### Phase 4：实时解码隔离与 gapless
 
-## 4. 阶段计划
+- 每首曲目一个 symphonia worker；CoreAudio/WASAPI 回调只从有界 PCM channel
+  `try_recv`，不执行网络、文件 I/O 或 codec 工作。
+- PCM 以 1024 frame、声道对齐 chunk 传递，最多约 4 秒/512 chunk；欠载时先保持 frame
+  对齐，再暂停 Player，恢复约 250 ms PCM 后继续。
+- seek epoch 清空旧 PCM，并可中断渐进 Reader 在下载前沿的条件变量等待；短曲到 EOF 后
+  worker 保留 decoder，后续向前/向后 seek 仍有效。
+- worker 在 seek 抢占时保留当前已分配 chunk 作为 spare buffer，再归还复用池；连续
+  代际切换不会为每次 seek 重新分配一批 `Vec<f32>`。
+- 下一首完成下载和预解码后直接 append 到 rodio 队列，`HandoffMarker` 在第一个 sample
+  被拉取时提交来源、时长、缓存身份和元数据。
+- stop/切歌/设备切换使用取消 Reader、播放代际与替换 Player，不再调用可能同步等待
+  渐进 Source 的 `Player::clear()`。
 
-### Phase 0：当前清理与基础修复（用户当前优先）
+### Phase 5：系统媒体与输出
 
-- 已完成：删除 spike 测试按钮（原生试播/设备自检）与 DevTools 钩子；保留 Rust
-  `AudioEngine` 命令骨架供后续落盘。
-- 用户先行修复既有基础 bug 与 UI 问题（不依赖内核替换）。
-- 验收：dev 分支 WebView 播放无回归；清理改动提交。
-
-### Phase 1：AudioEngine 正式化（队列 / 进度 / 事件）
-
-- 队列权威迁移到 Rust：曲目列表、当前索引、repeat/shuffle、自然结束与失败事件。
-- 播放控制完整：play/pause/seek/volume/stop；seek 需验证 MP3 粒度并回退转码源。
-- 进度发布：每 50ms 轮询引擎位置 → `native-audio://event`（只含位置/时长/状态，
-  不含来源）；歌词对时沿用现有 `usableDurationSeconds` 语义。
-- 前端 `NativeBackend` 实现与开关（设置页“原生播放内核”实验项或环境变量）。
-- 验收：真实 PMS 流连续/随机切歌 20+ 次无 error4/卡顿；进度与歌词对时；seek、
-  暂停恢复正确；Windows 隐藏窗口后台播放不中断（Phase 1 即验证）。
-
-### Phase 2：磁盘缓存正式化
-
-- 借鉴 kithara `kithara-storage` 设计（MIT/Apache，源码可参考/引用并保留声明）与
-  Plexamp 策略（clean-room）：
-  - LRU 容量上限（默认 512MB，可配置）、容量统计、淘汰策略；
-  - 元数据索引落盘（JSON/二进制）、损坏自愈；
-  - 原子写入（`.part` + rename）、命中校验（大小/etag）；
-  - 设置页现有“清理缓存”入口扩展到音频缓存（Delete Caches 语义）。
-- 验收：重复播放命中缓存；超限正确淘汰；重启后缓存可用；清缓存后正确失效且不影响
-  封面缓存。
-
-### Phase 3：边下边播与 ahead 预取
-
-- 借鉴 kithara `kithara-stream` 的 pull-driven range fetch：先下载头部可播放的
-  1–2MB 开播，后台继续补齐同一文件（可 seek 文件天然支持）。
-- 借鉴 Plexamp：队列 ahead 预取（桌面建议 2–3 首）、预取限速（默认 5 Mbps）、
-  逐首失败不阻塞播放。
-- 验收：长曲目秒开；切歌预取可见；带宽受限下播放不卡；缓存仍满足 Phase 2 约束。
-
-### Phase 4：无缝衔接 / gapless
-
-- rodio 顺序播放间隙优化：预解码下一首开头并做衔接（借鉴 kithara prefetch 思路）。
-- MP3 编码延迟（padding/delay）处理；FLAC 天然 gapless。
-- 验收：连续专辑/现场专辑无明显间隙；歌词跨曲对时；失败时降级为普通顺序播放。
-
-### Phase 5：系统集成
-
-- macOS Now Playing / Remote Command Center：`MPNowPlayingInfoCenter`（objc2 已有依赖）。
-- Windows SMTC：`Windows.Media.Playback` / SMTC（windows crate 接入）。
-- 输出设备选择：cpal 枚举/切换，接入现有 `outputSinkId` 前端逻辑。
-- 验收：双端系统媒体控制（播放/暂停/seek/封面/进度）可用且不泄露 PMS 信息。
+- macOS `MPNowPlayingInfoCenter`：标题、歌手、专辑、时长、进度、速率、封面和显式
+  `playbackState`；AppKit 媒体对象只在主线程创建，字典 key 必须使用 MediaPlayer 导出的
+  `MPMediaItemProperty*` / `MPNowPlayingInfoProperty*` NSString 常量。
+- macOS Remote Command Center：play/pause/toggle/next/previous/seek。
+- Windows SMTC：标题、歌手、专辑、时间线、播放状态和基本媒体键；封面仍待实机实现/验收。
+- cpal 原生输出设备枚举和切换；从缓存/来源、位置、音量和队列快照恢复。
+- 桌面端禁用 WebKit MediaSession，避免覆盖原生系统会话。
 
 ### Phase 6：WebView 播放退役
 
-- `NativeBackend` 默认启用；WebView 保留为异常回退（可配置关闭）。
-- 删除双 `HTMLAudioElement` 预缓冲等 WebView 专用逻辑；清理 `usePlayer` 中死分支。
-- 发布验证：macOS/Windows 打包、真实 PMS 全功能回归（歌词/黑胶/队列/切歌/设置）。
+- 删除 `DualAudioPool`、HTMLAudio 预缓冲、WebView media error 回退和桌面 MediaSession。
+- `usePlayer` 的桌面路径只调用 Rust；浏览器演示状态不接触真实 PMS。
+- 可见 WebView 连续两阶段心跳失联才保护停播；隐藏窗口不受 timer 节流影响，系统睡眠
+  恢复有确认窗口。
 
-## 5. 借鉴来源与合规边界
+## 关键故障及根因
 
-- kithara（MIT OR Apache-2.0）：`storage`/`stream` 设计与源码可参考或按许可引用
-  （引用时保留版权声明）；不引入 `kithara-play`（firewheel 与 Tauri 兼容问题未解）。
-- Plexamp（闭源）：仅 clean-room 策略借鉴（缓存上限、ahead 预取、限速、Delete
-  Caches、preferDownloadedMedia），不复制代码与私有实现。
-- 使用栈：rodio（MIT/Apache）、cpal（MIT/Apache）、symphonia（MPL-2.0）、
-  reqwest（MIT/Apache）——均与 MIT 应用兼容，全部静态集成。
-- 不使用：BASS（闭源商业）、GPL 组件、libmpv（LGPL/系统依赖）、ffmpeg 二进制。
+### UI 卡住但音乐继续
 
-## 6. 风险与对策
+rodio 的 `Player::clear()` 会等待音频线程。旧架构让渐进 Reader/decoder 直接被音频回调
+拉取；当 Reader 等网络时，同步 stop/切歌调用会等待回调，继而卡住 Tauri IPC 和 WebView。
 
-| 风险 | 对策 |
-| --- | --- |
-| rodio/symphonia 对部分格式（HE-AAC/Opus/WMA）不支持 | 走 PMS 转码回退（现有 mp3 链路），原始格式白名单之外一律转码 |
-| MP3 seek/gapless 粒度有限 | Phase 1/4 单独验收；MVP 允许“减少间隙”而非严格 gapless |
-| Windows 后台/隐藏窗口播放 | 引擎在 Rust 进程，不依赖 WebView 定时器；Phase 1 重点回归 |
-| 缓存索引损坏/版本迁移 | 索引落盘 + 自愈重建；清理入口兜底 |
-| 双后端切换期间状态漂移 | 前端统一状态机 + 明确切换时机（无活动播放时） |
+修复后，实时回调不再等待 I/O，stop 先取消 Reader 再替换 Player；旧播放代际无法回写。
 
-## 7. 分支策略与执行顺序
+### 弱网欠载和 seek
 
-- `main`：稳定基线（当前 `d77f732`）。
-- `webview`：WebView 播放版本基线（当前 `d77f732`，与 main 相同，供回退/对比）。
-- `dev`：后续开发分支——先修基础 bug/UI（Phase 0），完成后再按 Phase 1→6 落盘
-  内核播放；每个 Phase 独立验证与本地提交。
-- 提交/推送纪律：本地提交不强制 push；用户明确要求时 push（当前要求推 webview/dev
-  到远端，等待远端地址配置）。
+只把阻塞解码移到 worker 仍不够：若一个 chunk 到达就恢复，会在弱网下反复 pause/play；
+若 worker 正卡在渐进文件前沿，向后 seek 也可能等到网络重新前进。
+
+修复后使用 250 ms 恢复水位，并让 seek interrupt epoch 进入 Reader 条件变量谓词，向后
+定位可立即回到已下载区域。
+
+### shuffle 只在少数曲目间跳转
+
+旧 Rust `next_index` 每次从排序后的候选中取第一个，`bag` 却记录已选项而非剩余项，
+多曲队列会在前两个索引间往返；前端随机预览又常与 Rust 验证不一致，导致 shuffle
+无法预排 gapless。
+
+修复后 bag 表示当前轮剩余随机顺序，历史 cursor 支持可逆导航，前端直接请求 Rust 的
+稳定预览候选。
+
+### macOS 控制中心只有应用名
+
+旧实现把 `MPMediaItemPropertyTitle` 等 Objective-C 符号名重新构造成 NSString，并用同一
+错误字符串做单测回读。`playbackState` 和远程命令仍会生效，因此控制中心能显示应用名和
+暂停/切歌按钮，但 MediaPlayer 会静默忽略全部错误 key，曲名、歌手、专辑、时间轴和封面
+都不出现。
+
+修复后直接使用 `objc2-media-player` 暴露的系统 NSString 常量，并用这些真实常量逐项
+回读字典；测试同时断言旧符号名字符串不存在，避免再次出现自证通过的假阳性。
+
+## 自动化覆盖
+
+- 实时 Source 在 decoder 停顿 300 ms 时连续 4096 次拉取不阻塞。
+- PCM 队列填满后背压且不超过硬上限；欠载恢复水位不退化为单 chunk。
+- 渐进 decoder 卡在文件前沿时，向后 seek 在 1 秒内受理并重新产生 PCM。
+- 48 轮 seek storm 中 PCM chunk 分配数不超过复用池容量加 1。
+- 160 次本地真实 decoder 加载/seek/stop，所有 worker 在有界时间退出。
+- 128 次播放代际切换，旧代不能回写。
+- shuffle 稳定 peek、整轮无重复、repeat 边界与 Previous/Next 可逆。
+- 64 路同键预取只发出一次 HTTP；远 ahead 升级、取消清理和账号 reset。
+- 空响应、截断重试、chunked、缓存损坏自愈、LRU 与活动 `.part` 隔离。
+- 本机真实 PMS 两首 FLAC 完整链路，以及最多 10 首、两轮共 20 次快速切换。
+- Rust 全量 `96` 项：`94 passed / 0 failed / 2 ignored`；严格 Clippy 零警告。
+
+## 待实机验收
+
+1. macOS 连续专辑听感、弱网缓冲、隐藏窗口、睡眠恢复、设备切换，以及修复后控制中心
+   曲目元数据/封面与媒体键的最终可见验收。
+2. ReplayGain、crossfade、离线下载属于后续能力，不是本轮缺陷。
+
+Windows 不属于本轮验收范围，也不作为本轮完成门禁；重新开启该平台工作时另立任务。

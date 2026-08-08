@@ -1,5 +1,15 @@
 # FEATURE_REQUESTS
 
+## macOS Now Playing 可见验收
+
+- 代码链路已闭环：禁用 WebKit MediaSession；Rust 在主线程用 MediaPlayer 框架导出的真实
+  NSString key 发布标题、歌手、专辑、时长、进度、速率、媒体类型和封面，并同步
+  `playbackState`。系统字典契约测试逐项读回成功，真实播放日志也确认元数据和封面进入发布
+  线程。
+- 唯一未完成项是用户在 macOS 控制中心可见卡片上人工确认曲名/歌手/专辑/封面，以及媒体键
+  和 seek。现有自动化无法读取系统控制中心的最终可见内容，且项目禁止主动截图；完成该次
+  可见验收前不要宣称系统 UI 百分之百闭环，但也不要重复改写已经通过契约测试的 key。
+
 ## 歌词与 Plexamp 实曲对时：待 Cadilume 原生听感验收
 
 - 已修复可确认的前端时间问题：完整保留 PMS `startOffset/endOffset` 毫秒边界，歌词流按 PMS 原始顺序尝试；桌面播放期间约每 50ms 读取活动 `HTMLAudioElement.currentTime`，不再只依赖约 250ms 粒度的 `timeupdate`，且未加入猜测性的固定正负 delay。
@@ -62,6 +72,10 @@
   LRU、边下边播、ahead 预取、macOS/Windows SMTC、WebView 播放退役）。剩余：
   严格 gapless（MVP 预取减间隙）、Windows 实机 SMTC/后台播放验收、真实 PMS 听感
   回归（高频切歌 20+ 次、歌词对时、seek/暂停恢复）。
+- 2026-08-08 更新：严格 gapless、PCM 解码/实时线程隔离、缓存身份与并发清理、设备恢复、
+  macOS Now Playing 字典契约均已实现并通过自动化/负载验证。Windows 已按用户要求移出本轮；
+  当前只保留 macOS 控制中心可见人工确认、长期真实听感/弱网/睡眠恢复、ReplayGain、
+  crossfade、响度扫描和离线下载等明确后续项。
 
 ## [FR-20260801-001] 页面标题与歌手资料层级
 

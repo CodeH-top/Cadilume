@@ -10,15 +10,15 @@
 
 ## 为什么做这个项目
 
-本机 Plexamp 4.12.4 是 Electron + React Native Web 桌面壳，应用约 206 MB，默认窗口只有 270×515。其独立音量功能实际上存在，但窄屏布局要到约 675px 高才显示音量滑块，默认窗口因此看不到；Windows 端依赖的媒体服务也没有实现完整 SMTC。
+本机 Plexamp 4.13.2 是 Electron + React Native Web 桌面壳，播放层随应用携带私有 `treble.node` 与 BASS 动态库。Cadilume 只把它作为行为与缓存策略的 clean-room 参考，不复制私有代码、素材、标识或二进制。
 
 Cadilume 的首要原则：
 
 - 保留系统原生窗口装饰与按钮；macOS 使用 Overlay 标题栏隐藏系统标题，把原生交通灯整合进 52px 自定义顶部工具栏，不绘制假按钮。
-- 默认窗口与最小窗口均为 `1280×800`，界面不允许继续缩小。
+- 默认窗口与最小窗口均为 `1280×820`，界面不允许继续缩小。
 - 音量固定显示在播放器底栏，不随窗口高度隐藏，也不改变系统主音量。
-- 关闭主窗口可选择“最小化到托盘/菜单栏”或“退出程序”。
-- Windows 通知区域与 macOS 菜单栏提供明确的“退出 Cadilume”；设置页只保留关闭行为、退出账号和其他应用设置，不重复提供退出应用按钮。
+- 关闭主窗口统一最小化并继续播放；菜单栏/通知区域状态图标是独立、持久化偏好。
+- 状态图标开启时提供明确的“退出 Cadilume”；关闭时仍可从 Dock/任务栏恢复主窗口，不形成不可见后台进程。
 - 只读取 Plex 的 Music 类型资料库，不混入电影、剧集、照片等 Section。
 - 免费独立 Plex 账号只要获得音乐库共享权限，就不在客户端侧做 Plex Pass 拦截。
 - 所有 PMS 请求使用 `/api/v2/resources` 返回的服务器专属 `accessToken`，包括 `owned:false` 的家庭或共享服务器。
@@ -47,25 +47,26 @@ Cadilume 的首要原则：
 - 播放不兼容时按当前有效质量向下尝试 320 → 256 → 192 kbps，不重复同一档位；全部失败后显示全局播放失败提醒。
 - `127.0.0.1` loopback 只负责票据校验、鉴权隔离、Range 转发和连接回退，不解码、不重新编码。即使 PMS 与 Cadilume 位于同一台 Mac，兼容转换或降码率仍由 PMS 服务端完成。
 - 播放队列、上一首/下一首和进度跳转；顺序播放自然到队尾停止、当前列表循环、单曲循环与随机袋播放始终限定在当前队列，绝不自动跳到其他歌单。
-- 两个 `HTMLAudioElement` 组成的播放池：默认预解析并缓冲下一首，切歌时复用待命 Audio；列表循环可预缓冲队首，随机播放会稳定保留一个 pending 候选并在实际切歌时才从 shuffle bag 消费，单曲循环无需错误预测。
-- 独立音量、静音和持久化，并同步应用到当前与预缓冲 Audio。
-- Plex 授权返回的时间轴歌词与纯文本歌词；保留 PMS 毫秒边界，播放时以活动 Audio 的高频时钟驱动高亮和自动滚动，有时间戳的行可点击跳转，不添加猜测性的固定延迟。歌词 payload 会先被 provider adapter 归一，歌词 UI 不直接依赖 Plex 协议。
+- Rust 原生播放核心使用 `rodio 0.22.2 + cpal 0.17.3 + symphonia 0.5.5`。文件/网络读取和解码运行在独立 worker；CoreAudio/WASAPI 回调只从约 4 秒的有界 PCM 队列非阻塞取样，不执行 I/O 或 codec 工作。
+- 当前曲目渐进下载到应用缓存，完整文件以 `.part -> .audio` 原子提交；下一首完整缓存会直接附加到 rodio 队列并按样本级标记完成 gapless 交接。
+- PCM 欠载会冻结媒体时间并进入缓冲状态，达到 250ms 恢复水位后继续；歌词、scrobble、UI 与系统媒体时间都不会把欠载静音算作播放进度。
+- 独立音量、静音和持久化由前端状态统一同步到原生 Player，不修改系统主音量。
+- Plex 授权返回的时间轴歌词与纯文本歌词；保留 PMS 毫秒边界，播放时以 Rust 上报的真实媒体时间驱动高亮和自动滚动，有时间戳的行可点击跳转，不添加猜测性的固定延迟。歌词 payload 会先被 provider adapter 归一，歌词 UI 不直接依赖 Plex 协议。
 - 从底部播放栏展开的完整播放器提供“黑胶”和“封面”两种可记忆模式；歌词或播放队列打开后占用播放器骨架的完整右栏，与左侧播放视觉并列，不呈现为浮动卡片。时间轴歌词跟随活动 Audio、可点击跳转，纯文本歌词保持静态可读；进度、随机、上一首/下一首、播放/暂停、列表循环、静音和独立音量继续固定在底部。
 - 底栏歌词按钮直接打开主窗口中央、全可用高度的歌词层；它不挤压资料库内容、没有遮罩或关闭按钮，只由该按钮切换。歌词区可独立滚动和点击跳转，不再创建独立桌面歌词窗口；纯文本歌词保持静态可读，服务器确认无可显示歌词时按钮禁用。
-- Media Session 播放/暂停/上一首/下一首/Seek 元数据，以及 `/:/timeline` 与 `/:/scrobble` 回报。
+- macOS `MPNowPlayingInfoCenter` / `MPRemoteCommandCenter` 与 Windows SMTC 提供播放状态、元数据、封面、时间轴、播放/暂停、上一首/下一首和 Seek；桌面端不再让 WebKit MediaSession 争抢系统媒体会话。PMS `/:/timeline` 与 `/:/scrobble` 继续按真实媒体时间回报。
 - 本地保存最近队列、当前曲目、播放进度、音质、随机和循环模式；重启后恢复现场但不自动播放，登出时清除播放会话。
 
 ### 播放设备
 
-- macOS：不提供应用内输出设备入口，也不维护无线目标状态；音频输出路由完全交给系统管理，双 Audio 始终使用同一套预缓冲与切换逻辑。
-- Windows：在 WebView2 支持时，通过 `enumerateDevices()` 与 `setSinkId()` 为 Cadilume 选择“系统默认”或指定输出设备，不修改 Windows 全局默认设备。
-- Windows 会监听设备变化；已选设备断开或不可用时回退系统默认，并把相同设备应用到当前与预缓冲 Audio。
-- 若 WebView2 不支持应用内切换，或需要系统侧管理，可直接打开 Windows 音量合成器；`selectAudioOutput()` 仅作为运行环境支持时的增强入口。
+- Windows 由 `cpal` 枚举并打开原生输出设备，不依赖 WebView `setSinkId()`；macOS 的输出路由继续交给系统控制中心。
+- 切换设备时会捕获当前来源、真实媒体进度、音量、暂停状态以及完整随机袋/历史游标；旧下载和解码任务退出后才在新设备恢复，避免双路出声或共享 `.part` 冲突。
+- macOS 的系统无线输出仍交给系统控制中心管理；Cadilume 不实现私有 AirPlay 控制协议。
 
 ### 桌面体验与缓存
 
-- 原生窗口装饰，默认与最小尺寸均为 `1280×800`。macOS 使用 `decorations: true`、Overlay 标题栏、隐藏系统标题和原生阴影，保留原生交通灯、圆角、最小化、缩放与全屏行为；52px 自定义顶部工具栏提供专用背景拖动层。macOS 菜单栏使用透明单色 Template 图标并自动适配浅/深菜单栏，Windows 通知区域沿用应用图标；两端菜单都提供恢复主窗口、播放/暂停和退出，macOS 点击 Dock 图标也会重新显示隐藏的主窗口。
-- 设置中可选择关闭到托盘/菜单栏或直接退出；应用级退出保留在原生菜单中，设置页只提供危险色“退出账号”。
+- 原生窗口装饰，默认与最小尺寸均为 `1280×820`。macOS 使用 `decorations: true`、Overlay 标题栏、隐藏系统标题和原生阴影，保留原生交通灯、圆角、最小化、缩放与全屏行为；52px 自定义顶部工具栏提供专用背景拖动层。初始化状态直接铺满整个窗口，不再显示居中突出卡片，仅为顶部拖拽区和交通灯留出安全空间。macOS 菜单栏使用透明单色 Template 图标并自动适配浅/深菜单栏，Windows 通知区域沿用应用图标；状态图标开启时提供恢复主窗口、播放/暂停和退出，macOS 点击 Dock 图标也会重新显示主窗口。
+- 关闭主窗口统一最小化；设置页只控制状态图标显示并提供危险色“退出账号”，应用级退出保留在原生状态菜单中。
 - 首次启动按系统当前外观初始化；之后从右上角在浅色与深色之间直接切换。
 - 播放器底栏固定提供歌词、队列和独立音量；Windows 额外提供播放设备入口，macOS 不显示应用内输出设备按钮。
 - 封面在接近可视区域时预取；前端限制并发并复用请求，Rust 使用服务器 token Header 拉取图片，而不是把 token 放进图片 URL。
@@ -73,7 +74,7 @@ Cadilume 的首要原则：
 
 ## 开发
 
-要求：Node.js 20+、pnpm 10+、Rust stable，以及 [Tauri 2 平台依赖](https://v2.tauri.app/start/prerequisites/)。在 macOS 上重新生成分层应用图标还需要 Xcode 26 或更高版本及其中的 Icon Composer。
+开发构建要求 Node.js 20+、pnpm 10+、Rust stable 和对应平台 SDK；macOS 分层图标需要 Xcode 26 或更高版本及其中的 Icon Composer。这些都是编译工具，不是发行应用的运行依赖。最终应用不要求用户安装 Homebrew、FFmpeg、libmpv、BASS、sidecar 或后台服务；Rust crates 静态编入程序，运行时只使用系统自带的 CoreAudio/MediaPlayer 或 WASAPI/SMTC 等 API。
 
 ```bash
 pnpm install
@@ -106,7 +107,7 @@ hdiutil verify src-tauri/target/release/bundle/dmg/Cadilume_0.1.1_aarch64.dmg
 需要复核包内应用签名时，以只读、不可浏览方式临时挂载 DMG，验证后立即卸载；不要依赖已经清理的源 `.app`：
 
 ```bash
-dmg_path="src-tauri/target/release/bundle/dmg/Cadilume_0.1.1_aarch64.dmg"
+dmg_path="src-tauri/target/release/bundle/dmg/Cadilume_0.1.2_aarch64.dmg"
 mount_dir=$(mktemp -d "${TMPDIR:-/tmp}/cadilume-dmg.XXXXXX")
 hdiutil attach "$dmg_path" -readonly -nobrowse -mountpoint "$mount_dir"
 codesign --verify --deep --strict --verbose=4 "$mount_dir/Cadilume.app"
@@ -121,7 +122,11 @@ rmdir "$mount_dir"
 ## 目录
 
 ```text
-src/                  React 桌面 UI、歌词、双 Audio 播放器和 Windows 输出适配
+src/                  React 桌面 UI、歌词、队列镜像和原生播放器 IPC
+src-tauri/src/audio_engine.rs
+                      Rust 解码 worker、PCM 缓冲、缓存、gapless、队列与输出设备
+src-tauri/src/now_playing.rs
+                      macOS Now Playing / Remote Commands 与 Windows SMTC
 src-tauri/src/plex.rs Plex 认证、资源发现、PMS、歌词、歌单读写和封面缓存
 src-tauri/src/stream_proxy.rs
                       127.0.0.1 音频票据代理、Range / HEAD 与连接回退
@@ -134,11 +139,11 @@ docs/                 Plex 互操作研究与演进架构
 
 ## 重要边界
 
-- v0.1 仍使用 WebView 音频元素。双 Audio 能减少确定性切歌前的等待，但不等于严格 gapless、crossfade、完整后台队列权威或音频离线缓存。
-- macOS 不实现应用内无线输出控制；Windows 输出设备依赖 WebView2 的 Audio Output Devices API。USB/蓝牙/HDMI 声卡、设备热插拔和休眠恢复仍需 Windows 真机验收。
-- Windows 当前提供 Web Media Session 能力，但不宣称完整原生 SMTC；更稳定的后台播放、严格 gapless 和平台媒体集成仍需要 Rust 原生播放核心。
+- 当前播放、缓存、gapless 预排、输出设备和系统媒体状态均由 Rust 原生核心负责；WebView 只保留 UI、队列镜像和 PMS 业务编排。
+- macOS 不实现应用内私有无线输出控制；USB/蓝牙/HDMI 声卡热插拔、休眠恢复和 Windows WASAPI/SMTC 仍需对应平台实机长期验收。
+- ReplayGain、crossfade、响度扫描和离线下载是后续产品能力，不应通过引入闭源或外置播放内核绕过当前边界。
 - 账号 token 保存在系统凭据存储，服务器专属 token 只保留在 Rust 状态中；PIN IPC 仅返回 `authenticated`。PMS 数据、封面和音频上游请求都由 Rust 用 Header 鉴权。WebView 的音频与封面地址都是 `127.0.0.1` 随机端口上的短期高熵 ticket URL，其中不含 PMS 地址、媒体路径、缓存键或 `X-Plex-Token`；音频代理支持 GET/HEAD、单段 HTTP Range，并在已发现的本地、远程与 Relay 连接间回退，封面代理只读取已经校验的本地磁盘缓存。loopback 只是安全传输边界：原始媒体来自 PMS Part endpoint，固定码率转换来自 PMS universal transcode，客户端都只转发字节流。
-- 原生退出入口会先发送退出前事件，让播放器立即保存队列与进度，再在收到确认或短超时后结束进程；关闭到托盘只隐藏窗口，不会误结束播放。
+- 原生退出入口会先发送退出前事件，让播放器立即保存队列与进度，再在收到确认或短超时后结束进程；关闭主窗口只最小化并继续播放，不会误结束播放。
 - 客户端只播放服务器已经授权给当前账号的内容。支持免费账号访问已共享的 Music 库，不代表绕过 Plex ACL、服务端限制或特定功能的订阅要求。
 
 进一步的播放核心和安全演进见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。

@@ -35,6 +35,12 @@
   引擎；引擎不设自身默认音量（rodio 原生 1.0 仅作瞬时值），无缓存时前端默认 50%。
   不得在 Rust 引擎里再写死默认音量。
   Source: user requirement on 2026-08-07（引擎默认音量与前端缓存关系）。
+- [ACT-023] macOS 初始化界面必须直接覆盖整个原生内容区，不使用居中卡片、自定义标题栏、
+  卡片边框/阴影或独立背景层；顶部只保留原生交通灯安全区与约 52px 拖拽区域。
+  Source: user requirement and full-window validation on 2026-08-08.
+- [ACT-024] 主窗口与展开播放器的定时歌词统一保持活动行垂直居中；只有滚动范围不足时才在
+  顶部/底部钳制。切歌可归零旧滚动位置，但不得清空本次渲染已挂载的行 ref 后提前返回。
+  Source: user requirement and dual-view DOM validation on 2026-08-08.
 
 ## Validation
 

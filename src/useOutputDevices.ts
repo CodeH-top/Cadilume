@@ -73,11 +73,24 @@ function supportsSinkSelection(): boolean {
   return typeof (HTMLMediaElement.prototype as HTMLMediaElement & { setSinkId?: unknown }).setSinkId === "function";
 }
 
+export function canSelectApplicationOutput(
+  desktopRuntime: boolean,
+  secureContext: boolean,
+  webSinkSelection: boolean,
+): boolean {
+  return desktopRuntime || (secureContext && webSinkSelection);
+}
+
 export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<boolean>) {
   const platform = useMemo(() => detectOutputPlatform(navigator as Navigator & NavigatorPlatformInfo), []);
   const mediaDevices = navigator.mediaDevices as ExtendedMediaDevices | undefined;
-  const canSelectSink = window.isSecureContext && supportsSinkSelection();
-  const canUseSystemPicker = typeof mediaDevices?.selectAudioOutput === "function";
+  const desktopRuntime = isDesktopRuntime();
+  const canSelectSink = canSelectApplicationOutput(
+    desktopRuntime,
+    window.isSecureContext,
+    supportsSinkSelection(),
+  );
+  const canUseSystemPicker = !desktopRuntime && typeof mediaDevices?.selectAudioOutput === "function";
   const [devices, setDevices] = useState<OutputDevice[]>([
     { deviceId: "", label: "系统默认", isDefault: true },
   ]);
@@ -86,10 +99,10 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
   const [message, setMessage] = useState<string>();
 
   const refresh = useCallback(async () => {
-    if (!isDesktopRuntime() && !mediaDevices?.enumerateDevices) return;
+    if (!desktopRuntime && !mediaDevices?.enumerateDevices) return;
     setLoading(true);
     try {
-      const nextDevices = isDesktopRuntime()
+      const nextDevices = desktopRuntime
         ? (await nativeAudioOutputDevices()).map((device) => ({
             deviceId: device.device_id,
             label: device.label,
@@ -105,7 +118,7 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
         try {
           await setOutputSinkId("");
         } catch {
-          // Keep the UI on the safe default even if WebView2 rejects the routing request.
+          // Keep the UI on the safe default even if the native route rejects it.
         }
         writeOutputDevicePreference("");
         setSelectedDeviceId("");
@@ -116,7 +129,7 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
     } finally {
       setLoading(false);
     }
-  }, [mediaDevices, setOutputSinkId]);
+  }, [desktopRuntime, mediaDevices, setOutputSinkId]);
 
   const selectDevice = useCallback(async (deviceId: string) => {
     setMessage(undefined);
@@ -170,7 +183,7 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
   }, [mediaDevices, refresh, selectDevice, selectedDeviceId]);
 
   useEffect(() => {
-    if (isDesktopRuntime()) {
+    if (desktopRuntime) {
       let cancelled = false;
       const restore = async () => {
         const stored = readOutputDevicePreference();
@@ -197,7 +210,16 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
         if (!cancelled) await refresh();
       };
       void restore();
-      return () => { cancelled = true; };
+      // cpal does not expose one portable hot-plug callback. Revalidate explicit
+      // routes on both desktop platforms so unplugging a device returns to the
+      // system default instead of leaving a silent output stream behind.
+      const refreshTimer = window.setInterval(() => {
+        if (!cancelled) void refresh();
+      }, 5_000);
+      return () => {
+        cancelled = true;
+        window.clearInterval(refreshTimer);
+      };
     }
     if (platform !== "windows" || !canSelectSink) return;
     let cancelled = false;
@@ -229,14 +251,14 @@ export function useOutputDevices(setOutputSinkId: (deviceId: string) => Promise<
     };
     void restore();
     return () => { cancelled = true; };
-  }, [canSelectSink, platform, refresh, setOutputSinkId]);
+  }, [canSelectSink, desktopRuntime, platform, refresh, setOutputSinkId]);
 
   useEffect(() => {
-    if (isDesktopRuntime() || platform !== "windows" || !mediaDevices?.addEventListener) return;
+    if (desktopRuntime || platform !== "windows" || !mediaDevices?.addEventListener) return;
     const onDeviceChange = () => void refresh();
     mediaDevices.addEventListener("devicechange", onDeviceChange);
     return () => mediaDevices.removeEventListener("devicechange", onDeviceChange);
-  }, [mediaDevices, platform, refresh]);
+  }, [desktopRuntime, mediaDevices, platform, refresh]);
 
   return {
     platform,

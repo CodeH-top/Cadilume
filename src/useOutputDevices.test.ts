@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectOutputPlatform, normalizeOutputDevices } from "./useOutputDevices";
+import { canSelectApplicationOutput, detectOutputPlatform, normalizeOutputDevices } from "./useOutputDevices";
 
 describe("output device helpers", () => {
   it("detects desktop platforms from modern and legacy navigator fields", () => {
@@ -22,5 +22,12 @@ describe("output device helpers", () => {
       { deviceId: "speakers", label: "Speakers", isDefault: false },
       { deviceId: "headphones", label: "音频输出 2", isDefault: false },
     ]);
+  });
+
+  it("uses native desktop routing without requiring WebView setSinkId", () => {
+    expect(canSelectApplicationOutput(true, false, false)).toBe(true);
+    expect(canSelectApplicationOutput(false, true, true)).toBe(true);
+    expect(canSelectApplicationOutput(false, false, true)).toBe(false);
+    expect(canSelectApplicationOutput(false, true, false)).toBe(false);
   });
 });

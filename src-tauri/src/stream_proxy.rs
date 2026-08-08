@@ -279,6 +279,48 @@ impl StreamProxy {
         ))
     }
 
+    pub(crate) fn owns_audio_url(&self, candidate: &str) -> bool {
+        self.owns_ticket_url(candidate, "/stream/", true)
+    }
+
+    pub(crate) fn owns_artwork_url(&self, candidate: &str) -> bool {
+        self.owns_ticket_url(candidate, "/artwork/", false)
+    }
+
+    fn owns_ticket_url(&self, candidate: &str, path_prefix: &str, allow_bitrate: bool) -> bool {
+        let Ok(url) = Url::parse(candidate) else {
+            return false;
+        };
+        if url.scheme() != "http"
+            || url.host_str() != Some("127.0.0.1")
+            || url.port() != Some(self.port)
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return false;
+        }
+        let Some(ticket) = url.path().strip_prefix(path_prefix) else {
+            return false;
+        };
+        if !valid_ticket(ticket) {
+            return false;
+        }
+        match url.query() {
+            None => true,
+            Some(_) if !allow_bitrate => false,
+            Some(_) => {
+                let mut pairs = url.query_pairs();
+                matches!(
+                    (pairs.next(), pairs.next()),
+                    (Some((key, value)), None)
+                        if key == "maxAudioBitrate"
+                            && matches!(value.as_ref(), "320" | "256" | "192")
+                )
+            }
+        }
+    }
+
     pub(crate) fn issue_artwork(&self, cache_key: String) -> Result<String> {
         if !valid_ticket(&cache_key) {
             return Err(anyhow!("无效的封面缓存标识"));
@@ -1229,6 +1271,11 @@ mod tests {
         let parsed = Url::parse(&url).unwrap();
         let ticket = parsed.path().trim_start_matches("/stream/");
         assert!(valid_ticket(ticket));
+        assert!(proxy.owns_audio_url(&url));
+        assert!(!proxy.owns_artwork_url(&url));
+        assert!(!proxy.owns_audio_url(&url.replace(":49152", ":49153")));
+        assert!(!proxy.owns_audio_url(&url.replace("127.0.0.1", "localhost")));
+        assert!(!proxy.owns_audio_url(&format!("{url}&maxAudioBitrate=192")));
 
         assert!(proxy
             .issue(target("256"))
@@ -1257,6 +1304,9 @@ mod tests {
 
         let ticket = url_ticket(&url, "/artwork/");
         assert!(valid_ticket(&ticket));
+        assert!(proxy.owns_artwork_url(&url));
+        assert!(!proxy.owns_audio_url(&url));
+        assert!(!proxy.owns_artwork_url(&format!("{url}?unexpected=1")));
         assert_eq!(
             proxy
                 .artwork_tickets

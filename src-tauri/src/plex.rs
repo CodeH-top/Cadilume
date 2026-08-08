@@ -192,21 +192,16 @@ fn write_persisted_config(path: &Path, config: &PersistedConfig) -> Result<()> {
     fs::write(path, serde_json::to_vec_pretty(config)?).context("无法保存 Cadilume 配置")
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BrandPreset {
     #[serde(alias = "plex")]
+    #[default]
     Amber,
     #[serde(alias = "emby")]
     Verdant,
     #[serde(alias = "jellyfin")]
     Azure,
-}
-
-impl Default for BrandPreset {
-    fn default() -> Self {
-        Self::Amber
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -628,7 +623,7 @@ impl PlexState {
     }
 }
 
-fn demote_cached_connection(connections: &mut Vec<CachedConnection>, index: usize) {
+fn demote_cached_connection(connections: &mut [CachedConnection], index: usize) {
     connections.rotate_left(index + 1);
 }
 
@@ -1410,7 +1405,7 @@ async fn ensure_artwork_cached(
     }
     // Resolve the current account's authorized server before consulting disk.
     // A cache hit must never bypass the active PMS ACL boundary.
-    let server = cached_server(&state, &server_id).map_err(display_error)?;
+    let server = cached_server(state, &server_id).map_err(display_error)?;
     let cache_key = artwork_cache_key(&server_id, &path, width, height, &server.token);
     if let Ok(_cache_guard) = state.cache_lock.read() {
         match read_artwork_cache(&state.cache_dir, &cache_key) {
@@ -2683,8 +2678,8 @@ fn write_dev_token_fallback(token: &str) -> Result<(), String> {
 fn write_dev_token_fallback(token: &str) -> Result<(), String> {
     use std::io::Write;
     let path = dev_token_fallback_path();
-    let mut file = std::fs::File::create(&path)
-        .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
+    let mut file =
+        std::fs::File::create(&path).map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
     file.write_all(token.as_bytes())
         .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
     Ok(())

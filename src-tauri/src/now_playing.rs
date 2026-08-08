@@ -23,23 +23,17 @@ mod macos {
     use objc2_core_foundation::CGSize;
     use objc2_foundation::{NSData, NSDictionary, NSNumber, NSString};
     use objc2_media_player::{
-        MPChangePlaybackPositionCommandEvent, MPMediaItemArtwork, MPNowPlayingInfoCenter,
+        MPChangePlaybackPositionCommandEvent, MPMediaItemArtwork, MPMediaItemPropertyAlbumTitle,
+        MPMediaItemPropertyArtist, MPMediaItemPropertyArtwork, MPMediaItemPropertyPlaybackDuration,
+        MPMediaItemPropertyTitle, MPNowPlayingInfoCenter, MPNowPlayingInfoMediaType,
+        MPNowPlayingInfoPropertyDefaultPlaybackRate, MPNowPlayingInfoPropertyElapsedPlaybackTime,
+        MPNowPlayingInfoPropertyMediaType, MPNowPlayingInfoPropertyPlaybackRate,
         MPNowPlayingPlaybackState, MPRemoteCommand, MPRemoteCommandCenter, MPRemoteCommandEvent,
         MPRemoteCommandHandlerStatus,
     };
     use tauri::{AppHandle, Emitter};
 
     static COMMAND_APP: OnceLock<Mutex<Option<AppHandle>>> = OnceLock::new();
-
-    const KEY_TITLE: &str = "MPMediaItemPropertyTitle";
-    const KEY_ARTIST: &str = "MPMediaItemPropertyArtist";
-    const KEY_ALBUM: &str = "MPMediaItemPropertyAlbumTitle";
-    const KEY_DURATION: &str = "MPMediaItemPropertyPlaybackDuration";
-    const KEY_POSITION: &str = "MPNowPlayingInfoPropertyElapsedPlaybackTime";
-    const KEY_RATE: &str = "MPNowPlayingInfoPropertyPlaybackRate";
-    const KEY_DEFAULT_RATE: &str = "MPNowPlayingInfoPropertyDefaultPlaybackRate";
-    const KEY_MEDIA_TYPE: &str = "MPNowPlayingInfoPropertyMediaType";
-    const KEY_ARTWORK: &str = "MPMediaItemPropertyArtwork";
 
     fn app_handle() -> Option<AppHandle> {
         COMMAND_APP
@@ -148,55 +142,61 @@ mod macos {
             let mut last = LAST_LOGGED.get_or_init(|| Mutex::new(None)).lock().unwrap();
             if last.as_deref() != Some(&log_key) {
                 eprintln!(
-                    "[播放] NowPlaying 更新：title={title} artist={artist} album={album} state={playback_state:?} artwork_bytes={}",
+                    "[播放] NowPlaying 更新：metadata={} state={playback_state:?} artwork_bytes={}",
+                    !title.is_empty() || !artist.is_empty() || !album.is_empty(),
                     artwork.map(|bytes| bytes.len()).unwrap_or(0),
                 );
                 *last = Some(log_key);
             }
         }
         let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
-        let mut keys: Vec<Retained<NSString>> = Vec::new();
+        // MediaPlayer exports NSString constants whose values are the actual
+        // dictionary keys. The Objective-C symbol names themselves are not
+        // valid keys and are silently ignored by Control Center.
+        let mut keys: Vec<&'static NSString> = Vec::new();
         let mut values: Vec<Retained<AnyObject>> = Vec::new();
-        let mut push_string = |key: &str, value: &str| {
+        let mut push_string = |key: &'static NSString, value: &str| {
             if !value.is_empty() {
                 let text: Retained<NSString> = NSString::from_str(value);
-                keys.push(NSString::from_str(key));
+                keys.push(key);
                 values.push(text.into_super().into_super());
             }
         };
-        push_string(KEY_TITLE, title);
-        push_string(KEY_ARTIST, artist);
-        push_string(KEY_ALBUM, album);
-        let mut push_number = |key: &str, value: f64| {
+        push_string(unsafe { MPMediaItemPropertyTitle }, title);
+        push_string(unsafe { MPMediaItemPropertyArtist }, artist);
+        push_string(unsafe { MPMediaItemPropertyAlbumTitle }, album);
+        let mut push_number = |key: &'static NSString, value: f64| {
             let number: Retained<NSNumber> = NSNumber::new_f64(value);
-            keys.push(NSString::from_str(key));
+            keys.push(key);
             values.push(number.into_super().into_super().into_super());
         };
         if let Some(duration) = duration_seconds {
-            push_number(KEY_DURATION, duration);
+            push_number(unsafe { MPMediaItemPropertyPlaybackDuration }, duration);
         }
-        push_number(KEY_POSITION, position_seconds);
         push_number(
-            KEY_RATE,
+            unsafe { MPNowPlayingInfoPropertyElapsedPlaybackTime },
+            position_seconds,
+        );
+        push_number(
+            unsafe { MPNowPlayingInfoPropertyPlaybackRate },
             if playback_state == PlaybackState::Playing {
                 1.0
             } else {
                 0.0
             },
         );
-        push_number(KEY_DEFAULT_RATE, 1.0);
-        // MPNowPlayingInfoMediaTypeAudio = 1. Explicitly publishing it lets
-        // Control Center choose the audio card presentation.
-        push_number(KEY_MEDIA_TYPE, 1.0);
+        push_number(unsafe { MPNowPlayingInfoPropertyDefaultPlaybackRate }, 1.0);
+        let media_type = NSNumber::new_usize(MPNowPlayingInfoMediaType::Audio.0);
+        keys.push(unsafe { MPNowPlayingInfoPropertyMediaType });
+        values.push(media_type.into_super().into_super().into_super());
         if let Some(bytes) = artwork {
             if let Some(artwork_object) = make_artwork(bytes) {
-                keys.push(NSString::from_str(KEY_ARTWORK));
+                keys.push(unsafe { MPMediaItemPropertyArtwork });
                 values.push(artwork_object.into_super().into_super());
             }
         }
 
-        let key_refs: Vec<&NSString> = keys.iter().map(|key| key.as_ref()).collect();
-        let dictionary = NSDictionary::from_retained_objects(&key_refs, &values);
+        let dictionary = NSDictionary::from_retained_objects(&keys, &values);
         unsafe {
             center.setNowPlayingInfo(Some(&dictionary));
             center.setPlaybackState(match playback_state {
@@ -222,7 +222,7 @@ mod macos {
         let title = title.to_string();
         let artist = artist.to_string();
         let album = album.to_string();
-        let _ = app.run_on_main_thread(move || {
+        if let Err(error) = app.run_on_main_thread(move || {
             build_and_set_now_playing(
                 &title,
                 &artist,
@@ -232,7 +232,9 @@ mod macos {
                 playback_state,
                 artwork.as_deref().map(|bytes| bytes.as_slice()),
             );
-        });
+        }) {
+            eprintln!("[播放] NowPlaying 主线程更新失败：{error}");
+        }
     }
 
     pub fn clear() {
@@ -266,14 +268,48 @@ mod macos {
             let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
             let info = unsafe { center.nowPlayingInfo() };
             let info = info.expect("设置后应能读回 now playing 信息");
-            let title = info.objectForKey(&NSString::from_str(KEY_TITLE));
+            let title = info.objectForKey(unsafe { MPMediaItemPropertyTitle });
             let title = title.expect("应有标题键");
             let title_string = title
                 .downcast::<objc2_foundation::NSString>()
                 .expect("标题应为 NSString");
             assert_eq!(title_string.to_string(), "测试歌名");
-            let rate = info.objectForKey(&NSString::from_str(KEY_RATE));
-            assert!(rate.is_some(), "应有播放速率键");
+
+            for (key, expected) in [
+                (unsafe { MPMediaItemPropertyArtist }, "测试歌手"),
+                (unsafe { MPMediaItemPropertyAlbumTitle }, "测试专辑"),
+            ] {
+                let value = info.objectForKey(key).expect("应有文本元数据键");
+                let value = value
+                    .downcast::<NSString>()
+                    .expect("文本元数据应为 NSString");
+                assert_eq!(value.to_string(), expected);
+            }
+
+            for (key, expected) in [
+                (unsafe { MPMediaItemPropertyPlaybackDuration }, 180.0),
+                (unsafe { MPNowPlayingInfoPropertyElapsedPlaybackTime }, 12.5),
+                (unsafe { MPNowPlayingInfoPropertyPlaybackRate }, 1.0),
+                (unsafe { MPNowPlayingInfoPropertyDefaultPlaybackRate }, 1.0),
+            ] {
+                let value = info.objectForKey(key).expect("应有数值元数据键");
+                let value = value
+                    .downcast::<NSNumber>()
+                    .expect("数值元数据应为 NSNumber");
+                assert_eq!(value.as_f64(), expected);
+            }
+
+            let media_type = info
+                .objectForKey(unsafe { MPNowPlayingInfoPropertyMediaType })
+                .expect("应有媒体类型键")
+                .downcast::<NSNumber>()
+                .expect("媒体类型应为 NSNumber");
+            assert_eq!(media_type.as_usize(), MPNowPlayingInfoMediaType::Audio.0);
+            assert!(
+                info.objectForKey(&NSString::from_str("MPMediaItemPropertyTitle"))
+                    .is_none(),
+                "不得把 Objective-C 符号名误当作系统字典键",
+            );
             assert_eq!(
                 unsafe { center.playbackState() },
                 MPNowPlayingPlaybackState::Playing,

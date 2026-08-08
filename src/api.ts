@@ -768,6 +768,7 @@ export interface NativeNowPlayingMetadata {
   title?: string;
   artist?: string;
   album?: string;
+  durationMs?: number;
   artworkUrl?: string;
 }
 
@@ -775,9 +776,10 @@ export async function nativeAudioLoad(
   source: string,
   cacheKey?: string,
   metadata?: NativeNowPlayingMetadata,
+  autoplay = true,
 ): Promise<number> {
   if (!isDesktopRuntime()) return -1;
-  return invoke("native_audio_load", { source, cacheKey, metadata });
+  return invoke("native_audio_load", { source, cacheKey, metadata, autoplay });
 }
 
 export async function nativeAudioPlay(): Promise<void> {
@@ -856,6 +858,11 @@ export async function nativeAudioCacheStatus(): Promise<NativeAudioCacheStatus> 
 export async function nativeAudioClearCache(): Promise<void> {
   if (!isDesktopRuntime()) return;
   await invoke("native_audio_clear_cache");
+}
+
+export async function nativeQueuePeekNext(naturalEnded = true): Promise<number | null> {
+  if (!isDesktopRuntime()) return null;
+  return invoke("native_queue_peek_next", { naturalEnded });
 }
 
 export interface NativeOutputDevice {
