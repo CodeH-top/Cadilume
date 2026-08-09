@@ -1203,7 +1203,14 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         playing={player.playing}
         loading={playbackLoading}
         buffering={player.buffering}
-        artwork={<Artwork item={player.current} size="immersive" canvasReadable />}
+        artwork={(
+          <Artwork
+            key={player.current?.ratingKey ?? player.current?.key ?? player.current?.title}
+            item={player.current}
+            size="immersive"
+            canvasReadable
+          />
+        )}
         progressSeconds={player.progress}
         durationSeconds={player.duration}
         shuffle={player.shuffle}

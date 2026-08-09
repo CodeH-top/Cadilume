@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { isBlurhashValid } from "blurhash";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioClearCache, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
 import { plexMusicGateway } from "./musicGateway";
@@ -61,6 +62,7 @@ export interface PersistedPlaybackTrack {
   index?: number;
   parentIndex?: number;
   thumb?: string;
+  thumbBlurHash?: string;
   art?: string;
   Media?: Array<{ Part: Array<{ key: string; duration?: number; size?: number }> }>;
 }
@@ -124,6 +126,13 @@ function safePersistedPath(value: unknown): string | undefined {
   return value;
 }
 
+function safePersistedBlurHash(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  if (normalized.length < 6 || normalized.length > 256) return undefined;
+  return isBlurhashValid(normalized).result ? normalized : undefined;
+}
+
 function compactPersistedContributors(value: readonly PlexContributor[] | undefined): PlexContributor[] | undefined {
   const contributors = value?.flatMap((contributor) => {
     const name = typeof contributor?.name === "string" ? contributor.name.trim() : "";
@@ -157,6 +166,8 @@ function compactPersistedTrack(item: PlexItem): PersistedPlaybackTrack | null {
   copyString("grandparentRatingKey");
   copyString("thumb");
   copyString("art");
+  const thumbBlurHash = safePersistedBlurHash(item.thumbBlurHash);
+  if (thumbBlurHash) compact.thumbBlurHash = thumbBlurHash;
   const trackArtists = compactPersistedContributors(
     item.trackArtists || item.contributors || (item.originalTitle ? [{ name: item.originalTitle }] : undefined),
   );
@@ -201,6 +212,7 @@ function restorePersistedTrack(value: unknown): PersistedPlaybackTrack | null {
     index: value.index,
     parentIndex: value.parentIndex,
     thumb: value.thumb,
+    thumbBlurHash: value.thumbBlurHash,
     art: value.art,
     Media: value.Media,
   } as PlexItem;

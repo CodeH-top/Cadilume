@@ -80,6 +80,8 @@ export interface PlexItem {
   titleSort?: string;
   summary?: string;
   thumb?: string;
+  /** PMS' low-frequency artwork representation used by Plexamp-style color fields. */
+  thumbBlurHash?: string;
   art?: string;
   parentTitle?: string;
   /** PMS' album collation value used when an artist's tracks are sorted by album. */

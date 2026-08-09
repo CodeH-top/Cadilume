@@ -148,6 +148,7 @@ describe("persisted playback session", () => {
     const queue = Array.from({ length: PLAYBACK_SESSION_MAX_QUEUE + 8 }, (_, index) => ({
       ...track(index),
       imageUrl: `https://music.test/cover/${index}?X-Plex-Token=secret-token`,
+      thumbBlurHash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
       summary: "not persisted",
     }));
     const session = createPersistedPlaybackSession({
@@ -170,7 +171,25 @@ describe("persisted playback session", () => {
     expect(serialized).not.toContain("imageUrl");
     expect(serialized).not.toContain("stream");
     expect(session?.queue[0]).toMatchObject({ ratingKey: "track-0", title: "Track 0" });
+    expect(session?.queue[0].thumbBlurHash).toBe("LEHV6nWB2yk8pyo0adR*.7kCMdnj");
     expect(session?.queue[0]).not.toHaveProperty("summary");
+  });
+
+  it("drops malformed or oversized artwork hashes from persisted playback", () => {
+    const createWithHash = (thumbBlurHash: string) => createPersistedPlaybackSession({
+      serverId: "server-a",
+      quality: "auto",
+      queue: [{ ...track(1), thumbBlurHash }],
+      currentIndex: 0,
+      progress: 0,
+      shuffle: false,
+      repeat: "off",
+      updatedAt: 1_000,
+    });
+
+    expect(createWithHash("short")?.queue[0]).not.toHaveProperty("thumbBlurHash");
+    expect(createWithHash(`valid-prefix-${"x".repeat(260)}`)?.queue[0]).not.toHaveProperty("thumbBlurHash");
+    expect(createWithHash("valid\nvalue")?.queue[0]).not.toHaveProperty("thumbBlurHash");
   });
 
   it("preserves the exact current occurrence when duplicate rating keys exist", () => {

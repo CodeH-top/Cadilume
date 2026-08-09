@@ -1073,12 +1073,13 @@ pub async fn discover_servers(state: State<'_, PlexState>) -> Result<Vec<ServerS
 pub async fn server_get(
     server_id: String,
     path: String,
-    query: HashMap<String, String>,
+    mut query: HashMap<String, String>,
     state: State<'_, PlexState>,
 ) -> Result<Value, String> {
     if !allowed_server_path(&path) {
         return Err("拒绝访问不在允许列表中的服务器路径".to_string());
     }
+    include_thumb_blur_hash(&mut query);
     state
         .server_response(&server_id, &path, &query)
         .await
@@ -1260,8 +1261,10 @@ pub async fn get_playlist_items(
     state: State<'_, PlexState>,
 ) -> Result<Value, String> {
     let path = playlist_items_path(&playlist_id).map_err(display_error)?;
+    let mut query = HashMap::new();
+    include_thumb_blur_hash(&mut query);
     state
-        .server_response(&server_id, &path, &HashMap::new())
+        .server_response(&server_id, &path, &query)
         .await
         .map_err(display_error)?
         .json::<Value>()
@@ -2436,6 +2439,20 @@ fn audio_playlist_query() -> HashMap<String, String> {
     ])
 }
 
+fn include_thumb_blur_hash(query: &mut HashMap<String, String>) {
+    let fields = query.entry("includeFields".to_string()).or_default();
+    if fields
+        .split(',')
+        .any(|field| field.trim() == "thumbBlurHash")
+    {
+        return;
+    }
+    if !fields.is_empty() {
+        fields.push(',');
+    }
+    fields.push_str("thumbBlurHash");
+}
+
 fn create_audio_playlist_query(
     server_id: &str,
     title: &str,
@@ -2893,6 +2910,24 @@ mod tests {
         assert_eq!(query.get("type").map(String::as_str), Some("15"));
         assert_eq!(query.get("playlistType").map(String::as_str), Some("audio"));
         assert!(!query.contains_key("smart"));
+    }
+
+    #[test]
+    fn artwork_blur_hash_field_is_added_without_clobbering_existing_fields() {
+        let mut empty = HashMap::new();
+        include_thumb_blur_hash(&mut empty);
+        assert_eq!(
+            empty.get("includeFields").map(String::as_str),
+            Some("thumbBlurHash")
+        );
+
+        let mut existing = HashMap::from([("includeFields".to_string(), "summary".to_string())]);
+        include_thumb_blur_hash(&mut existing);
+        include_thumb_blur_hash(&mut existing);
+        assert_eq!(
+            existing.get("includeFields").map(String::as_str),
+            Some("summary,thumbBlurHash")
+        );
     }
 
     #[test]

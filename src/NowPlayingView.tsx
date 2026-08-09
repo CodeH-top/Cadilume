@@ -14,7 +14,14 @@ import {
   SkipBack,
   SkipForward,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode, type SyntheticEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode, type SyntheticEvent } from "react";
+import {
+  artworkThemeStyle,
+  getArtworkThemeFromBlurHash,
+  resolveArtworkTheme,
+  sampleArtworkTheme,
+  type ArtworkTheme,
+} from "./artworkTheme";
 import { hasDisplayableLyrics, type LyricLine, type LyricsDocument } from "./lyrics";
 import { useActiveLyricsScroll } from "./lyricsScroll";
 import { playbackControlLabel, usableDurationSeconds } from "./playerUi";
@@ -33,6 +40,7 @@ export interface NowPlayingTrack {
   type?: "artist" | "album" | "track" | string;
   summary?: string;
   thumb?: string;
+  thumbBlurHash?: string;
   art?: string;
   artist?: string;
   album?: string;
@@ -64,22 +72,17 @@ export interface NowPlayingLyricsState {
   activeIndex: number;
 }
 
+interface SampledArtworkTheme {
+  artworkIdentity: string;
+  trackIdentity: string;
+  theme: ArtworkTheme;
+}
+
 export type NowPlayingTheme = ThemeMode;
 export type NowPlayingMode = "vinyl" | "artwork";
 export type NowPlayingRepeatMode = "off" | "all" | "one";
 
-export interface ArtworkThemeColor {
-  red: number;
-  green: number;
-  blue: number;
-}
-
-interface ArtworkColorBucket {
-  score: number;
-  redTotal: number;
-  greenTotal: number;
-  blueTotal: number;
-}
+const RETAINED_ARTWORK_THEME_TIMEOUT_MS = 4_000;
 
 export interface NowPlayingViewProps {
   /** When omitted, the component remains mounted but animates below the window. */
@@ -139,73 +142,6 @@ export function getLyricProgress(line: LyricLine, positionMs: number): number {
   return clampUnit((positionMs - start) / (end - start));
 }
 
-/**
- * Pick a stable mid-tone from a small artwork sample. Quantized buckets favor
- * chromatic pixels while ignoring transparent, near-black, and near-white
- * pixels that would otherwise collapse the player background to a neutral.
- */
-export function getDominantArtworkColor(pixels: ArrayLike<number>): ArtworkThemeColor | undefined {
-  const buckets = new Map<number, ArtworkColorBucket>();
-
-  for (let index = 0; index + 3 < pixels.length; index += 4) {
-    const red = Number(pixels[index]);
-    const green = Number(pixels[index + 1]);
-    const blue = Number(pixels[index + 2]);
-    const alpha = Number(pixels[index + 3]) / 255;
-    if (![red, green, blue, alpha].every(Number.isFinite) || alpha < 0.5) continue;
-
-    const maximum = Math.max(red, green, blue) / 255;
-    const minimum = Math.min(red, green, blue) / 255;
-    const lightness = (maximum + minimum) / 2;
-    if (lightness < 0.06 || lightness > 0.94) continue;
-
-    const chroma = maximum - minimum;
-    const saturation = chroma === 0 ? 0 : chroma / Math.max(0.001, 1 - Math.abs(2 * lightness - 1));
-    const middleToneWeight = 1 - Math.min(0.72, Math.abs(lightness - 0.5) * 1.1);
-    const score = alpha * (0.45 + saturation * 1.55) * middleToneWeight;
-    const key = ((red >> 5) << 6) | ((green >> 5) << 3) | (blue >> 5);
-    const bucket = buckets.get(key) ?? {
-      score: 0,
-      redTotal: 0,
-      greenTotal: 0,
-      blueTotal: 0,
-    };
-    bucket.score += score;
-    bucket.redTotal += red * score;
-    bucket.greenTotal += green * score;
-    bucket.blueTotal += blue * score;
-    buckets.set(key, bucket);
-  }
-
-  let dominant: ArtworkColorBucket | undefined;
-  for (const bucket of buckets.values()) {
-    if (!dominant || bucket.score > dominant.score) dominant = bucket;
-  }
-  if (!dominant || dominant.score <= 0) return undefined;
-
-  return {
-    red: Math.round(dominant.redTotal / dominant.score),
-    green: Math.round(dominant.greenTotal / dominant.score),
-    blue: Math.round(dominant.blueTotal / dominant.score),
-  };
-}
-
-function sampleArtworkThemeColor(image: HTMLImageElement): ArtworkThemeColor | undefined {
-  if (!image.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0) return undefined;
-  const canvas = document.createElement("canvas");
-  canvas.width = 48;
-  canvas.height = 48;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) return undefined;
-
-  try {
-    context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    return getDominantArtworkColor(context.getImageData(0, 0, canvas.width, canvas.height).data);
-  } catch {
-    return undefined;
-  }
-}
-
 function clampUnit(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
@@ -220,6 +156,22 @@ function formatSeconds(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "0:00";
   const total = Math.floor(value);
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function isThemeArtworkImage(target: EventTarget | null): target is HTMLImageElement {
+  return target instanceof HTMLImageElement
+    && !target.classList.contains("artwork-candidate")
+    && Boolean(target.closest(".now-playing-artwork, .now-playing-cover-artwork"));
+}
+
+function artworkSampleMatches(
+  sample: SampledArtworkTheme | undefined,
+  artworkIdentity: string,
+  trackIdentity: string,
+): boolean {
+  return Boolean(sample && (artworkIdentity
+    ? sample.artworkIdentity === artworkIdentity
+    : sample.trackIdentity === trackIdentity));
 }
 
 export function NowPlayingView({
@@ -263,8 +215,14 @@ export function NowPlayingView({
   const sampledArtworkRef = useRef("");
   const escapeEnabledRef = useRef(escapeEnabled);
   const previousEscapeEnabledRef = useRef(escapeEnabled);
+  const trackIdentity = String(track?.ratingKey ?? track?.key ?? track?.title ?? "");
+  const artworkIdentity = String(track?.imageUrl ?? track?.thumb ?? track?.art ?? "");
   const [internalMode, setInternalMode] = useState<NowPlayingMode>(mode);
-  const [artworkThemeColor, setArtworkThemeColor] = useState<ArtworkThemeColor>();
+  const [sampledArtworkTheme, setSampledArtworkTheme] = useState<SampledArtworkTheme>();
+  const blurHashArtworkTheme = useMemo(
+    () => getArtworkThemeFromBlurHash(track?.thumbBlurHash),
+    [track?.thumbBlurHash],
+  );
   const visible = Boolean(open && track);
   const displayMode = onModeChange ? mode : internalMode;
   const artist = trackArtist(track);
@@ -277,9 +235,19 @@ export function NowPlayingView({
   const repeatLabel = repeat === "one" ? "单曲循环" : repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止";
   const themeAttribute = theme;
   const modeClass = displayMode === "artwork" ? "is-artwork-mode" : "is-vinyl-mode";
-  const trackIdentity = String(track?.ratingKey ?? track?.key ?? track?.title ?? "");
-  const artworkThemeStyle = artworkThemeColor
-    ? { "--now-playing-artwork-theme": `rgb(${artworkThemeColor.red} ${artworkThemeColor.green} ${artworkThemeColor.blue})` } as CSSProperties
+  const currentSampledTheme = artworkSampleMatches(sampledArtworkTheme, artworkIdentity, trackIdentity)
+    ? sampledArtworkTheme?.theme
+    : undefined;
+  const retainedSampledTheme = !currentSampledTheme && artworkIdentity
+    ? sampledArtworkTheme?.theme
+    : undefined;
+  const artworkThemeResolution = resolveArtworkTheme(
+    currentSampledTheme,
+    blurHashArtworkTheme,
+    retainedSampledTheme,
+  );
+  const artworkStyle = artworkThemeResolution.theme
+    ? artworkThemeStyle(artworkThemeResolution.theme) as CSSProperties
     : undefined;
   escapeEnabledRef.current = escapeEnabled;
 
@@ -289,8 +257,22 @@ export function NowPlayingView({
 
   useEffect(() => {
     sampledArtworkRef.current = "";
-    if (!track?.imageUrl && !track?.thumb && !track?.art) setArtworkThemeColor(undefined);
-  }, [track?.art, track?.imageUrl, track?.thumb, trackIdentity]);
+    if (!artworkIdentity) {
+      setSampledArtworkTheme((current) => (
+        current?.trackIdentity === trackIdentity && !current.artworkIdentity ? current : undefined
+      ));
+    }
+  }, [artworkIdentity, trackIdentity]);
+
+  useEffect(() => {
+    if (!retainedSampledTheme || blurHashArtworkTheme) return;
+    const timeout = window.setTimeout(() => {
+      setSampledArtworkTheme((current) => (
+        artworkSampleMatches(current, artworkIdentity, trackIdentity) ? current : undefined
+      ));
+    }, RETAINED_ARTWORK_THEME_TIMEOUT_MS);
+    return () => window.clearTimeout(timeout);
+  }, [artworkIdentity, blurHashArtworkTheme, retainedSampledTheme, trackIdentity]);
 
   useEffect(() => {
     if (!visible || !escapeEnabledRef.current) return;
@@ -355,15 +337,26 @@ export function NowPlayingView({
 
   const handleArtworkLoad = (event: SyntheticEvent<HTMLElement>) => {
     const image = event.target;
-    if (!(image instanceof HTMLImageElement)
-      || image.classList.contains("artwork-candidate")
-      || !image.closest(".now-playing-artwork, .now-playing-cover-artwork")) return;
+    if (!isThemeArtworkImage(image)) return;
     const source = image.currentSrc || image.src;
-    const sampleKey = `${trackIdentity}:${source}`;
+    const sampleKey = `${artworkIdentity || trackIdentity}:${source}`;
     if (!source || sampledArtworkRef.current === sampleKey) return;
     sampledArtworkRef.current = sampleKey;
-    const sampledColor = sampleArtworkThemeColor(image);
-    if (sampledColor) setArtworkThemeColor(sampledColor);
+    const sampledTheme = sampleArtworkTheme(image);
+    if (sampledTheme) {
+      setSampledArtworkTheme({ artworkIdentity, trackIdentity, theme: sampledTheme });
+      return;
+    }
+    setSampledArtworkTheme((current) => (
+      artworkSampleMatches(current, artworkIdentity, trackIdentity) ? current : undefined
+    ));
+  };
+
+  const handleArtworkError = (event: SyntheticEvent<HTMLElement>) => {
+    if (!isThemeArtworkImage(event.target)) return;
+    setSampledArtworkTheme((current) => (
+      artworkSampleMatches(current, artworkIdentity, trackIdentity) ? current : undefined
+    ));
   };
 
   const handleModeChange = (nextMode: NowPlayingMode) => {
@@ -381,7 +374,9 @@ export function NowPlayingView({
       ref={dialogRef}
       className={`now-playing-view ${visible ? "is-open" : "is-closed"} ${modeClass}`}
       data-theme={themeAttribute}
-      style={artworkThemeStyle}
+      data-artwork-theme-source={artworkThemeResolution.source}
+      data-artwork-theme-pending={artworkThemeResolution.pending || undefined}
+      style={artworkStyle}
       role="dialog"
       aria-modal={visible && escapeEnabled ? true : undefined}
       aria-labelledby={titleId}
@@ -390,8 +385,8 @@ export function NowPlayingView({
       tabIndex={-1}
       onMouseDown={handleBackdropMouseDown}
       onLoadCapture={handleArtworkLoad}
+      onErrorCapture={handleArtworkError}
     >
-      <div className="now-playing-sheen" aria-hidden="true" />
       <div className="now-playing-frame">
         <header className="now-playing-header">
           <div className="now-playing-header-drag-region" data-tauri-drag-region aria-hidden="true" />
