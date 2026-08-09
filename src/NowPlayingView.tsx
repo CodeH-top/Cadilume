@@ -335,12 +335,12 @@ export function NowPlayingView({
               <div className={`now-playing-record-stage ${activelyPlaying ? "is-playing" : "is-paused"}`}>
                 <svg className="now-playing-tonearm" viewBox="0 0 300 260" aria-hidden="true">
                   <g className="now-playing-tonearm-base" data-testid="tonearm-pivot">
-                    <circle className="now-playing-tonearm-base-shadow" cx="150" cy="37" r="20" />
+                    <circle className="now-playing-tonearm-base-shadow" cx="150" cy="22" r="20" />
                     <g className="now-playing-tonearm-swing" data-testid="tonearm-swing">
                       <g className="now-playing-tonearm-armature" data-testid="tonearm-connection">
-                        <path className="now-playing-tonearm-rail-shadow" d="M150 35 C153 77 162 113 185 135 C220 154 270 169 320 170" />
-                        <path className="now-playing-tonearm-arm" data-testid="tonearm-arm" d="M150 35 C153 77 162 113 185 135 C220 154 270 169 320 170" />
-                        <g className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge" transform="translate(320 170) rotate(42)">
+                        <path className="now-playing-tonearm-rail-shadow" d="M150 20 C158 88 200 154 270 180" />
+                        <path className="now-playing-tonearm-arm" data-testid="tonearm-arm" d="M150 20 C158 88 200 154 270 180" />
+                        <g className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge" transform="translate(270 180) rotate(32)">
                           <path className="now-playing-tonearm-cartridge-neck" d="M-5 0 H7" />
                           <rect className="now-playing-tonearm-cartridge-body" x="5" y="-5" width="24" height="10" rx="2" />
                           <rect className="now-playing-tonearm-cartridge-face" x="25" y="-6" width="8" height="12" rx="2" />
@@ -348,9 +348,9 @@ export function NowPlayingView({
                         </g>
                       </g>
                     </g>
-                    <circle className="now-playing-tonearm-base-ring" cx="150" cy="35" r="18" />
-                    <circle className="now-playing-tonearm-base-bearing" cx="150" cy="35" r="10" />
-                    <circle className="now-playing-tonearm-base-cap" cx="150" cy="35" r="4" />
+                    <circle className="now-playing-tonearm-base-ring" cx="150" cy="20" r="18" />
+                    <circle className="now-playing-tonearm-base-bearing" cx="150" cy="20" r="10" />
+                    <circle className="now-playing-tonearm-base-cap" cx="150" cy="20" r="4" />
                   </g>
                 </svg>
                 <div className="now-playing-record" aria-label={`${track?.title || "尚未播放"} 黑胶唱片`} role="img">

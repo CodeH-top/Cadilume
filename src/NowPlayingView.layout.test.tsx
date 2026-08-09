@@ -79,8 +79,8 @@ describe("expanded player controller layout", () => {
     expect(markup).toContain('data-testid="tonearm-arm"');
     expect(markup).toContain('data-testid="tonearm-connection"');
     expect(markup).toContain('data-testid="tonearm-cartridge"');
-    expect(markup).toContain('d="M150 35 C153 77 162 113 185 135 C220 154 270 169 320 170"');
-    expect(markup).toContain('cx="150" cy="35"');
+    expect(markup).toContain('d="M150 20 C158 88 200 154 270 180"');
+    expect(markup).toContain('cx="150" cy="20"');
   });
 
   it("exposes distinct resting and playing tonearm states", () => {

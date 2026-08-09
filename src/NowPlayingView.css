@@ -501,11 +501,6 @@
 }
 
 .now-playing-record-stage {
-  --tonearm-top: 1%;
-  --tonearm-right: 3%;
-  --tonearm-width: 39%;
-  --tonearm-height: 34%;
-  --tonearm-angle: 17deg;
   position: relative;
   width: min(100%, 520px, calc(100vh - var(--now-playing-header-height) - var(--now-playing-controller-height) - 150px));
   aspect-ratio: 1;
@@ -518,10 +513,10 @@
   position: absolute;
   inset: 2.5%;
   content: "";
-  border: 1px solid rgba(22, 29, 40, 0.22);
+  border: 1px solid var(--now-playing-border-strong);
   border-radius: 50%;
-  background: radial-gradient(circle at 42% 36%, rgba(255, 255, 255, 0.055), transparent 56%);
-  box-shadow: 0 0 0 18px rgba(12, 15, 20, 0.09), inset 0 0 30px rgba(255, 255, 255, 0.025), 0 24px 55px rgba(0, 0, 0, 0.3);
+  background: color-mix(in srgb, var(--now-playing-surface-strong) 88%, var(--now-playing-text) 12%);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
 }
 
 .now-playing-record-stage::after {
@@ -788,9 +783,9 @@
 }
 
 .now-playing-tonearm-swing {
-  transform: rotate(-32deg);
+  transform: rotate(-30deg);
   transform-box: view-box;
-  transform-origin: 150px 35px;
+  transform-origin: 150px 20px;
   transition: transform 520ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
