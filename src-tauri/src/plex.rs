@@ -947,24 +947,32 @@ pub async fn logout(
     stream_proxy: State<'_, StreamProxy>,
     audio_engine: State<'_, NativeAudioEngineSlot>,
 ) -> Result<(), String> {
-    // Authentication must still be revoked if a cache file is temporarily
-    // undeletable. Return the cleanup error only after clearing credentials,
-    // server state and loopback tickets.
-    let audio_result = audio_engine.reset_and_clear_cache().await;
-    let proxy_result = stream_proxy.clear().map_err(display_error);
+    // Credential revocation is the authoritative result of logout. Cache and
+    // ticket cleanup is best-effort after the engine has stopped; reporting a
+    // cleanup warning as command failure would leave the WebView looking
+    // authenticated even though its credential is already gone.
+    let mut cleanup_warnings = Vec::new();
+    if let Err(error) = audio_engine.reset_and_clear_cache().await {
+        cleanup_warnings.push(error);
+    }
+    if let Err(error) = stream_proxy.clear().map_err(display_error) {
+        cleanup_warnings.push(error);
+    }
     delete_account_token();
-    *state
-        .token
-        .write()
-        .map_err(|_| "登录状态写入失败".to_string())? = None;
-    state
-        .servers
-        .write()
-        .map_err(|_| "服务器缓存写入失败".to_string())?
-        .clear();
-    let _ = clear_artwork_for_account_change(&state);
-    audio_result?;
-    proxy_result?;
+    match state.token.write() {
+        Ok(mut token) => *token = None,
+        Err(_) => cleanup_warnings.push("登录状态写入失败".to_string()),
+    }
+    match state.servers.write() {
+        Ok(mut servers) => servers.clear(),
+        Err(_) => cleanup_warnings.push("服务器缓存写入失败".to_string()),
+    }
+    if let Err(error) = clear_artwork_for_account_change(&state) {
+        cleanup_warnings.push(display_error(error));
+    }
+    for warning in cleanup_warnings {
+        eprintln!("[账号] 退出后的清理未完全完成：{warning}");
+    }
     Ok(())
 }
 

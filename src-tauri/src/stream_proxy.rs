@@ -617,37 +617,12 @@ async fn forward_to_plex(
                 .await
             {
                 Ok(Ok(response))
-                    if response.status().is_success()
-                        || response.status() == StatusCode::RANGE_NOT_SATISFIABLE =>
+                    if is_forwardable_audio_response(
+                        response.status(),
+                        response.headers(),
+                        range.is_some(),
+                    ) =>
                 {
-                    if !is_supported_audio_content_type(response.headers()) {
-                        let content_type = response
-                            .headers()
-                            .get(CONTENT_TYPE)
-                            .and_then(|value| value.to_str().ok())
-                            .unwrap_or("(无 Content-Type)")
-                            .to_string();
-                        eprintln!(
-                            "[播放] 上游返回非音频：质量={} 连接={} 端点={} HTTP={} Content-Type={}",
-                            effective_quality,
-                            connection_kind,
-                            endpoint_kind,
-                            response.status().as_u16(),
-                            content_type,
-                        );
-                        attempts.push(UpstreamAttempt {
-                            quality: effective_quality.clone(),
-                            connection_kind,
-                            endpoint_kind,
-                            status: Some(response.status().as_u16()),
-                            content_type: response
-                                .headers()
-                                .get(CONTENT_TYPE)
-                                .and_then(|value| value.to_str().ok())
-                                .map(str::to_owned),
-                        });
-                        continue;
-                    }
                     let content_type = response
                         .headers()
                         .get(CONTENT_TYPE)
@@ -751,6 +726,22 @@ fn is_supported_audio_content_type(headers: &HeaderMap) -> bool {
                 .to_ascii_lowercase()
         })
         .is_some_and(|mime| mime.starts_with("audio/"))
+}
+
+fn is_forwardable_audio_response(
+    status: StatusCode,
+    headers: &HeaderMap,
+    range_requested: bool,
+) -> bool {
+    if status == StatusCode::RANGE_NOT_SATISFIABLE {
+        return range_requested
+            && headers
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("bytes */"))
+                .is_some_and(|total| total.parse::<u64>().is_ok());
+    }
+    status.is_success() && is_supported_audio_content_type(headers)
 }
 
 fn downstream_response(upstream: reqwest::Response, method: &Method) -> Response {
@@ -1504,6 +1495,30 @@ mod tests {
                 "expected {mime} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn valid_range_416_is_forwarded_without_an_audio_content_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_RANGE, HeaderValue::from_static("bytes */4096"));
+
+        assert!(is_forwardable_audio_response(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            &headers,
+            true,
+        ));
+        assert!(!is_forwardable_audio_response(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            &headers,
+            false,
+        ));
+
+        headers.insert(CONTENT_RANGE, HeaderValue::from_static("bytes 0-9/4096"));
+        assert!(!is_forwardable_audio_response(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            &headers,
+            true,
+        ));
     }
 
     #[test]

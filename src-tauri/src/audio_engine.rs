@@ -209,6 +209,12 @@ impl DecodeBufferState {
         }
     }
 
+    fn promote_reader_to_current(&self) {
+        if let Some(control) = self.reader_control.as_ref() {
+            control.promote_to_current();
+        }
+    }
+
     fn release_buffered_chunk(&self) {
         self.unreserve_buffered_chunk();
         self.notify_worker();
@@ -984,7 +990,7 @@ type NowPlayingSignature = (
     Option<(usize, usize)>,
 );
 
-/// A fully-downloaded next track already appended to the rodio queue.
+/// A decoded and buffered next track already appended to the rodio queue.
 #[derive(Clone)]
 struct PendingTrack {
     index: usize,
@@ -2348,6 +2354,7 @@ impl NativeAudioEngine {
             }
             pending.take()?
         };
+        queued.decode_state.promote_reader_to_current();
         if let Ok(mut queue_guard) = self.queue.lock() {
             queue_guard.commit_index(queued.index);
         }
@@ -4253,7 +4260,14 @@ mod tests {
             NativeRepeatMode::All,
             false,
         );
-        let queued = pending_track(1, "b");
+        let mut queued = pending_track(1, "b");
+        let reader_control = SegmentControl::new(CachePriority::Next);
+        queued.decode_state = Arc::new(DecodeBufferState::new(
+            std::num::NonZeroU32::new(48_000).unwrap(),
+            8,
+            Some(Arc::clone(&reader_control)),
+            Arc::new(NativeAudioHealth::default()),
+        ));
         queued.started.store(true, Ordering::SeqCst);
         *engine.pending.lock().unwrap() = Some(queued);
 
@@ -4271,6 +4285,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(engine.queue.lock().unwrap().current_index, 1);
+        assert_eq!(reader_control.priority(), CachePriority::Current);
         assert!(engine.pending.lock().unwrap().is_none());
         assert_eq!(
             engine

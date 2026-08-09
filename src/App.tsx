@@ -102,6 +102,7 @@ import { NowPlayingView, type NowPlayingLyricsState, type NowPlayingMode } from 
 import { useActiveLyricsScroll } from "./lyricsScroll";
 import { getLyricsActionPresentation } from "./playerActions";
 import { playbackControlLabel, rangeFillPercent, usableDurationSeconds } from "./playerUi";
+import { calculatePopconfirmLayout } from "./popconfirmPosition";
 import { homeRecommendationHubs, isRecentlyAddedHub, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
 import { createArtistLookup, resolveTrackArtists, type ArtistLookup } from "./trackArtists";
 import { nextTrackSort, sortTracks, type TrackSortKey, type TrackSortState } from "./trackSort";
@@ -3124,22 +3125,37 @@ function Popconfirm({ title, description, confirmLabel = "确认", cancelLabel =
   useLayoutEffect(() => {
     if (!anchor) return;
     const pop = popRef.current;
+    if (!pop) return;
     const update = () => {
-      if (!pop || !anchor) return;
       const anchorRect = anchor.getBoundingClientRect();
       const width = pop.offsetWidth || 232;
       const height = pop.offsetHeight || 76;
-      const left = Math.max(8, Math.min(window.innerWidth - width - 8, anchorRect.left + anchorRect.width / 2 - width / 2));
-      const above = anchorRect.top - height - 8;
-      const top = above >= 8
-        ? above
-        : Math.min(window.innerHeight - height - 8, anchorRect.bottom + 8);
-      setPlacement(above >= 8 ? "above" : "below");
-      setStyle({ top, left, visibility: "visible" });
+      const layout = calculatePopconfirmLayout(
+        anchorRect,
+        { width, height },
+        { width: window.innerWidth, height: window.innerHeight },
+      );
+      setPlacement(layout.placement);
+      setStyle({
+        top: layout.top,
+        left: layout.left,
+        visibility: "visible",
+        "--popconfirm-arrow-left": `${layout.arrowLeft}px`,
+      } as CSSProperties);
     };
     update();
     const frame = window.requestAnimationFrame(update);
-    return () => window.cancelAnimationFrame(frame);
+    window.addEventListener("resize", update);
+    document.addEventListener("scroll", update, true);
+    const resizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(update);
+    resizeObserver?.observe(anchor);
+    resizeObserver?.observe(pop);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", update);
+      document.removeEventListener("scroll", update, true);
+      resizeObserver?.disconnect();
+    };
   }, [anchor]);
 
   useEffect(() => {
@@ -3157,14 +3173,11 @@ function Popconfirm({ title, description, confirmLabel = "确认", cancelLabel =
         onCancel();
       }
     };
-    const onScroll = () => onCancel();
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
-    document.addEventListener("scroll", onScroll, true);
     return () => {
       document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
-      document.removeEventListener("scroll", onScroll, true);
     };
   }, [anchor, onCancel]);
 
@@ -3421,16 +3434,9 @@ function SettingsView(props: ContentViewProps) {
     ? formatBytes(props.cacheStatus.sizeBytes)
     : props.cacheStatusError ? "暂时无法统计"
       : "正在统计…";
-  const cacheDescription = props.cacheStatus ? `${props.cacheStatus.fileCount} 个缓存文件` : undefined;
   const nativeCacheSummary = props.nativeCacheStatus
-    ? `${formatBytes(props.nativeCacheStatus.size_bytes)} / 1 GiB`
-    : "暂无 / 1 GiB";
-  const nativeCacheDescription = props.nativeCacheStatus
-    ? [
-      props.nativeCacheStatus.file_count ? `${props.nativeCacheStatus.file_count} 首完整音频` : "暂无完整音频",
-      props.nativeCacheStatus.partial_file_count ? `${props.nativeCacheStatus.partial_file_count} 首部分缓存` : undefined,
-    ].filter(Boolean).join(" · ")
-    : undefined;
+    ? `${formatBytes(props.nativeCacheStatus.size_bytes)} / ${formatBytes(props.nativeCacheStatus.limit_bytes)}`
+    : "正在统计…";
   return (
     <div className="settings-page">
       <div className="page-heading sticky-page-heading"><h1>设置</h1></div>
@@ -3473,12 +3479,12 @@ function SettingsView(props: ContentViewProps) {
         </div>
       </SettingsGroup>
       <SettingsGroup icon={<Database size={18} />} title="缓存">
-        <div className="cache-row">
-          <span className="cache-row-copy" aria-live="polite"><strong>封面缓存</strong><span>{cacheSummary}{cacheDescription && ` · ${cacheDescription}`}</span></span>
-          <button className="danger-button" type="button" aria-label="清理封面与音频缓存" disabled={props.cacheBusy || (!props.cacheStatus?.fileCount && !props.nativeCacheStatus?.size_bytes)} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
-        </div>
-        <div className="cache-row">
-          <span className="cache-row-copy" aria-live="polite"><strong>音频缓存</strong><span>{nativeCacheSummary}{nativeCacheDescription && ` · ${nativeCacheDescription}`}</span></span>
+        <div className="cache-settings">
+          <dl className="cache-metrics" aria-live="polite">
+            <div className="cache-metric"><dt>封面缓存</dt><dd>{cacheSummary}</dd></div>
+            <div className="cache-metric"><dt>音频缓存</dt><dd>{nativeCacheSummary}</dd></div>
+          </dl>
+          <button className="danger-button cache-clear-button" type="button" aria-label="清理封面与音频缓存" disabled={props.cacheBusy || (!props.cacheStatus?.sizeBytes && !props.nativeCacheStatus?.size_bytes)} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
         </div>
       </SettingsGroup>
       <SettingsGroup icon={<Server size={18} />} title="音乐来源">

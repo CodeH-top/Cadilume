@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,9 +27,20 @@ const NETWORK_CANCEL_POLL: Duration = Duration::from_millis(25);
 const MAX_CACHE_IDENTITY_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub(crate) enum CachePriority {
     Current,
     Next,
+}
+
+impl CachePriority {
+    fn from_u8(value: u8) -> Self {
+        if value == Self::Next as u8 {
+            Self::Next
+        } else {
+            Self::Current
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -191,21 +202,26 @@ impl NetworkGate {
 
     fn acquire(
         self: &Arc<Self>,
-        priority: CachePriority,
         control: &SegmentControl,
         observed_epoch: u64,
     ) -> io::Result<NetworkPermit> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if priority == CachePriority::Current {
-            state.current_waiters += 1;
-        }
-        while state.active || (priority == CachePriority::Next && state.current_waiters > 0) {
+        let mut registered_current = false;
+        loop {
+            let priority = control.priority();
+            if priority == CachePriority::Current && !registered_current {
+                state.current_waiters += 1;
+                registered_current = true;
+            }
             if control.is_interrupted(observed_epoch) {
-                if priority == CachePriority::Current {
+                if registered_current {
                     state.current_waiters = state.current_waiters.saturating_sub(1);
                     self.notify.notify_all();
                 }
                 return Err(interrupted_error());
+            }
+            if !state.active && (priority == CachePriority::Current || state.current_waiters == 0) {
+                break;
             }
             let (next, _) = self
                 .notify
@@ -213,7 +229,7 @@ impl NetworkGate {
                 .unwrap_or_else(|error| error.into_inner());
             state = next;
         }
-        if priority == CachePriority::Current {
+        if registered_current {
             state.current_waiters = state.current_waiters.saturating_sub(1);
         }
         state.active = true;
@@ -309,16 +325,27 @@ pub(crate) struct SegmentCache {
 pub(crate) struct SegmentControl {
     cancelled: AtomicBool,
     interrupt_epoch: AtomicU64,
+    priority: AtomicU8,
     failure: Mutex<Option<String>>,
 }
 
 impl SegmentControl {
-    fn new() -> Arc<Self> {
+    pub(crate) fn new(priority: CachePriority) -> Arc<Self> {
         Arc::new(Self {
             cancelled: AtomicBool::new(false),
             interrupt_epoch: AtomicU64::new(0),
+            priority: AtomicU8::new(priority as u8),
             failure: Mutex::new(None),
         })
+    }
+
+    pub(crate) fn promote_to_current(&self) {
+        self.priority
+            .store(CachePriority::Current as u8, Ordering::SeqCst);
+    }
+
+    pub(crate) fn priority(&self) -> CachePriority {
+        CachePriority::from_u8(self.priority.load(Ordering::SeqCst))
     }
 
     pub(crate) fn cancel(&self) {
@@ -358,7 +385,6 @@ pub(crate) struct SegmentReader {
     cache: Arc<CacheInner>,
     entry: Arc<SegmentEntry>,
     source: String,
-    priority: CachePriority,
     control: Arc<SegmentControl>,
     file: File,
     position: u64,
@@ -414,12 +440,11 @@ impl SegmentCache {
             .open(&entry.data_path)
             .map_err(|error| format!("打开稀疏媒体缓存失败: {error}"))?;
         touch(&entry.index_path);
-        let control = SegmentControl::new();
+        let control = SegmentControl::new(priority);
         Ok(SegmentReader {
             cache: Arc::clone(&self.inner),
             entry,
             source: source.to_string(),
-            priority,
             observed_interrupt_epoch: control.interrupt_epoch.load(Ordering::SeqCst),
             control,
             file,
@@ -478,6 +503,7 @@ impl CacheInner {
             .truncate(false)
             .open(&data_path)
             .map_err(|error| format!("创建稀疏媒体文件失败: {error}"))?;
+        mark_sparse_file(&data).map_err(|error| format!("标记稀疏媒体文件失败: {error}"))?;
         if let Some(logical_len) = index.logical_len {
             data.set_len(logical_len)
                 .map_err(|error| format!("恢复稀疏媒体长度失败: {error}"))?;
@@ -649,11 +675,11 @@ impl SegmentReader {
             return Ok(FetchOutcome::End);
         }
         let observed_epoch = self.control.interrupt_epoch.load(Ordering::SeqCst);
-        let permit = match self.cache.network_gate.acquire(
-            self.priority,
-            self.control.as_ref(),
-            observed_epoch,
-        ) {
+        let permit = match self
+            .cache
+            .network_gate
+            .acquire(self.control.as_ref(), observed_epoch)
+        {
             Ok(permit) => permit,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                 return Ok(FetchOutcome::Interrupted);
@@ -677,7 +703,7 @@ impl SegmentReader {
                     .or_else(|| runtime.index.last_modified.clone()),
             )
         };
-        if range_supported == Some(false) && self.priority == CachePriority::Next {
+        if range_supported == Some(false) && self.control.priority() == CachePriority::Next {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "服务器不支持下一首分段预缓冲",
@@ -854,7 +880,7 @@ impl SegmentReader {
         permit: NetworkPermit,
         observed_epoch: u64,
     ) -> io::Result<FetchOutcome> {
-        if self.priority == CachePriority::Next {
+        if self.control.priority() == CachePriority::Next {
             let mut runtime = self
                 .entry
                 .runtime
@@ -1371,6 +1397,7 @@ fn recover_entries(entries_root: &Path) -> Result<(), String> {
             }
             if let Some(logical_len) = index.logical_len {
                 let data = OpenOptions::new().read(true).write(true).open(&data_path)?;
+                mark_sparse_file(&data)?;
                 punch_uncommitted_holes(&data, &index, logical_len)?;
                 data.sync_data()?;
             }
@@ -1411,15 +1438,43 @@ fn cache_status(entries_root: &Path) -> CacheStatus {
 fn entry_allocated_bytes(path: &Path) -> u64 {
     [path.join("media.sparse"), path.join("index.json")]
         .into_iter()
-        .filter_map(|path| std::fs::metadata(path).ok())
-        .map(|metadata| allocated_bytes(&metadata))
+        .filter_map(|path| {
+            let file = File::open(path).ok()?;
+            Some(
+                fs2::FileExt::allocated_size(&file)
+                    .or_else(|_| file.metadata().map(|metadata| metadata.len()))
+                    .unwrap_or(0),
+            )
+        })
         .fold(0u64, u64::saturating_add)
 }
 
-#[cfg(unix)]
-fn allocated_bytes(metadata: &std::fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    metadata.blocks().saturating_mul(512)
+#[cfg(target_os = "windows")]
+fn mark_sparse_file(file: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+    use windows::Win32::System::IO::DeviceIoControl;
+
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            HANDLE(file.as_raw_handle()),
+            FSCTL_SET_SPARSE,
+            None,
+            0,
+            None,
+            0,
+            Some(&mut returned),
+            None,
+        )
+        .map_err(|error| io::Error::other(format!("Windows 稀疏文件标记失败: {error}")))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn mark_sparse_file(_file: &File) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1462,18 +1517,65 @@ fn punch_hole(file_descriptor: std::os::fd::RawFd, offset: u64, length: u64) -> 
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn punch_uncommitted_holes(file: &File, index: &SegmentIndex, logical_len: u64) -> io::Result<()> {
+    let mut cursor = 0u64;
+    for range in &index.ranges {
+        if cursor < range.start {
+            punch_hole(file, cursor, range.start - cursor)?;
+        }
+        cursor = cursor.max(range.end);
+    }
+    if cursor < logical_len {
+        punch_hole(file, cursor, logical_len - cursor)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn punch_hole(file: &File, offset: u64, length: u64) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Ioctl::{FILE_ZERO_DATA_INFORMATION, FSCTL_SET_ZERO_DATA};
+    use windows::Win32::System::IO::DeviceIoControl;
+
+    if length == 0 {
+        return Ok(());
+    }
+    mark_sparse_file(file)?;
+    let range = FILE_ZERO_DATA_INFORMATION {
+        FileOffset: offset
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "稀疏区间起点过大"))?,
+        BeyondFinalZero: offset
+            .checked_add(length)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "稀疏区间终点溢出"))?
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "稀疏区间终点过大"))?,
+    };
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            HANDLE(file.as_raw_handle()),
+            FSCTL_SET_ZERO_DATA,
+            Some((&range as *const FILE_ZERO_DATA_INFORMATION).cast()),
+            std::mem::size_of::<FILE_ZERO_DATA_INFORMATION>() as u32,
+            None,
+            0,
+            Some(&mut returned),
+            None,
+        )
+        .map_err(|error| io::Error::other(format!("Windows 稀疏区间回收失败: {error}")))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn punch_uncommitted_holes(
     _file: &File,
     _index: &SegmentIndex,
     _logical_len: u64,
 ) -> io::Result<()> {
     Ok(())
-}
-
-#[cfg(not(unix))]
-fn allocated_bytes(metadata: &std::fs::Metadata) -> u64 {
-    metadata.len()
 }
 
 struct EvictionCandidate {
@@ -2092,6 +2194,36 @@ mod tests {
     }
 
     #[test]
+    fn promoted_next_reader_uses_current_track_fallback_rules() {
+        let root = temporary_root("promoted-next-reader");
+        let cache = SegmentCache::new_with_policy(root.clone(), 16 * 1024 * 1024, 0).unwrap();
+        let data = Arc::new(vec![13u8; 512 * 1024]);
+        let data_for_server = Arc::clone(&data);
+        let (source, requests, server) = scripted_server(2, move |_index, _request, stream| {
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                data_for_server.len()
+            )
+            .unwrap();
+            let _ = stream.write_all(&data_for_server);
+        });
+        let mut reader = cache
+            .open_reader(Some("promoted-next-reader"), &source, CachePriority::Next)
+            .unwrap();
+        let control = reader.control();
+        control.promote_to_current();
+
+        assert_eq!(reader.prefetch_head().unwrap(), Some(data.len() as u64));
+        let mut first = [0u8; 32];
+        reader.read_exact(&mut first).unwrap();
+        assert_eq!(&first, &data[..first.len()]);
+        server.join().unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cancellation_interrupts_waiting_reader_and_discards_sequential_partial() {
         let root = temporary_root("cancel-sequential");
         let cache = SegmentCache::new_with_policy(root.clone(), 16 * 1024 * 1024, 0).unwrap();
@@ -2217,6 +2349,25 @@ mod tests {
         assert_eq!(cache.status(), CacheStatus::default());
         assert!(root.join("segments-v2").is_dir());
         assert!(!legacy.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_media_file_is_sparse_and_counts_allocated_bytes() {
+        let root = temporary_root("windows-sparse-allocation");
+        let cache = SegmentCache::new_with_policy(root.clone(), 16 * 1024 * 1024, 0).unwrap();
+        let entry = cache.inner.open_entry("entry").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&entry.data_path)
+            .unwrap();
+        file.set_len(8 * 1024 * 1024).unwrap();
+        assert!(fs2::FileExt::allocated_size(&file).unwrap() < 8 * 1024 * 1024);
+        drop(file);
+        drop(entry);
+        assert!(cache.status().allocated_bytes < 8 * 1024 * 1024);
         let _ = std::fs::remove_dir_all(root);
     }
 }

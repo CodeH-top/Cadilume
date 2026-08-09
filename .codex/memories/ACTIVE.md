@@ -47,9 +47,9 @@
 - [ACT-025] 音频缓存固定 1 GiB，采用 `segments-v2` 稀疏分段：首段 256 KiB，后续缺口为
   对齐 2 MiB Range，并以文件系统实际分配块计费；写入后还须保留至少 1 GiB 系统可用空间。
   当前曲目优先，预缓冲只为 Rust 确认的真实下一首建立第二 read head；不得扫描资料库、下载
-  整条队列、恢复下下首或在下一首无 Range 时完整 fallback。LRU 保护活动条目，超额拒绝新块；
-  离线下载保持独立能力。
-  Source: user-confirmed fixed 1 GiB + sparse segment cache v2 on 2026-08-09.
+  整条队列、恢复下下首或在下一首无 Range 时完整 fallback；样本级交接后必须把该 reader
+  晋升为当前曲目优先级。LRU 保护活动条目，超额拒绝新块；离线下载保持独立能力。
+  Source: user-confirmed fixed 1 GiB + sparse segment cache v2 and review hardening on 2026-08-09.
 
 - [ACT-026] Windows 目标固定先验收 `x86_64-pc-windows-msvc`；macOS 交叉检查使用
   `cargo-xwin`，且共享缓存的 `cargo xwin` 命令必须串行运行。交叉编译、GitHub

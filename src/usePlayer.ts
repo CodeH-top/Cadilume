@@ -1216,29 +1216,35 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       window.clearTimeout(timer);
       persistedSessionTimerRef.current = undefined;
     }
-    await (isDesktopRuntime()
-      ? nativeQueueBarrierRef.current!.enqueue(nativeAudioClearCache)
-      : Promise.resolve());
-    playbackSessionDiscardedRef.current = false;
-    clearPersistedPlaybackSession();
-    queueRef.current = [];
-    queueServerIdRef.current = undefined;
-    indexRef.current = -1;
-    progressRef.current = 0;
-    resumeProgressRef.current = null;
-    shuffleNavigationRef.current = createShuffleNavigationState(0, -1);
-    scrobbledRef.current.clear();
-    setQueue([]);
-    setCurrentIndex(-1);
-    setProgress(0);
-    setDuration(0);
-    setPlaying(false);
-    setPlaybackLoading(false);
-    setBuffering(false);
-    setShuffleState(false);
-    setRepeatState("all");
-    setError(undefined);
-    setPlaybackFailure(undefined);
+    try {
+      await (isDesktopRuntime()
+        ? nativeQueueBarrierRef.current!.enqueue(nativeAudioClearCache)
+        : Promise.resolve());
+    } finally {
+      // Rust stops and detaches the engine before deleting its files. Keep the
+      // WebView mirror consistent even when a locked file makes deletion fail;
+      // the original error still propagates after this finally block.
+      playbackSessionDiscardedRef.current = false;
+      clearPersistedPlaybackSession();
+      queueRef.current = [];
+      queueServerIdRef.current = undefined;
+      indexRef.current = -1;
+      progressRef.current = 0;
+      resumeProgressRef.current = null;
+      shuffleNavigationRef.current = createShuffleNavigationState(0, -1);
+      scrobbledRef.current.clear();
+      setQueue([]);
+      setCurrentIndex(-1);
+      setProgress(0);
+      setDuration(0);
+      setPlaying(false);
+      setPlaybackLoading(false);
+      setBuffering(false);
+      setShuffleState(false);
+      setRepeatState("all");
+      setError(undefined);
+      setPlaybackFailure(undefined);
+    }
   }, [setPlaybackLoading]);
 
   const next = useCallback(() => {

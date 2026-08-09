@@ -1,5 +1,16 @@
 # LEARNINGS
 
+## 2026-08-09 — 预缓冲交接必须晋升 reader，稀疏预算必须跨平台读取实际分配量
+
+- 下一首的 `SegmentReader` 会在预缓冲阶段被标记为 `Next`，因此不允许无 Range 的完整下载，
+  也会在网络门禁中让位于当前曲目。rodio 开始拉取其首个样本后，它已经成为真实当前曲目；
+  此时必须让共享 `SegmentControl` 原子晋升为 `Current`，并让等待中的门禁和 fallback 每次动态
+  读取该优先级，否则弱网或无 Range 服务端会在无缝交接后错误中断播放。
+- 稀疏缓存容量不能用逻辑文件长度计费。macOS 与 Windows 统一通过
+  `fs2::FileExt::allocated_size()` 读取实际占用；Windows 创建或恢复媒体文件时还要先标记
+  sparse，并用 `FSCTL_SET_ZERO_DATA` 回收索引未提交区间。只有交叉编译通过仍不足以证明
+  文件系统语义，真实 Windows 验收需继续覆盖稀疏属性和实际分配量。
+
 ## 2026-08-08 — 限速下载取消必须覆盖最终提交窗口
 
 - 仅在每个网络 chunk 入口检查取消位不足以保证缓存一致性；最后一个 chunk 后的 pacing
