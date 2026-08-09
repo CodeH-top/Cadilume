@@ -57,6 +57,11 @@
   Credential Manager 与 NSIS 安装器仍须在真实 Windows 会话验收。
   Source: Windows development scope expansion on 2026-08-09.
 
+- [ACT-027] 全局通知卡片使用不透明主题面板背景和清晰边框，不使用 `backdrop-filter` 或会在
+  卡片间形成灰色遮罩带的大范围阴影。设置页缓存组沿用“播放”的双行 `settings-stack` 排版，
+  每行只显示对应缓存大小；封面缓存与音频缓存必须拥有独立按钮、忙碌状态和清理流程。
+  Source: user UI correction on 2026-08-09.
+
 ## Validation
 
 - Run TypeScript check, frontend tests/build, Rust tests, and a practical Tauri build before committing an implementation round.

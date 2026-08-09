@@ -205,7 +205,8 @@ interface MusicShellRuntime {
   cacheStatus?: CacheStatus;
   nativeCacheStatus?: NativeAudioCacheStatus;
   cacheStatusError?: string;
-  cacheBusy: boolean;
+  artworkCacheBusy: boolean;
+  audioCacheBusy: boolean;
   sourcesSyncing: boolean;
   playbackSettingsRequest: number;
   player: MusicPlayer;
@@ -219,7 +220,8 @@ interface MusicShellRuntime {
   setServerId: (value: string) => void;
   setSectionKey: (value: string) => void;
   setPrebufferNext: (value: boolean) => void;
-  clearCache: () => Promise<void>;
+  clearArtworkDiskCache: () => Promise<void>;
+  clearAudioDiskCache: () => Promise<void>;
   syncSources: () => Promise<void>;
   signOut: () => Promise<void>;
   refreshCacheStatus: () => Promise<void>;
@@ -489,7 +491,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>();
   const [nativeCacheStatus, setNativeCacheStatus] = useState<NativeAudioCacheStatus>();
   const [cacheStatusError, setCacheStatusError] = useState<string>();
-  const [cacheBusy, setCacheBusy] = useState(false);
+  const [artworkCacheBusy, setArtworkCacheBusy] = useState(false);
+  const [audioCacheBusy, setAudioCacheBusy] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
   const routeAliveRef = useKeepAliveRef();
   const [routeCacheEpoch, setRouteCacheEpoch] = useState(0);
@@ -880,26 +883,36 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     }
   };
 
-  const clearCache = async () => {
+  const clearArtworkDiskCache = async () => {
     cacheStatusRequestRef.current += 1;
-    setCacheBusy(true);
+    setArtworkCacheBusy(true);
+    setCacheStatusError(undefined);
+    try {
+      const status = await clearArtworkCache();
+      setCacheStatus(status);
+      artworkCache.clear();
+      notify("封面缓存已清理。", "success");
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      notify(message, "error");
+    } finally {
+      setArtworkCacheBusy(false);
+    }
+  };
+
+  const clearAudioDiskCache = async () => {
+    cacheStatusRequestRef.current += 1;
+    setAudioCacheBusy(true);
     setCacheStatusError(undefined);
     try {
       await player.clearPlaybackAndCache();
-      const [status, nativeStatus] = await Promise.all([
-        clearArtworkCache(),
-        nativeAudioCacheStatus(),
-      ]);
-      setCacheStatus(status);
-      setNativeCacheStatus(nativeStatus);
-      artworkCache.clear();
-      notify("封面与音频磁盘缓存已清理。");
+      setNativeCacheStatus(await nativeAudioCacheStatus());
+      notify("音频缓存已清理。", "success");
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
-      setCacheStatusError(message);
       notify(message, "error");
     } finally {
-      setCacheBusy(false);
+      setAudioCacheBusy(false);
     }
   };
 
@@ -1109,7 +1122,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     cacheStatus,
     nativeCacheStatus,
     cacheStatusError,
-    cacheBusy,
+    artworkCacheBusy,
+    audioCacheBusy,
     sourcesSyncing,
     playbackSettingsRequest,
     player,
@@ -1123,7 +1137,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     setServerId,
     setSectionKey,
     setPrebufferNext: player.setPrebufferNext,
-    clearCache,
+    clearArtworkDiskCache,
+    clearAudioDiskCache,
     syncSources,
     signOut,
     refreshCacheStatus,
@@ -1930,7 +1945,8 @@ function RoutePage() {
       cacheStatus={runtime.cacheStatus}
       nativeCacheStatus={runtime.nativeCacheStatus}
       cacheStatusError={runtime.cacheStatusError}
-      cacheBusy={runtime.cacheBusy}
+      artworkCacheBusy={runtime.artworkCacheBusy}
+      audioCacheBusy={runtime.audioCacheBusy}
       sourcesSyncing={runtime.sourcesSyncing}
       playlists={runtime.playlists}
       onOpen={openItem}
@@ -1951,7 +1967,8 @@ function RoutePage() {
       onServerChange={runtime.setServerId}
       onSectionChange={runtime.setSectionKey}
       onPrebufferNext={runtime.setPrebufferNext}
-      onClearCache={() => void runtime.clearCache()}
+      onClearArtworkCache={() => void runtime.clearArtworkDiskCache()}
+      onClearAudioCache={() => void runtime.clearAudioDiskCache()}
       onSyncSources={() => void runtime.syncSources()}
       onLogout={runtime.signOut}
     />
@@ -1987,7 +2004,8 @@ interface ContentViewProps {
   cacheStatus?: CacheStatus;
   nativeCacheStatus?: NativeAudioCacheStatus;
   cacheStatusError?: string;
-  cacheBusy: boolean;
+  artworkCacheBusy: boolean;
+  audioCacheBusy: boolean;
   sourcesSyncing: boolean;
   playlists: PlexPlaylist[];
   onOpen: (item: PlexItem) => void;
@@ -2008,7 +2026,8 @@ interface ContentViewProps {
   onServerChange: (value: string) => void;
   onSectionChange: (value: string) => void;
   onPrebufferNext: (value: boolean) => void;
-  onClearCache: () => void;
+  onClearArtworkCache: () => void;
+  onClearAudioCache: () => void;
   onSyncSources: () => void;
   onLogout: () => void;
 }
@@ -3435,7 +3454,7 @@ function SettingsView(props: ContentViewProps) {
     : props.cacheStatusError ? "暂时无法统计"
       : "正在统计…";
   const nativeCacheSummary = props.nativeCacheStatus
-    ? `${formatBytes(props.nativeCacheStatus.size_bytes)} / ${formatBytes(props.nativeCacheStatus.limit_bytes)}`
+    ? formatBytes(props.nativeCacheStatus.size_bytes)
     : "正在统计…";
   return (
     <div className="settings-page">
@@ -3479,12 +3498,15 @@ function SettingsView(props: ContentViewProps) {
         </div>
       </SettingsGroup>
       <SettingsGroup icon={<Database size={18} />} title="缓存">
-        <div className="cache-settings">
-          <dl className="cache-metrics" aria-live="polite">
-            <div className="cache-metric"><dt>封面缓存</dt><dd>{cacheSummary}</dd></div>
-            <div className="cache-metric"><dt>音频缓存</dt><dd>{nativeCacheSummary}</dd></div>
-          </dl>
-          <button className="danger-button cache-clear-button" type="button" aria-label="清理封面与音频缓存" disabled={props.cacheBusy || (!props.cacheStatus?.sizeBytes && !props.nativeCacheStatus?.size_bytes)} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
+        <div className="settings-stack">
+          <div className="field-row cache-setting-row">
+            <span><strong>封面缓存</strong><small aria-live="polite">{cacheSummary}</small></span>
+            <button className="danger-button cache-clear-button" type="button" aria-label="清理封面缓存" disabled={props.artworkCacheBusy || !props.cacheStatus?.sizeBytes} onClick={props.onClearArtworkCache}>{props.artworkCacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}{props.artworkCacheBusy ? "清理中…" : "清理封面"}</button>
+          </div>
+          <div className="field-row cache-setting-row">
+            <span><strong>音频缓存</strong><small aria-live="polite">{nativeCacheSummary}</small></span>
+            <button className="danger-button cache-clear-button" type="button" aria-label="清理音频缓存" disabled={props.audioCacheBusy || !props.nativeCacheStatus?.size_bytes} onClick={props.onClearAudioCache}>{props.audioCacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}{props.audioCacheBusy ? "清理中…" : "清理音频"}</button>
+          </div>
         </div>
       </SettingsGroup>
       <SettingsGroup icon={<Server size={18} />} title="音乐来源">
