@@ -64,6 +64,11 @@
   独立按钮、忙碌状态和清理流程。
   Source: user UI correction on 2026-08-09.
 
+- [ACT-028] 黑胶模式的轴座与唱臂采用写实、简单、简约的唱机机械结构：小型圆柱轴座、
+  清晰的轴承连接颈、单根细金属臂和紧凑唱头。轴座与唱臂在 SVG 结构和视觉上都必须连续
+  相连；避免概念渲染式厚重外壳、彩色指示灯、夸张阴影和多余装饰层。
+  Source: explicit user correction on 2026-08-09.
+
 ## Validation
 
 - Run TypeScript check, frontend tests/build, Rust tests, and a practical Tauri build before committing an implementation round.

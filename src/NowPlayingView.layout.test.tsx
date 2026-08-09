@@ -76,6 +76,7 @@ describe("expanded player controller layout", () => {
     expect(tonearmStart).toBeLessThan(recordStart);
     expect(markup).toContain('data-testid="tonearm-pivot"');
     expect(markup).toContain('data-testid="tonearm-arm"');
+    expect(markup).toContain('data-testid="tonearm-connection"');
     expect(markup).toContain('data-testid="tonearm-cartridge"');
   });
 

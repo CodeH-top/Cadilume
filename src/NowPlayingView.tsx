@@ -333,21 +333,47 @@ export function NowPlayingView({
           <section className="now-playing-art-column" aria-label="播放视觉">
             {displayMode === "vinyl" ? (
               <div className={`now-playing-record-stage ${activelyPlaying ? "is-playing" : "is-paused"}`}>
-                <svg className="now-playing-tonearm" viewBox="0 0 240 220" aria-hidden="true">
+                <svg className="now-playing-tonearm" viewBox="0 0 300 260" aria-hidden="true">
                   <g className="now-playing-tonearm-base" data-testid="tonearm-pivot">
-                    <ellipse className="now-playing-tonearm-base-shadow" cx="205" cy="36" rx="28" ry="14" />
-                    <circle className="now-playing-tonearm-base-ring" cx="205" cy="30" r="22" />
-                    <circle className="now-playing-tonearm-base-bearing" cx="205" cy="30" r="13" />
-                    <circle className="now-playing-tonearm-base-cap" cx="201" cy="25" r="4" />
-                  </g>
-                  <g className="now-playing-tonearm-armature">
-                    <path className="now-playing-tonearm-rail-shadow" d="M205 30 C196 56 180 80 153 105 S91 154 63 189" />
-                    <path className="now-playing-tonearm-arm" data-testid="tonearm-arm" d="M205 30 C196 56 180 80 153 105 S91 154 63 189" />
-                    <path className="now-playing-tonearm-rail-highlight" d="M203 28 C194 53 178 77 151 102 S89 151 61 186" />
-                    <g className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge" transform="translate(63 189) rotate(-18)">
-                      <path className="now-playing-tonearm-cartridge-neck" d="M-4 0 H7" />
-                      <rect className="now-playing-tonearm-cartridge-body" x="5" y="-7" width="29" height="14" rx="3" />
-                      <path className="now-playing-tonearm-stylus" d="M27 6 L24 20 L20 22" />
+                    <ellipse className="now-playing-tonearm-base-shadow" cx="244" cy="76" rx="31" ry="10" />
+                    <path className="now-playing-tonearm-base-plinth" d="M214 38 C214 30 227 24 244 24 C261 24 274 30 274 38 V64 C274 72 261 78 244 78 C227 78 214 72 214 64Z" />
+                    <ellipse className="now-playing-tonearm-base-top" cx="244" cy="38" rx="30" ry="12" />
+                    <ellipse className="now-playing-tonearm-base-inset" cx="244" cy="38" rx="18" ry="7" />
+                    <g className="now-playing-tonearm-armature">
+                      <path
+                        className="now-playing-tonearm-rail-shadow"
+                        d="M229 71 C219 96 205 119 191 141 C178 162 171 184 171 204 C171 214 173 220 176 224"
+                      />
+                      <path
+                        className="now-playing-tonearm-arm"
+                        data-testid="tonearm-arm"
+                        d="M229 71 C219 96 205 119 191 141 C178 162 171 184 171 204 C171 214 173 220 176 224"
+                      />
+                      <path
+                        className="now-playing-tonearm-connector-shadow"
+                        d="M242 47 C242 57 237 65 229 72"
+                      />
+                      <path
+                        className="now-playing-tonearm-connector"
+                        data-testid="tonearm-connection"
+                        d="M242 47 C242 57 237 65 229 72"
+                      />
+                      <path
+                        className="now-playing-tonearm-rail-highlight"
+                        d="M227 69 C217 94 203 117 189 139 C176 160 169 182 169 203 C169 212 171 218 174 222"
+                      />
+                      <g className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge" transform="translate(176 224) rotate(-18)">
+                        <path className="now-playing-tonearm-cartridge-neck" d="M-6 0 H4" />
+                        <rect className="now-playing-tonearm-cartridge-body" x="2" y="-6" width="25" height="12" rx="2" />
+                        <path className="now-playing-tonearm-cartridge-face" d="M22 -5 V5" />
+                        <path className="now-playing-tonearm-stylus" d="M25 5 L20 18 L16 21" />
+                      </g>
+                    </g>
+                    <g className="now-playing-tonearm-bearing" aria-hidden="true">
+                      <circle className="now-playing-tonearm-base-ring" cx="244" cy="38" r="16" />
+                      <circle className="now-playing-tonearm-base-bearing" cx="244" cy="38" r="11" />
+                      <circle className="now-playing-tonearm-base-bearing-inner" cx="244" cy="38" r="5" />
+                      <circle className="now-playing-tonearm-base-cap" cx="242" cy="36" r="2.5" />
                     </g>
                   </g>
                 </svg>
