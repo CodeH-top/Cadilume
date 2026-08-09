@@ -144,4 +144,18 @@ describe("GlobalNotificationQueue flat list", () => {
     const tree = componentRuntime.render(() => GlobalNotificationQueue({ notices: state, onDismiss: vi.fn() })) as unknown as ElementNode;
     expect(elementChildren(listFrom(tree).props.children)).toHaveLength(5);
   });
+
+  it("suppresses entry motion without removing the live status semantics", () => {
+    const notice = {
+      ...createGlobalNotification("notice-overflow", "第六条", "info", 100, 6),
+      skipEnterAnimation: true,
+    };
+    const tree = componentRuntime.render(() => GlobalNotificationQueue({ notices: [notice], onDismiss: vi.fn() })) as unknown as ElementNode;
+    const item = elementChildren(listFrom(tree).props.children)[0];
+    const card = findElement(item, (element) => String(element.props.className || "").startsWith("global-notification-card"));
+
+    expect(item.props.className).toContain("is-entering-without-motion");
+    expect(card?.props.role).toBe("status");
+    expect(card?.props["aria-live"]).toBe("polite");
+  });
 });

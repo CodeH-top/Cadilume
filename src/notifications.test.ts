@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  GLOBAL_NOTIFICATION_AUTO_CLOSE_MS,
   createGlobalNotification,
   limitGlobalNotifications,
   markGlobalNotificationLeaving,
@@ -7,6 +8,10 @@ import {
 } from "./notifications";
 
 describe("global notification queue state", () => {
+  it("auto-closes notices after two seconds", () => {
+    expect(GLOBAL_NOTIFICATION_AUTO_CLOSE_MS).toBe(2_000);
+  });
+
   it("keeps every message and orders simultaneous additions by insertion order", () => {
     const first = createGlobalNotification("notice-1", "第一条", "info", 100, 1);
     const second = createGlobalNotification("notice-2", "第二条", "info", 100, 2);

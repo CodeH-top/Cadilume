@@ -68,7 +68,16 @@ export function useGlobalNotificationQueue(): GlobalNotificationQueueController 
     const order = ++noticeSequenceRef.current;
     const createdAt = Date.now();
     const next = createGlobalNotification(`notice-${createdAt}-${order}`, normalizedMessage, level, createdAt, order);
-    setNotices((current) => limitGlobalNotifications([...current, next]));
+    setNotices((current) => {
+      const candidates = [...current, next];
+      const limited = limitGlobalNotifications(candidates);
+      if (candidates.length <= GLOBAL_NOTIFICATION_MAX_COUNT) return limited;
+      return limited.map((notice) => (
+        notice.phase === "entering"
+          ? { ...notice, skipEnterAnimation: true }
+          : notice
+      ));
+    });
   }, []);
 
   const clear = useCallback(() => {
@@ -168,9 +177,12 @@ export function GlobalNotificationQueue({
       <ul className="global-notification-list">
         {orderedNotices.map((notice, index) => {
           const announce = index === 0 && notice.phase === "entering";
+          const enterMotionClass = notice.phase === "entering" && notice.skipEnterAnimation
+            ? " is-entering-without-motion"
+            : "";
           return (
             <li
-              className={`global-notification-item is-${notice.phase}`}
+              className={`global-notification-item is-${notice.phase}${enterMotionClass}`}
               data-notification-id={notice.id}
               data-notification-phase={notice.phase}
               data-notification-index={index}

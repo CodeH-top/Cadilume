@@ -172,7 +172,7 @@ describe("useGlobalNotificationQueue", () => {
     expect(mounted.current.notices[0]?.id).toBe(first.id);
   });
 
-  it("keeps its five-second timer running without hover/focus pause state", () => {
+  it("keeps its two-second timer running without hover/focus pause state", () => {
     const mounted = mountQueue();
     mounted.current.notify("自动关闭");
     mounted.render();
@@ -186,13 +186,26 @@ describe("useGlobalNotificationQueue", () => {
     expect(mounted.current.notices[0]?.phase).toBe("leaving");
   });
 
-  it("drops the oldest notice as soon as the sixth notice arrives", () => {
+  it("drops the oldest notice and suppresses entry motion as soon as the sixth notice arrives", () => {
     const mounted = mountQueue();
-    for (let index = 1; index <= 6; index += 1) mounted.current.notify(`第 ${index} 条`);
+    for (let index = 1; index <= 5; index += 1) mounted.current.notify(`第 ${index} 条`);
     mounted.render();
+    const retainedIds = new Map(
+      mounted.current.notices
+        .filter((notice) => notice.message !== "第 1 条")
+        .map((notice) => [notice.message, notice.id]),
+    );
+
+    mounted.current.notify("第 6 条");
+    mounted.render();
+
     expect(mounted.current.notices).toHaveLength(5);
     expect(mounted.current.notices.map((notice) => notice.message)).not.toContain("第 1 条");
     expect(mounted.current.notices.map((notice) => notice.message)).toContain("第 6 条");
+    for (const notice of mounted.current.notices) {
+      if (notice.message !== "第 6 条") expect(notice.id).toBe(retainedIds.get(notice.message));
+      if (notice.phase === "entering") expect(notice.skipEnterAnimation).toBe(true);
+    }
   });
 
   it("expires an overdue notice on focus even when its background timer was throttled", () => {

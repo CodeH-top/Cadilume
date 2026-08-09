@@ -1,4 +1,4 @@
-export const GLOBAL_NOTIFICATION_AUTO_CLOSE_MS = 5_000;
+export const GLOBAL_NOTIFICATION_AUTO_CLOSE_MS = 2_000;
 export const GLOBAL_NOTIFICATION_EXIT_MS = 220;
 export const GLOBAL_NOTIFICATION_REDUCED_MOTION_EXIT_MS = 120;
 export const GLOBAL_NOTIFICATION_MAX_COUNT = 5;
@@ -13,6 +13,7 @@ export interface GlobalNotification {
   createdAt: number;
   order: number;
   phase: GlobalNotificationPhase;
+  skipEnterAnimation: boolean;
 }
 
 export function createGlobalNotification(
@@ -29,6 +30,7 @@ export function createGlobalNotification(
     createdAt,
     order,
     phase: "entering",
+    skipEnterAnimation: false,
   };
 }
 
