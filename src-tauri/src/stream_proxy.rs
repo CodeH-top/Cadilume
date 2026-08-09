@@ -11,8 +11,9 @@ use axum::{
     extract::{Path, State},
     http::{
         header::{
-            ACCEPT, ACCEPT_ENCODING, ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE,
-            CONTENT_TYPE, ETAG, HOST, IF_RANGE, LAST_MODIFIED, RANGE, TRANSFER_ENCODING,
+            ACCEPT, ACCEPT_ENCODING, ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL,
+            CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HOST, IF_RANGE, LAST_MODIFIED,
+            RANGE, TRANSFER_ENCODING,
         },
         HeaderMap, HeaderValue, Method, StatusCode, Uri,
     },
@@ -846,6 +847,9 @@ fn artwork_response(mime: String, bytes: Vec<u8>, method: &Method) -> Response {
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    response
+        .headers_mut()
+        .insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
     response
 }
 
@@ -1696,6 +1700,7 @@ mod tests {
             get.headers().get("x-content-type-options").unwrap(),
             "nosniff"
         );
+        assert_eq!(get.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), "*");
         assert_eq!(get.body().size_hint().exact(), Some(4));
 
         let head = artwork_response(

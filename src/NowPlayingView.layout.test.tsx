@@ -2,12 +2,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { NowPlayingView } from "./NowPlayingView";
 
-function renderExpandedPlayer(playing = false) {
+function renderExpandedPlayer(playing = false, mode: "vinyl" | "artwork" = "vinyl") {
   return renderToStaticMarkup(
     <NowPlayingView
       open
+      mode={mode}
       track={{ title: "布局验证歌曲", artist: "布局验证歌手", duration: 210_000 }}
       playing={playing}
+      artwork={<img src="data:image/png;base64,cGxhY2Vob2xkZXI=" alt="布局验证封面" />}
       queueAvailable
       headerActions={<div data-testid="expanded-player-header-actions">外观与连接状态</div>}
       onSeek={() => undefined}
@@ -79,13 +81,30 @@ describe("expanded player controller layout", () => {
     expect(markup).toContain('data-testid="tonearm-arm"');
     expect(markup).toContain('data-testid="tonearm-connection"');
     expect(markup).toContain('data-testid="tonearm-cartridge"');
-    expect(markup).toContain('d="M150 20 C158 88 200 154 270 180"');
+    expect(markup).toContain('d="M150 20 C184 78 224 132 270 180"');
     expect(markup).toContain('cx="150" cy="20"');
+    expect(markup).toContain('class="now-playing-tonearm-base-ring" cx="150" cy="20" r="14"');
+    expect(markup).not.toContain("now-playing-tonearm-base-shadow");
+    expect(markup).toContain('transform="translate(270 180) rotate(46)"');
+    expect(markup.indexOf("now-playing-tonearm-base-cap")).toBeLessThan(markup.indexOf("now-playing-tonearm-swing"));
   });
 
   it("exposes distinct resting and playing tonearm states", () => {
     expect(renderExpandedPlayer()).toContain("now-playing-record-stage is-paused");
-    expect(renderExpandedPlayer(true)).toContain("now-playing-record-stage is-playing");
+    const playingMarkup = renderExpandedPlayer(true);
+    expect(playingMarkup).toContain("now-playing-record-stage is-playing");
+    expect(playingMarkup).toContain('transform="translate(270 180) rotate(46)"');
+  });
+
+  it("renders artwork mode as one independent square cover surface", () => {
+    const markup = renderExpandedPlayer(false, "artwork");
+
+    expect(markup).toContain("is-artwork-mode");
+    expect(markup).toContain("now-playing-cover-stage");
+    expect(markup).toContain("now-playing-cover-artwork");
+    expect(markup).toContain("布局验证封面");
+    expect(markup).not.toContain("now-playing-background-artwork");
+    expect(markup).not.toContain("now-playing-record-stage");
   });
 
   it("keeps transport controls tooltip-free while auxiliary icon actions remain described", () => {

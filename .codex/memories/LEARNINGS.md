@@ -565,3 +565,16 @@
 - Rust 侧 `native_queue_next` / `native_queue_previous` 只更新引擎队列索引，不停止当前音频；如果前端先 `await` 队列 IPC 再停歌，往返期间旧歌会继续出声、进度条残留旧值。
 - 正确做法是在 `next()` / `previous()` 被调用的同一同步帧里：fire-and-forget `nativeAudioStop()`、清空 `resumeProgressRef`、`progressRef` 与 `setProgress(0)`，然后再发队列 IPC；`loadNativeTrack` 内的 stop 只作为兜底。
 - `previous()` 在“进度 ≤4s”且没有上一首的失败回退里，应回落到当前曲目开头重新播放，不能停在“已停止且进度 0”的死状态；`previous()` 的“重启当前曲目”（进度 >4s）分支不要调用 stop，否则 `nativeAudioSeek(0)` 会打在已清空的引擎上。
+
+## 2026-08-09 — 展开播放器封面取色与 loopback 像素读取
+
+- `<img>` 能正常显示不代表 canvas 能读取其像素。Tauri 页面与 `127.0.0.1` 封面票据属于不同
+  origin；需要只给用于取色的 loopback `<img>` 设置 `crossOrigin="anonymous"`，并只在
+  `/artwork/{ticket}` 成功响应上返回 `Access-Control-Allow-Origin: *`。不要把该响应头扩散到
+  音频流代理，也不要让普通远端图片因强制 anonymous CORS 而加载失败。
+- 取色使用已解码图片的 `48×48` canvas 样本即可；按 RGB 桶聚合，忽略透明、近黑和近白像素，
+  并提高中间亮度与高饱和像素权重，可得到稳定且不易发灰的主题色。读取失败时保留默认主题，
+  切歌时旧主题可暂留到新图加载完成，以避免空白和闪烁。
+- 采样色应作为展开播放器根节点 CSS 变量，由根背景和框架遮罩共同派生；标题、视觉、歌词与
+  底部控制区自身保持透明。这样黑胶和封面模式共享一套全局主题，也不会在歌词或底栏形成独立
+  灰黑分区。

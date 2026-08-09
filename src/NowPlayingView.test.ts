@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getLyricProgress } from "./NowPlayingView";
+import { getDominantArtworkColor, getLyricProgress } from "./NowPlayingView";
 import { getCenteredLyricsScrollTop, getLyricsScrollPlan } from "./lyricsScroll";
 
 describe("expanded player lyric progress", () => {
@@ -13,6 +13,30 @@ describe("expanded player lyric progress", () => {
 
   it("keeps untimed lyrics static", () => {
     expect(getLyricProgress({ ...line, startMs: null, endMs: null }, 2_000)).toBe(0);
+  });
+});
+
+describe("expanded player artwork theme", () => {
+  it("selects the dominant chromatic mid-tone while ignoring transparent and extreme pixels", () => {
+    const pixels = new Uint8ClampedArray([
+      0, 0, 0, 255,
+      255, 255, 255, 255,
+      200, 40, 56, 255,
+      198, 42, 54, 255,
+      40, 80, 190, 80,
+    ]);
+
+    expect(getDominantArtworkColor(pixels)).toEqual({ red: 199, green: 41, blue: 55 });
+  });
+
+  it("retains a usable neutral theme for monochrome artwork", () => {
+    const pixels = new Uint8ClampedArray([
+      114, 118, 124, 255,
+      116, 120, 126, 255,
+      250, 250, 250, 255,
+    ]);
+
+    expect(getDominantArtworkColor(pixels)).toEqual({ red: 115, green: 119, blue: 125 });
   });
 });
 

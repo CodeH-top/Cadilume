@@ -14,7 +14,7 @@ import {
   SkipBack,
   SkipForward,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode, type SyntheticEvent } from "react";
 import { hasDisplayableLyrics, type LyricLine, type LyricsDocument } from "./lyrics";
 import { useActiveLyricsScroll } from "./lyricsScroll";
 import { playbackControlLabel, usableDurationSeconds } from "./playerUi";
@@ -67,6 +67,19 @@ export interface NowPlayingLyricsState {
 export type NowPlayingTheme = ThemeMode;
 export type NowPlayingMode = "vinyl" | "artwork";
 export type NowPlayingRepeatMode = "off" | "all" | "one";
+
+export interface ArtworkThemeColor {
+  red: number;
+  green: number;
+  blue: number;
+}
+
+interface ArtworkColorBucket {
+  score: number;
+  redTotal: number;
+  greenTotal: number;
+  blueTotal: number;
+}
 
 export interface NowPlayingViewProps {
   /** When omitted, the component remains mounted but animates below the window. */
@@ -126,6 +139,73 @@ export function getLyricProgress(line: LyricLine, positionMs: number): number {
   return clampUnit((positionMs - start) / (end - start));
 }
 
+/**
+ * Pick a stable mid-tone from a small artwork sample. Quantized buckets favor
+ * chromatic pixels while ignoring transparent, near-black, and near-white
+ * pixels that would otherwise collapse the player background to a neutral.
+ */
+export function getDominantArtworkColor(pixels: ArrayLike<number>): ArtworkThemeColor | undefined {
+  const buckets = new Map<number, ArtworkColorBucket>();
+
+  for (let index = 0; index + 3 < pixels.length; index += 4) {
+    const red = Number(pixels[index]);
+    const green = Number(pixels[index + 1]);
+    const blue = Number(pixels[index + 2]);
+    const alpha = Number(pixels[index + 3]) / 255;
+    if (![red, green, blue, alpha].every(Number.isFinite) || alpha < 0.5) continue;
+
+    const maximum = Math.max(red, green, blue) / 255;
+    const minimum = Math.min(red, green, blue) / 255;
+    const lightness = (maximum + minimum) / 2;
+    if (lightness < 0.06 || lightness > 0.94) continue;
+
+    const chroma = maximum - minimum;
+    const saturation = chroma === 0 ? 0 : chroma / Math.max(0.001, 1 - Math.abs(2 * lightness - 1));
+    const middleToneWeight = 1 - Math.min(0.72, Math.abs(lightness - 0.5) * 1.1);
+    const score = alpha * (0.45 + saturation * 1.55) * middleToneWeight;
+    const key = ((red >> 5) << 6) | ((green >> 5) << 3) | (blue >> 5);
+    const bucket = buckets.get(key) ?? {
+      score: 0,
+      redTotal: 0,
+      greenTotal: 0,
+      blueTotal: 0,
+    };
+    bucket.score += score;
+    bucket.redTotal += red * score;
+    bucket.greenTotal += green * score;
+    bucket.blueTotal += blue * score;
+    buckets.set(key, bucket);
+  }
+
+  let dominant: ArtworkColorBucket | undefined;
+  for (const bucket of buckets.values()) {
+    if (!dominant || bucket.score > dominant.score) dominant = bucket;
+  }
+  if (!dominant || dominant.score <= 0) return undefined;
+
+  return {
+    red: Math.round(dominant.redTotal / dominant.score),
+    green: Math.round(dominant.greenTotal / dominant.score),
+    blue: Math.round(dominant.blueTotal / dominant.score),
+  };
+}
+
+function sampleArtworkThemeColor(image: HTMLImageElement): ArtworkThemeColor | undefined {
+  if (!image.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0) return undefined;
+  const canvas = document.createElement("canvas");
+  canvas.width = 48;
+  canvas.height = 48;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return undefined;
+
+  try {
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return getDominantArtworkColor(context.getImageData(0, 0, canvas.width, canvas.height).data);
+  } catch {
+    return undefined;
+  }
+}
+
 function clampUnit(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
@@ -180,9 +260,11 @@ export function NowPlayingView({
   const titleId = useId();
   const dialogRef = useRef<HTMLElement>(null);
   const addToPlaylistButtonRef = useRef<HTMLButtonElement>(null);
+  const sampledArtworkRef = useRef("");
   const escapeEnabledRef = useRef(escapeEnabled);
   const previousEscapeEnabledRef = useRef(escapeEnabled);
   const [internalMode, setInternalMode] = useState<NowPlayingMode>(mode);
+  const [artworkThemeColor, setArtworkThemeColor] = useState<ArtworkThemeColor>();
   const visible = Boolean(open && track);
   const displayMode = onModeChange ? mode : internalMode;
   const artist = trackArtist(track);
@@ -195,11 +277,20 @@ export function NowPlayingView({
   const repeatLabel = repeat === "one" ? "单曲循环" : repeat === "all" ? "当前列表循环" : "顺序播放，列表结束后停止";
   const themeAttribute = theme;
   const modeClass = displayMode === "artwork" ? "is-artwork-mode" : "is-vinyl-mode";
+  const trackIdentity = String(track?.ratingKey ?? track?.key ?? track?.title ?? "");
+  const artworkThemeStyle = artworkThemeColor
+    ? { "--now-playing-artwork-theme": `rgb(${artworkThemeColor.red} ${artworkThemeColor.green} ${artworkThemeColor.blue})` } as CSSProperties
+    : undefined;
   escapeEnabledRef.current = escapeEnabled;
 
   useEffect(() => {
     setInternalMode(mode);
   }, [mode]);
+
+  useEffect(() => {
+    sampledArtworkRef.current = "";
+    if (!track?.imageUrl && !track?.thumb && !track?.art) setArtworkThemeColor(undefined);
+  }, [track?.art, track?.imageUrl, track?.thumb, trackIdentity]);
 
   useEffect(() => {
     if (!visible || !escapeEnabledRef.current) return;
@@ -262,6 +353,19 @@ export function NowPlayingView({
     if (visible && event.target === event.currentTarget) onClose();
   };
 
+  const handleArtworkLoad = (event: SyntheticEvent<HTMLElement>) => {
+    const image = event.target;
+    if (!(image instanceof HTMLImageElement)
+      || image.classList.contains("artwork-candidate")
+      || !image.closest(".now-playing-artwork, .now-playing-cover-artwork")) return;
+    const source = image.currentSrc || image.src;
+    const sampleKey = `${trackIdentity}:${source}`;
+    if (!source || sampledArtworkRef.current === sampleKey) return;
+    sampledArtworkRef.current = sampleKey;
+    const sampledColor = sampleArtworkThemeColor(image);
+    if (sampledColor) setArtworkThemeColor(sampledColor);
+  };
+
   const handleModeChange = (nextMode: NowPlayingMode) => {
     if (onModeChange) onModeChange(nextMode);
     else setInternalMode(nextMode);
@@ -277,6 +381,7 @@ export function NowPlayingView({
       ref={dialogRef}
       className={`now-playing-view ${visible ? "is-open" : "is-closed"} ${modeClass}`}
       data-theme={themeAttribute}
+      style={artworkThemeStyle}
       role="dialog"
       aria-modal={visible && escapeEnabled ? true : undefined}
       aria-labelledby={titleId}
@@ -284,6 +389,7 @@ export function NowPlayingView({
       inert={!visible || !escapeEnabled ? true : undefined}
       tabIndex={-1}
       onMouseDown={handleBackdropMouseDown}
+      onLoadCapture={handleArtworkLoad}
     >
       <div className="now-playing-sheen" aria-hidden="true" />
       <div className="now-playing-frame">
@@ -335,12 +441,14 @@ export function NowPlayingView({
               <div className={`now-playing-record-stage ${activelyPlaying ? "is-playing" : "is-paused"}`}>
                 <svg className="now-playing-tonearm" viewBox="0 0 300 260" aria-hidden="true">
                   <g className="now-playing-tonearm-base" data-testid="tonearm-pivot">
-                    <circle className="now-playing-tonearm-base-shadow" cx="150" cy="22" r="20" />
+                    <circle className="now-playing-tonearm-base-ring" cx="150" cy="20" r="14" />
+                    <circle className="now-playing-tonearm-base-bearing" cx="150" cy="20" r="8" />
+                    <circle className="now-playing-tonearm-base-cap" cx="150" cy="20" r="3" />
                     <g className="now-playing-tonearm-swing" data-testid="tonearm-swing">
                       <g className="now-playing-tonearm-armature" data-testid="tonearm-connection">
-                        <path className="now-playing-tonearm-rail-shadow" d="M150 20 C158 88 200 154 270 180" />
-                        <path className="now-playing-tonearm-arm" data-testid="tonearm-arm" d="M150 20 C158 88 200 154 270 180" />
-                        <g className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge" transform="translate(270 180) rotate(32)">
+                        <path className="now-playing-tonearm-rail-shadow" d="M150 20 C184 78 224 132 270 180" />
+                        <path className="now-playing-tonearm-arm" data-testid="tonearm-arm" d="M150 20 C184 78 224 132 270 180" />
+                        <g className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge" transform="translate(270 180) rotate(46)">
                           <path className="now-playing-tonearm-cartridge-neck" d="M-5 0 H7" />
                           <rect className="now-playing-tonearm-cartridge-body" x="5" y="-5" width="24" height="10" rx="2" />
                           <rect className="now-playing-tonearm-cartridge-face" x="25" y="-6" width="8" height="12" rx="2" />
@@ -348,9 +456,6 @@ export function NowPlayingView({
                         </g>
                       </g>
                     </g>
-                    <circle className="now-playing-tonearm-base-ring" cx="150" cy="20" r="18" />
-                    <circle className="now-playing-tonearm-base-bearing" cx="150" cy="20" r="10" />
-                    <circle className="now-playing-tonearm-base-cap" cx="150" cy="20" r="4" />
                   </g>
                 </svg>
                 <div className="now-playing-record" aria-label={`${track?.title || "尚未播放"} 黑胶唱片`} role="img">

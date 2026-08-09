@@ -1203,7 +1203,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
         playing={player.playing}
         loading={playbackLoading}
         buffering={player.buffering}
-        artwork={<Artwork item={player.current} size="immersive" />}
+        artwork={<Artwork item={player.current} size="immersive" canvasReadable />}
         progressSeconds={player.progress}
         durationSeconds={player.duration}
         shuffle={player.shuffle}
@@ -4491,12 +4491,13 @@ interface ArtworkItem {
   imageUrl?: string;
 }
 
-function Artwork({ item, size, className = "", preferArt = false, stableTransition = false }: {
+function Artwork({ item, size, className = "", preferArt = false, stableTransition = false, canvasReadable = false }: {
   item?: ArtworkItem;
   size: "small" | "large" | "hero" | "player" | "immersive" | "backdrop";
   className?: string;
   preferArt?: boolean;
   stableTransition?: boolean;
+  canvasReadable?: boolean;
 }) {
   const serverId = useContext(ArtworkServerContext);
   const hostRef = useRef<HTMLSpanElement>(null);
@@ -4590,6 +4591,7 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
     <span ref={hostRef} className={`artwork artwork-${size} ${className}`}>
       {renderedSource && (!failed || stableTransition)
         ? <img
+            crossOrigin={canvasReadable && isLoopbackArtworkSource(renderedSource) ? "anonymous" : undefined}
             src={renderedSource}
             alt={`${item?.title || "音乐"} 封面`}
             loading={stableTransition ? "eager" : "lazy"}
@@ -4605,6 +4607,7 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
       {candidateSource && !failed && (
         <img
           className="artwork-candidate"
+          crossOrigin={canvasReadable && isLoopbackArtworkSource(candidateSource) ? "anonymous" : undefined}
           src={candidateSource}
           alt=""
           aria-hidden="true"
@@ -4615,6 +4618,10 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
       )}
     </span>
   );
+}
+
+function isLoopbackArtworkSource(source?: string): boolean {
+  return typeof source === "string" && /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\//i.test(source);
 }
 
 function Avatar({ account }: { account: PlexAccount }) {
