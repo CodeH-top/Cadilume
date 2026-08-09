@@ -228,6 +228,12 @@ impl DecodeBufferState {
         buffered >= self.resume_chunks || self.finished.load(Ordering::SeqCst)
     }
 
+    fn reader_failure(&self) -> Option<String> {
+        self.reader_control
+            .as_ref()
+            .and_then(|control| control.failure())
+    }
+
     fn notify_worker(&self) {
         self.worker_signal_epoch.fetch_add(1, Ordering::SeqCst);
         self.worker_signal.notify_all();
@@ -614,6 +620,10 @@ where
 
     let initial_deadline = std::time::Instant::now() + DECODE_INITIAL_CHUNK_TIMEOUT;
     let initial = loop {
+        if let Some(failure) = state.reader_failure() {
+            state.cancel_worker();
+            return Err(format!("分段媒体读取失败: {failure}"));
+        }
         let now = std::time::Instant::now();
         let remaining = initial_deadline.saturating_duration_since(now);
         if remaining.is_zero() {
@@ -634,6 +644,9 @@ where
             }
             Err(RecvTimeoutError::Disconnected) => {
                 state.cancel_worker();
+                if let Some(failure) = state.reader_failure() {
+                    return Err(format!("分段媒体读取失败: {failure}"));
+                }
                 return Err("解码线程在首个 PCM 缓冲前退出".to_string());
             }
         }
@@ -1335,6 +1348,48 @@ fn publish_natural_ended(
             serde_json::json!({ "type": "queue-item", "index": index }),
         );
     }
+}
+
+fn sanitize_playback_error_reason(reason: &str) -> String {
+    let compact = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = compact.to_ascii_lowercase();
+    if compact.is_empty()
+        || lower.contains("://")
+        || lower.contains("x-plex-token")
+        || lower.contains("/library/")
+        || lower.contains("/stream/")
+    {
+        return "音频流读取失败".to_string();
+    }
+    compact.chars().take(240).collect()
+}
+
+fn current_queue_identity(queue: &Arc<Mutex<QueueState>>) -> Option<(usize, String)> {
+    let queue = queue.lock().ok()?;
+    let index = queue.current()?;
+    Some((index, queue.tracks.get(index)?.rating_key.clone()))
+}
+
+fn publish_playback_error(
+    engine: &NativeAudioEngine,
+    item: Option<(usize, String)>,
+    reason: &str,
+    app: &AppHandle,
+) {
+    let reason = sanitize_playback_error_reason(reason);
+    let index = item.as_ref().map(|(index, _)| *index);
+    let rating_key = item.as_ref().map(|(_, rating_key)| rating_key.as_str());
+    engine.stop_immediately();
+    eprintln!("[原生] 播放流读取失败：{reason}");
+    let _ = app.emit(
+        "native-audio://event",
+        serde_json::json!({
+            "type": "playback-error",
+            "index": index,
+            "ratingKey": rating_key,
+            "reason": reason,
+        }),
+    );
 }
 
 fn publish_started_handoff(engine: &NativeAudioEngine, queued: &PendingTrack, app: &AppHandle) {
@@ -2160,6 +2215,10 @@ impl NativeAudioEngine {
                 prepared.decode_state.cancel_worker();
                 return Err("当前播放已切换".to_string());
             }
+            if let Some(failure) = prepared.decode_state.reader_failure() {
+                prepared.decode_state.cancel_worker();
+                return Err(format!("下一首分段媒体读取失败: {failure}"));
+            }
             if !prepared.decode_state.ready_to_resume() {
                 prepared.decode_state.cancel_worker();
                 return Err("下一首未能形成足够的解码缓冲".to_string());
@@ -2552,6 +2611,19 @@ impl NativeAudioEngine {
                 }
                 let player = engine.player();
                 let mut position = engine.playback_position_seconds();
+                let active_decode_state = engine
+                    .decode_state
+                    .lock()
+                    .map(|state| state.clone())
+                    .unwrap_or(None);
+                if let Some(reason) = active_decode_state
+                    .as_ref()
+                    .and_then(|state| state.reader_failure())
+                {
+                    let item = current_queue_identity(&engine.queue);
+                    publish_playback_error(&engine, item, &reason, &app_for_task);
+                    continue;
+                }
                 // Commit a sample-level handoff before publishing system media
                 // state, otherwise one poll can expose track B's position with
                 // track A's metadata and artwork.
@@ -2576,13 +2648,20 @@ impl NativeAudioEngine {
                             continue;
                         }
                     }
-                } else if engine.loaded.load(Ordering::SeqCst)
-                    && pending_exists
-                    && player.empty()
-                    && engine.consume_failed_handoff().is_some()
-                {
-                    publish_natural_ended(&engine.queue, &engine.ended_sent, &app_for_task);
-                    continue;
+                } else if engine.loaded.load(Ordering::SeqCst) && pending_exists && player.empty() {
+                    if let Some(queued) = engine.consume_failed_handoff() {
+                        if let Some(reason) = queued.decode_state.reader_failure() {
+                            publish_playback_error(
+                                &engine,
+                                Some((queued.index, queued.rating_key.clone())),
+                                &reason,
+                                &app_for_task,
+                            );
+                        } else {
+                            publish_natural_ended(&engine.queue, &engine.ended_sent, &app_for_task);
+                        }
+                        continue;
+                    }
                 }
                 let decode_state = engine
                     .decode_state

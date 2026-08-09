@@ -1,17 +1,17 @@
 # ERRORS
 
-## 2026-08-09 — reqwest blocking 客户端不能把分段与连续流共用总超时
+## 2026-08-09 — 可取消缓存网络读取要区分 Range 总超时与连续流空闲超时
 
-- 当前锁定的 reqwest 0.13 blocking `ClientBuilder` 不提供本轮尝试使用的 `read_timeout`；
-  直接调用会编译失败。Range 请求需要有界失败时，可使用 30 秒请求总超时，因为每次响应
-  最多 2 MiB。
-- 无 Range 的当前曲目连续兼容读取不能复用该总超时：大文件在正常慢速网络下可能超过
-  30 秒并被误判失败。为它建立独立 blocking client，只设置 30 秒连接超时；播放取消仍由
-  `SegmentControl` 和分块读取检查处理。不要把这两个 client 再合并。
-- blocking `ClientBuilder::build()` 本身会短暂创建并销毁内部 Tokio runtime；若同步构造器
-  被 `#[tokio::test]` 或其他异步调用方直接调用，会 panic“Cannot drop a runtime in a
-  context where blocking is not allowed”。初始化须在专用 OS 线程完成；缓存最后一个 client
-  若在 Tokio 上下文释放，也要把析构转交 `spawn_blocking`。
+- Range 请求响应最多 2 MiB，可使用 async reqwest client 的 30 秒请求总超时；无 Range 的
+  当前曲目连续流不能复用总超时，否则合法大文件会因总下载时间超过 30 秒被误判失败。连续流
+  使用独立 async client 的 30 秒 `read_timeout`，只约束相邻数据块之间的空闲时间。
+- `SegmentControl` 只唤醒同步读者并不足以释放唯一网络许可。请求头与 body stream 都要在
+  `tokio::select!` 中以短周期检查取消/定位代次；命中后直接丢弃 future/response，使底层 I/O
+  终止并在服务端仍挂起时释放 `NetworkPermit`。等待许可的条件变量也要用短 `wait_timeout`
+  检查同一控制状态。
+- 缓存使用自己的单 worker 多线程 Tokio runtime，既允许同步解码线程 `block_on` Range 请求，
+  也允许无 Range 连续任务在 `block_on` 返回后继续运行。不要恢复 reqwest blocking feature：
+  blocking client 无法主动取消正在等待的 `send/read`，会让旧曲目长期阻塞当前曲目网络读取。
 
 ## 2026-08-08 — APFS 大小写迁移后的缓存与开发态地址
 

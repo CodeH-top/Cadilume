@@ -658,6 +658,21 @@ export interface PlaybackFailure {
   attemptedQualities: StreamQuality[];
 }
 
+interface NativePlaybackSource {
+  index: number;
+  ratingKey: string;
+  activeQuality: StreamQuality;
+  source: string;
+  attemptedQualities: StreamQuality[];
+  diagnostics: string[];
+}
+
+interface NativeLoadRecovery {
+  initialQuality: StreamQuality;
+  attemptedQualities: StreamQuality[];
+  diagnostics: string[];
+}
+
 /** Read the effective public transcode marker without exposing the loopback ticket. */
 export function sourceStreamQuality(source: string): FallbackStreamQuality | undefined {
   try {
@@ -672,8 +687,9 @@ export function sourceStreamQuality(source: string): FallbackStreamQuality | und
 
 /**
  * Return strictly lower compatibility qualities after one native load failed.
- * `auto` can already resolve to 320/192 at the loopback boundary, so the
- * public bitrate marker prevents issuing the same PMS transcode twice.
+ * Each explicit bitrate receives its own loopback ticket and native-cache
+ * identity. A bitrate marker still prevents retrying a successful explicit
+ * transcode after a later runtime failure.
  */
 export function playbackFallbackQualities(
   requestedQuality: StreamQuality,
@@ -740,6 +756,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const streamUrlInflightAtRef = useRef(new Map<string, number>());
   const loadRequestRef = useRef(0);
   const nextSourceRequestRef = useRef(0);
+  const activeNativeSourceRef = useRef<NativePlaybackSource | undefined>(undefined);
+  const pendingNativeSourceRef = useRef<NativePlaybackSource | undefined>(undefined);
   const serverIdRef = useRef(serverId);
   const qualityRef = useRef(quality);
   const queueServerIdRef = useRef<string | undefined>(undefined);
@@ -767,6 +785,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const [outputSinkId, setOutputSinkIdState] = useState(storedOutputSinkId);
   const [error, setError] = useState<string>();
   const [playbackFailure, setPlaybackFailure] = useState<PlaybackFailure>();
+  const [gaplessHandoffGeneration, setGaplessHandoffGeneration] = useState(0);
   const volumeRef = useRef(volume);
   const mutedRef = useRef(muted);
   const shuffleRef = useRef(shuffle);
@@ -910,13 +929,15 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     resumeSeconds: number;
     requestId: number;
     forceFreshTicket: boolean;
+    recovery?: NativeLoadRecovery;
   }) => {
-    const { index, autoplay, resumeSeconds, requestId, forceFreshTicket } = params;
+    const { index, autoplay, resumeSeconds, requestId, forceFreshTicket, recovery } = params;
     const tracks = queueRef.current;
     const track = tracks[index];
     if (!track || !serverId) return;
-    const attemptedQualities: StreamQuality[] = [];
-    const diagnostics: string[] = [];
+    const attemptedQualities: StreamQuality[] = [...(recovery?.attemptedQualities ?? [])];
+    const diagnostics: string[] = [...(recovery?.diagnostics ?? [])];
+    let lastActiveQuality: StreamQuality = recovery?.initialQuality ?? quality;
     const artworkTicketPromise = playbackArtworkTicket(serverId, track);
     try {
       // Put stop + queue sync in the same frontend barrier. The prebuffer effect
@@ -926,8 +947,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       // 在创建 Player 的同一轮应用，避免首个采样短暂以 100% 输出。
       await nativeAudioSetVolume(effectivePlaybackVolume(volumeRef.current, mutedRef.current));
       if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
-      let activeQuality: StreamQuality | undefined = quality;
+      let activeQuality: StreamQuality | undefined = recovery?.initialQuality ?? quality;
       while (activeQuality) {
+        lastActiveQuality = activeQuality;
         const url = await requestStreamUrl(
           serverId,
           track,
@@ -944,6 +966,18 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             durationMs: track.duration,
             artworkUrl: track.imageUrl,
           }, autoplay);
+          if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
+          const successfulQualities = [...attemptedQualities];
+          appendAttemptedQuality(successfulQualities, activeQuality, sourceStreamQuality(url));
+          activeNativeSourceRef.current = {
+            index,
+            ratingKey: track.ratingKey,
+            activeQuality,
+            source: url,
+            attemptedQualities: successfulQualities,
+            diagnostics: [...diagnostics],
+          };
+          pendingNativeSourceRef.current = undefined;
           if (!track.imageUrl) {
             void artworkTicketPromise.then((artworkTicket) => {
               if (!artworkTicket
@@ -985,7 +1019,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     } catch (reason) {
       if (requestId !== loadRequestRef.current) return;
       const diagnostic = reason instanceof Error ? reason.message : String(reason);
-      appendAttemptedQuality(attemptedQualities, quality);
+      activeNativeSourceRef.current = undefined;
+      appendAttemptedQuality(attemptedQualities, lastActiveQuality);
       const attemptedLabel = playbackAttemptLabel(attemptedQualities);
       const message = `音频无法播放。${attemptedLabel ? `已尝试 ${attemptedLabel}；` : ""}请检查服务器连接或转码状态。`;
       playbackLog("error", `原生加载异常：index=${index} ${diagnostic}`);
@@ -1002,11 +1037,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     autoplay = true,
     requestedResume?: number,
     forceFreshTicket = false,
+    recovery?: NativeLoadRecovery,
   ) => {
     const tracks = queueRef.current;
     const track = tracks[index];
     if (!track || !serverId) return;
     const requestId = ++loadRequestRef.current;
+    activeNativeSourceRef.current = undefined;
+    pendingNativeSourceRef.current = undefined;
     playbackLog("info", `加载请求：index=${index} 队列长度=${tracks.length} 自动播放=${autoplay} 质量=${quality} 强制新票据=${forceFreshTicket}`);
     setPlaybackLoading(autoplay);
     setBuffering(false);
@@ -1028,7 +1066,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       setPlaying(autoplay);
       return;
     }
-    await loadNativeTrack({ index, autoplay, resumeSeconds, requestId, forceFreshTicket });
+    await loadNativeTrack({ index, autoplay, resumeSeconds, requestId, forceFreshTicket, recovery });
   }, [loadNativeTrack, schedulePersistedSession, serverId, setPlaybackLoading]);
 
   const retryCurrent = useCallback(() => {
@@ -1171,6 +1209,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     // entry immediately after the user pressed Clear.
     loadRequestRef.current += 1;
     nextSourceRequestRef.current += 1;
+    activeNativeSourceRef.current = undefined;
+    pendingNativeSourceRef.current = undefined;
     const timer = persistedSessionTimerRef.current;
     if (timer !== undefined) {
       window.clearTimeout(timer);
@@ -1391,6 +1431,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       flushPlaybackSession();
       loadRequestRef.current += 1;
       nextSourceRequestRef.current += 1;
+      activeNativeSourceRef.current = undefined;
+      pendingNativeSourceRef.current = undefined;
       if (isDesktopRuntime()) {
         void nativeQueueBarrierRef.current!.enqueue(async () => {
           await nativeAudioStop().catch(() => undefined);
@@ -1488,7 +1530,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("native-audio://event", (event) => {
-      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; reason?: string; buffering?: boolean; deviceId?: string } | null;
+      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; ratingKey?: string; reason?: string; buffering?: boolean; deviceId?: string } | null;
       if (!payload) return;
       if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
         // 加载期间忽略旧歌的残留进度事件，保证切歌瞬间进度归 0 不被覆盖。
@@ -1517,9 +1559,84 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           scrobbledRef.current.add(scrobbleKey);
           void plexMusicGateway.playback.scrobble(activeServerId, track).catch(() => undefined);
         }
+      } else if (payload.type === "playback-error") {
+        const eventIndex = payload.index;
+        const track = Number.isInteger(eventIndex) ? queueRef.current[eventIndex as number] : undefined;
+        const active = activeNativeSourceRef.current;
+        const pending = pendingNativeSourceRef.current;
+        const failedSource = active && active.index === eventIndex && active.ratingKey === payload.ratingKey
+          ? active
+          : pending && pending.index === eventIndex && pending.ratingKey === payload.ratingKey
+            ? pending
+            : undefined;
+        if (
+          typeof eventIndex !== "number"
+          || typeof payload.ratingKey !== "string"
+          || track?.ratingKey !== payload.ratingKey
+          || !failedSource
+          || (eventIndex !== indexRef.current && failedSource !== pending)
+        ) {
+          playbackLog("warn", "已忽略过期的原生播放错误事件");
+          return;
+        }
+        const reason = typeof payload.reason === "string" && payload.reason.trim()
+          ? payload.reason.trim()
+          : "音频流读取失败";
+        if (failedSource === pending && eventIndex !== indexRef.current) {
+          indexRef.current = eventIndex;
+          setCurrentIndex(eventIndex);
+          progressRef.current = 0;
+          setProgress(0);
+          setDuration((track.duration || 0) / 1000);
+        }
+        const attemptedQualities = [...failedSource.attemptedQualities];
+        appendAttemptedQuality(
+          attemptedQualities,
+          failedSource.activeQuality,
+          sourceStreamQuality(failedSource.source),
+        );
+        const diagnostics = [...failedSource.diagnostics, `${failedSource.activeQuality}: ${reason}`];
+        const fallback = playbackFallbackQualities(
+          qualityRef.current,
+          failedSource.activeQuality,
+          failedSource.source,
+          attemptedQualities,
+        )[0];
+        activeNativeSourceRef.current = undefined;
+        pendingNativeSourceRef.current = undefined;
+        setPlaying(false);
+        setBuffering(false);
+        if (fallback) {
+          const resumeSeconds = boundedResumeSeconds(
+            progressRef.current,
+            (track.duration || 0) / 1000,
+          );
+          playbackLog(
+            "warn",
+            `原生流中断：index=${eventIndex} 质量=${failedSource.activeQuality}，从当前进度尝试 ${fallback} kbps`,
+          );
+          void loadAt(eventIndex, true, resumeSeconds, true, {
+            initialQuality: fallback,
+            attemptedQualities,
+            diagnostics,
+          });
+          return;
+        }
+        const attemptedLabel = playbackAttemptLabel(attemptedQualities);
+        const message = `音频无法播放。${attemptedLabel ? `已尝试 ${attemptedLabel}；` : ""}请检查服务器连接或转码状态。`;
+        setPlaybackLoading(false);
+        setError(message);
+        setPlaybackFailure({
+          message,
+          technicalDetails: diagnostics.join("；"),
+          attemptedQualities,
+        });
+        schedulePersistedSession(true);
       } else if (payload.type === "ended") {
         // Queue authority lives in Rust: it already decided the next item and
         // emits `queue-item` when one exists; here we only settle local state.
+        activeNativeSourceRef.current = undefined;
+        pendingNativeSourceRef.current = undefined;
         setPlaying(false);
         setPlaybackLoading(false);
         setBuffering(false);
@@ -1527,6 +1644,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       } else if (payload.type === "playback-protected-stop") {
         // Rust 心跳看门狗判定前端卡死/崩溃后主动停播，前端同步状态。
         playbackLog("warn", `播放保护已停止：${String(payload.reason ?? "unknown")}`);
+        activeNativeSourceRef.current = undefined;
+        pendingNativeSourceRef.current = undefined;
         setPlaying(false);
         setPlaybackLoading(false);
         setBuffering(false);
@@ -1548,6 +1667,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         // Gapless handoff: Rust already queued and started the next source.
         // Mirror the UI without re-requesting a stream URL or reloading the
         // engine, otherwise the seamless PCM transition would be interrupted.
+        const handedOffTrack = queueRef.current[payload.index];
+        const pendingSource = pendingNativeSourceRef.current;
+        activeNativeSourceRef.current = pendingSource
+          && pendingSource.index === payload.index
+          && pendingSource.ratingKey === handedOffTrack?.ratingKey
+          ? pendingSource
+          : undefined;
+        pendingNativeSourceRef.current = undefined;
         indexRef.current = payload.index;
         setCurrentIndex(payload.index);
         progressRef.current = typeof payload.position === "number" && Number.isFinite(payload.position)
@@ -1560,6 +1687,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         setPlaying(true);
         setPlaybackLoading(false);
         setBuffering(false);
+        setGaplessHandoffGeneration((generation) => generation + 1);
         schedulePersistedSession(true);
       } else if (payload.type === "remote") {
         const command = typeof payload.command === "string" ? payload.command : "";
@@ -1600,6 +1728,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         // download is required before the gapless handoff can be prepared.
         const artworkTicketPromise = playbackArtworkTicket(serverId, nextTrack);
         const attemptedQualities: StreamQuality[] = [];
+        const diagnostics: string[] = [];
         let activeQuality: StreamQuality | undefined = quality;
         while (activeQuality) {
           let url = "";
@@ -1619,6 +1748,17 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
               durationMs: nextTrack.duration,
               artworkUrl: nextTrack.imageUrl,
             });
+            if (nextSourceRequestRef.current !== requestId) return;
+            const successfulQualities = [...attemptedQualities];
+            appendAttemptedQuality(successfulQualities, activeQuality, sourceStreamQuality(url));
+            pendingNativeSourceRef.current = {
+              index: nextIndex,
+              ratingKey: nextTrack.ratingKey,
+              activeQuality,
+              source: url,
+              attemptedQualities: successfulQualities,
+              diagnostics: [...diagnostics],
+            };
             if (!nextTrack.imageUrl) {
               void artworkTicketPromise.then((artworkTicket) => {
                 if (!artworkTicket || nextSourceRequestRef.current !== requestId) return;
@@ -1630,8 +1770,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
               });
             }
             break;
-          } catch {
+          } catch (reason) {
             if (nextSourceRequestRef.current !== requestId) return;
+            diagnostics.push(`${activeQuality}: ${reason instanceof Error ? reason.message : String(reason)}`);
             appendAttemptedQuality(attemptedQualities, activeQuality, sourceStreamQuality(url));
             activeQuality = playbackFallbackQualities(
               quality,
@@ -1647,9 +1788,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       }
     })();
     return () => {
-      if (nextSourceRequestRef.current === requestId) nextSourceRequestRef.current += 1;
+      if (nextSourceRequestRef.current === requestId) {
+        nextSourceRequestRef.current += 1;
+      }
     };
-  }, [currentIndex, outputSinkId, prebufferNext, quality, queue, repeat, requestStreamUrl, serverId, shuffle]);
+  }, [currentIndex, gaplessHandoffGeneration, outputSinkId, prebufferNext, quality, queue, repeat, requestStreamUrl, serverId, shuffle]);
 
   useEffect(() => {
     if (queueRef.current.length && queueServerIdRef.current === serverId) schedulePersistedSession(false);

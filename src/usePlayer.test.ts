@@ -64,15 +64,14 @@ describe("native playback compatibility fallback", () => {
   });
 
   it("falls back through strictly lower PMS compatibility streams", () => {
-    const localAuto = "http://127.0.0.1:49152/stream/ticket";
-    const remoteAuto = `${localAuto}?maxAudioBitrate=320`;
+    const autoSource = "http://127.0.0.1:49152/stream/ticket";
+    const explicit320 = `${autoSource}?maxAudioBitrate=320`;
 
-    expect(playbackFallbackQualities("auto", "auto", localAuto)).toEqual(["320", "256", "192"]);
-    expect(playbackFallbackQualities("original", "original", localAuto)).toEqual(["320", "256", "192"]);
-    expect(playbackFallbackQualities("auto", "auto", remoteAuto)).toEqual(["256", "192"]);
-    expect(playbackFallbackQualities("320", "320", remoteAuto)).toEqual(["256", "192"]);
-    expect(playbackFallbackQualities("256", "256", localAuto)).toEqual(["192"]);
-    expect(playbackFallbackQualities("192", "192", localAuto)).toEqual([]);
+    expect(playbackFallbackQualities("auto", "auto", autoSource)).toEqual(["320", "256", "192"]);
+    expect(playbackFallbackQualities("original", "original", autoSource)).toEqual(["320", "256", "192"]);
+    expect(playbackFallbackQualities("320", "320", explicit320)).toEqual(["256", "192"]);
+    expect(playbackFallbackQualities("256", "256", autoSource)).toEqual(["192"]);
+    expect(playbackFallbackQualities("192", "192", autoSource)).toEqual([]);
   });
 
   it("never repeats an already attempted effective quality", () => {

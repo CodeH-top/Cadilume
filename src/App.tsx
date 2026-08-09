@@ -742,8 +742,9 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 
   const updatePlaylistCallback = useCallback(async (playlist: PlexPlaylist, changes: PlaylistChanges) => {
     if (!serverId) {
-      notify("请先在设置中选择音乐服务器。", "warning");
-      return;
+      const message = "请先在设置中选择音乐服务器。";
+      notify(message, "warning");
+      throw new Error(message);
     }
     try {
       await updatePlaylist(serverId, playlist.ratingKey, changes);
@@ -752,6 +753,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       bumpPlaylistMutation();
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : String(reason), "error");
+      throw reason;
     }
   }, [bumpPlaylistMutation, loadPlaylistList, notify, serverId]);
 
@@ -2143,9 +2145,15 @@ function PlaylistSidebar({ playlists, selectedId, loading, error, onOpen, onRetr
           onClose={() => setEditing(null)}
           onSave={async (changes) => {
             setEditBusy(true);
-            await onUpdatePlaylist(editing, changes);
-            setEditBusy(false);
-            setEditing(null);
+            try {
+              await onUpdatePlaylist(editing, changes);
+              setEditing(null);
+            } catch {
+              // The callback already surfaced the server error. Preserve the
+              // edited values so the user can retry without re-entering them.
+            } finally {
+              setEditBusy(false);
+            }
           }}
         />
       )}

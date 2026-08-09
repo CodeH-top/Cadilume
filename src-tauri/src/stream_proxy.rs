@@ -371,7 +371,7 @@ pub fn stream_url(
     plex: TauriState<'_, PlexState>,
     proxy: TauriState<'_, StreamProxy>,
 ) -> Result<String, String> {
-    let mut target = StreamTarget::new(server_id, metadata_key, part_key, quality)
+    let target = StreamTarget::new(server_id, metadata_key, part_key, quality)
         .map_err(|error| error.to_string())?;
     let server = plex
         .stream_server(&target.server_id)
@@ -387,7 +387,6 @@ pub fn stream_url(
     } else {
         "remote"
     };
-    target.public_bitrate_marker = public_bitrate_marker(&effective);
     eprintln!(
         "[播放] 发行流票据：server={} 请求质量={} 实际质量={} 首选连接={} 连接数={}",
         target.server_id.chars().take(8).collect::<String>(),
@@ -913,8 +912,9 @@ fn build_upstream_urls(
     let base = validated_connection_base(&connection.uri)?;
     let effective_quality = effective_quality(&target.quality, connection);
     let mut candidates = Vec::new();
-    // 自动源/原始质量：每条连接先试原始直连（Plex 的 directPlay），失败后再
-    // 在同一连接上降级转码。避免“本地直连不通、远程只试转码”导致整体失败。
+    // Auto/original tickets always represent the Part bytes. Compatibility
+    // transcodes use separately issued explicit-quality tickets so one cache
+    // identity cannot change representation between Range requests.
     if target.quality == "auto" || target.quality == "original" {
         let endpoint = base.join(&target.part_key)?;
         if !same_origin(&base, &endpoint) || !endpoint.path().starts_with("/library/parts/") {
@@ -1030,11 +1030,12 @@ fn same_origin(left: &Url, right: &Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
-fn effective_quality(quality: &str, connection: &StreamConnectionSnapshot) -> String {
+fn effective_quality(quality: &str, _connection: &StreamConnectionSnapshot) -> String {
     match quality {
-        "auto" if connection.local => "original".to_string(),
-        "auto" if connection.relay => "192".to_string(),
-        "auto" => "320".to_string(),
+        // An auto ticket has one stable representation: the original Part.
+        // Explicit fallback qualities receive their own ticket and transcode
+        // identity from the frontend quality ladder.
+        "auto" | "original" => "original".to_string(),
         quality => quality.to_string(),
     }
 }
@@ -1231,25 +1232,22 @@ mod tests {
     }
 
     #[test]
-    fn auto_quality_tries_direct_before_transcode() {
+    fn auto_quality_uses_one_stable_direct_representation() {
         let auto = target("auto");
         let local = connection("http://192.168.1.5:32400", true, false);
         let urls = build_upstream_urls(&auto, &local, "client-1").unwrap();
-        assert!(
-            urls.first().unwrap().path().starts_with("/library/parts/"),
-            "自动源本地连接应先试原始直连"
-        );
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].path().starts_with("/library/parts/"));
 
         let remote = connection("http://media.example.com:10324", false, false);
         let urls = build_upstream_urls(&auto, &remote, "client-1").unwrap();
-        assert!(
-            urls.first().unwrap().path().starts_with("/library/parts/"),
-            "自动源远程连接也先试原始直连"
-        );
-        assert!(
-            urls.iter().any(|url| url.path().contains("transcode")),
-            "直连之后应保留转码兜底"
-        );
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].path().starts_with("/library/parts/"));
+
+        let relay = connection("https://relay.example.com", false, true);
+        let urls = build_upstream_urls(&auto, &relay, "client-1").unwrap();
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].path().starts_with("/library/parts/"));
 
         let explicit = target("320");
         let urls = build_upstream_urls(&explicit, &remote, "client-1").unwrap();
@@ -1285,6 +1283,7 @@ mod tests {
             .issue(target("192"))
             .unwrap()
             .ends_with("?maxAudioBitrate=192"));
+        assert!(!proxy.issue(target("auto")).unwrap().contains('?'));
         assert!(!proxy.issue(target("original")).unwrap().contains('?'));
     }
 
@@ -1537,32 +1536,32 @@ mod tests {
     }
 
     #[test]
-    fn auto_quality_matches_connection_kind() {
+    fn auto_quality_is_stable_across_connection_kinds() {
         assert_eq!(
             effective_quality("auto", &connection("https://local.test", true, false)),
             "original"
         );
         assert_eq!(
             effective_quality("auto", &connection("https://remote.test", false, false)),
-            "320"
+            "original"
         );
         assert_eq!(
             effective_quality("auto", &connection("https://relay.test", false, true)),
-            "192"
+            "original"
         );
         assert_eq!(
             public_bitrate_marker(&effective_quality(
                 "auto",
                 &connection("https://remote.test", false, false)
             )),
-            Some(320)
+            None
         );
         assert_eq!(
             public_bitrate_marker(&effective_quality(
                 "auto",
                 &connection("https://relay.test", false, true)
             )),
-            Some(192)
+            None
         );
         assert_eq!(
             public_bitrate_marker(&effective_quality(

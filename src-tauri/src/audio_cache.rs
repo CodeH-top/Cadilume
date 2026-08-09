@@ -1,16 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use reqwest::blocking::{Client, Response};
-use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
-use reqwest::{redirect::Policy, StatusCode};
+use futures_util::StreamExt;
+use reqwest::header::{
+    HeaderMap, CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE,
+};
+use reqwest::{redirect::Policy, Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
 pub(crate) const AUDIO_CACHE_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 const LOW_DISK_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -19,6 +23,7 @@ const SEGMENT_FETCH_BYTES: u64 = 2 * 1024 * 1024;
 const INITIAL_HEAD_BYTES: u64 = 256 * 1024;
 const SEQUENTIAL_INDEX_CHECKPOINT_BYTES: u64 = 1024 * 1024;
 const NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const NETWORK_CANCEL_POLL: Duration = Duration::from_millis(25);
 const MAX_CACHE_IDENTITY_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,24 +189,37 @@ impl NetworkGate {
         })
     }
 
-    fn acquire(self: &Arc<Self>, priority: CachePriority) -> NetworkPermit {
+    fn acquire(
+        self: &Arc<Self>,
+        priority: CachePriority,
+        control: &SegmentControl,
+        observed_epoch: u64,
+    ) -> io::Result<NetworkPermit> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if priority == CachePriority::Current {
             state.current_waiters += 1;
         }
         while state.active || (priority == CachePriority::Next && state.current_waiters > 0) {
-            state = self
+            if control.is_interrupted(observed_epoch) {
+                if priority == CachePriority::Current {
+                    state.current_waiters = state.current_waiters.saturating_sub(1);
+                    self.notify.notify_all();
+                }
+                return Err(interrupted_error());
+            }
+            let (next, _) = self
                 .notify
-                .wait(state)
+                .wait_timeout(state, NETWORK_CANCEL_POLL)
                 .unwrap_or_else(|error| error.into_inner());
+            state = next;
         }
         if priority == CachePriority::Current {
             state.current_waiters = state.current_waiters.saturating_sub(1);
         }
         state.active = true;
-        NetworkPermit {
+        Ok(NetworkPermit {
             gate: Arc::clone(self),
-        }
+        })
     }
 }
 
@@ -221,34 +239,52 @@ impl Drop for NetworkPermit {
     }
 }
 
-struct BlockingHttpClient {
-    inner: Option<Client>,
+struct CacheHttpRuntime {
+    inner: Option<Runtime>,
 }
 
-impl BlockingHttpClient {
-    fn new(client: Client) -> Self {
-        Self {
-            inner: Some(client),
-        }
+impl CacheHttpRuntime {
+    fn new() -> Result<Self, String> {
+        let runtime = RuntimeBuilder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("cadilume-cache-http")
+            .enable_all()
+            .build()
+            .map_err(|error| format!("创建分段媒体网络运行时失败: {error}"))?;
+        Ok(Self {
+            inner: Some(runtime),
+        })
     }
 
-    fn get(&self, source: &str) -> reqwest::blocking::RequestBuilder {
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
         self.inner
             .as_ref()
-            .expect("blocking HTTP client is available until cache drop")
-            .get(source)
+            .expect("cache HTTP runtime is available until cache drop")
+            .block_on(future)
+    }
+
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.inner
+            .as_ref()
+            .expect("cache HTTP runtime is available until cache drop")
+            .spawn(future);
     }
 }
 
-impl Drop for BlockingHttpClient {
+impl Drop for CacheHttpRuntime {
     fn drop(&mut self) {
-        let Some(client) = self.inner.take() else {
+        let Some(runtime) = self.inner.take() else {
             return;
         };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn_blocking(move || drop(client));
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let _ = std::thread::Builder::new()
+                .name("cadilume-cache-http-drop".to_string())
+                .spawn(move || drop(runtime));
         } else {
-            drop(client);
+            drop(runtime);
         }
     }
 }
@@ -258,8 +294,9 @@ struct CacheInner {
     entries_root: PathBuf,
     limit_bytes: u64,
     low_disk_reserve_bytes: u64,
-    range_client: BlockingHttpClient,
-    sequential_client: BlockingHttpClient,
+    range_client: Client,
+    sequential_client: Client,
+    network_runtime: CacheHttpRuntime,
     network_gate: Arc<NetworkGate>,
     open_entries: Mutex<HashMap<String, Weak<SegmentEntry>>>,
 }
@@ -297,6 +334,10 @@ impl SegmentControl {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    fn is_interrupted(&self, observed_epoch: u64) -> bool {
+        self.is_cancelled() || self.interrupt_epoch.load(Ordering::SeqCst) != observed_epoch
+    }
+
     fn fail(&self, message: String) {
         *self
             .failure
@@ -305,7 +346,7 @@ impl SegmentControl {
         self.interrupt_reader();
     }
 
-    fn failure(&self) -> Option<String> {
+    pub(crate) fn failure(&self) -> Option<String> {
         self.failure
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -340,15 +381,17 @@ impl SegmentCache {
             .map_err(|error| format!("创建分段缓存目录失败: {error}"))?;
         remove_legacy_cache(&cache_root)?;
         recover_entries(&entries_root)?;
-        let (range_client, sequential_client) = build_blocking_clients()?;
+        let (range_client, sequential_client) = build_http_clients()?;
+        let network_runtime = CacheHttpRuntime::new()?;
         let cache = Self {
             inner: Arc::new(CacheInner {
                 cache_root,
                 entries_root,
                 limit_bytes,
                 low_disk_reserve_bytes,
-                range_client: BlockingHttpClient::new(range_client),
-                sequential_client: BlockingHttpClient::new(sequential_client),
+                range_client,
+                sequential_client,
+                network_runtime,
                 network_gate: NetworkGate::new(),
                 open_entries: Mutex::new(HashMap::new()),
             }),
@@ -606,12 +649,17 @@ impl SegmentReader {
             return Ok(FetchOutcome::End);
         }
         let observed_epoch = self.control.interrupt_epoch.load(Ordering::SeqCst);
-        let permit = self.cache.network_gate.acquire(self.priority);
-        if self.control.is_cancelled()
-            || self.control.interrupt_epoch.load(Ordering::SeqCst) != observed_epoch
-        {
-            return Ok(FetchOutcome::Interrupted);
-        }
+        let permit = match self.cache.network_gate.acquire(
+            self.priority,
+            self.control.as_ref(),
+            observed_epoch,
+        ) {
+            Ok(permit) => permit,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                return Ok(FetchOutcome::Interrupted);
+            }
+            Err(error) => return Err(error),
+        };
 
         let (range_supported, logical_len, validator) = {
             let runtime = self
@@ -649,24 +697,29 @@ impl SegmentReader {
                 request = request.header(IF_RANGE, validator);
             }
         }
-        let response = request
-            .send()
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, range_error(&error)))?;
-        if self.control.is_cancelled()
-            || self.control.interrupt_epoch.load(Ordering::SeqCst) != observed_epoch
-        {
-            return Ok(FetchOutcome::Interrupted);
-        }
-        match response.status() {
-            StatusCode::PARTIAL_CONTENT => {
-                self.commit_partial_response(response, range_start, range_end, observed_epoch)
+        let response = match self.cache.network_runtime.block_on(fetch_range_response(
+            request,
+            self.control.as_ref(),
+            observed_epoch,
+            range_end.saturating_sub(range_start),
+        )) {
+            Ok(response) => response,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                return Ok(FetchOutcome::Interrupted);
             }
-            StatusCode::OK => {
-                drop(response);
-                self.start_sequential_download(permit)
-            }
+            Err(error) => return Err(error),
+        };
+        match response.status {
+            StatusCode::PARTIAL_CONTENT => self.commit_partial_response(
+                response.headers,
+                response.body,
+                range_start,
+                range_end,
+                observed_epoch,
+            ),
+            StatusCode::OK => self.start_sequential_download(permit, observed_epoch),
             StatusCode::RANGE_NOT_SATISFIABLE => {
-                self.commit_unsatisfied_length(response.headers().get(CONTENT_RANGE))?;
+                self.commit_unsatisfied_length(response.headers.get(CONTENT_RANGE))?;
                 Ok(FetchOutcome::End)
             }
             status => Err(io::Error::new(
@@ -678,13 +731,13 @@ impl SegmentReader {
 
     fn commit_partial_response(
         &mut self,
-        mut response: Response,
+        headers: HeaderMap,
+        body: Vec<u8>,
         requested_start: u64,
         requested_end: u64,
         observed_epoch: u64,
     ) -> io::Result<FetchOutcome> {
-        let content_range = response
-            .headers()
+        let content_range = headers
             .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok())
             .and_then(parse_content_range)
@@ -703,8 +756,8 @@ impl SegmentReader {
                 "Range 响应区间与请求不一致",
             ));
         }
-        let response_etag = header_string(response.headers().get(ETAG));
-        let response_last_modified = header_string(response.headers().get(LAST_MODIFIED));
+        let response_etag = header_string(headers.get(ETAG));
+        let response_last_modified = header_string(headers.get(LAST_MODIFIED));
         let stale = {
             let runtime = self
                 .entry
@@ -727,25 +780,14 @@ impl SegmentReader {
             ));
         }
         let expected = content_range.end.saturating_sub(content_range.start);
-        let mut body = Vec::with_capacity(expected.min(usize::MAX as u64) as usize);
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let read = response.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            if self.control.is_cancelled()
-                || self.control.interrupt_epoch.load(Ordering::SeqCst) != observed_epoch
-            {
-                return Ok(FetchOutcome::Interrupted);
-            }
-            body.extend_from_slice(&buffer[..read]);
-            if body.len() as u64 > expected {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Range 响应超过声明区间",
-                ));
-            }
+        if self.control.is_interrupted(observed_epoch) {
+            return Ok(FetchOutcome::Interrupted);
+        }
+        if body.len() as u64 > expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Range 响应超过声明区间",
+            ));
         }
         if body.len() as u64 != expected {
             return Err(io::Error::new(
@@ -807,7 +849,11 @@ impl SegmentReader {
         Ok(FetchOutcome::Available)
     }
 
-    fn start_sequential_download(&mut self, permit: NetworkPermit) -> io::Result<FetchOutcome> {
+    fn start_sequential_download(
+        &mut self,
+        permit: NetworkPermit,
+        observed_epoch: u64,
+    ) -> io::Result<FetchOutcome> {
         if self.priority == CachePriority::Next {
             let mut runtime = self
                 .entry
@@ -829,15 +875,17 @@ impl SegmentReader {
                 "服务器未接受 Range，已跳过下一首完整下载",
             ));
         }
-        let response = self
-            .cache
-            .sequential_client
-            .get(&self.source)
-            .send()
-            .map_err(|error| io::Error::other(range_error(&error)))?;
-        if self.control.is_cancelled() {
-            return Ok(FetchOutcome::Interrupted);
-        }
+        let response = match self.cache.network_runtime.block_on(send_interruptibly(
+            self.cache.sequential_client.get(&self.source),
+            self.control.as_ref(),
+            observed_epoch,
+        )) {
+            Ok(response) => response,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                return Ok(FetchOutcome::Interrupted);
+            }
+            Err(error) => return Err(error),
+        };
         if response.status() != StatusCode::OK {
             return Err(io::Error::other(format!(
                 "连续下载返回 HTTP {}",
@@ -885,13 +933,10 @@ impl SegmentReader {
         let cache = Arc::clone(&self.cache);
         let entry = Arc::clone(&self.entry);
         let control = Arc::clone(&self.control);
-        std::thread::Builder::new()
-            .name("cadilume-cache-sequential".to_string())
-            .spawn(move || {
-                let _permit = permit;
-                sequential_download(response, data, cache, entry, control, expected_len);
-            })
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        self.cache.network_runtime.spawn(async move {
+            let _permit = permit;
+            sequential_download(response, data, cache, entry, control, expected_len).await;
+        });
         Ok(FetchOutcome::Waiting)
     }
 
@@ -934,6 +979,18 @@ impl SegmentReader {
 
 impl Read for SegmentReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let result = self.read_inner(buffer);
+        if let Err(error) = &result {
+            if error.kind() != io::ErrorKind::Interrupted {
+                self.control.fail(error.to_string());
+            }
+        }
+        result
+    }
+}
+
+impl SegmentReader {
+    fn read_inner(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
             return Ok(0);
         }
@@ -1010,36 +1067,129 @@ struct ParsedContentRange {
     total: u64,
 }
 
-fn sequential_download(
-    mut response: Response,
+struct RangeResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Vec<u8>,
+}
+
+async fn send_interruptibly(
+    request: reqwest::RequestBuilder,
+    control: &SegmentControl,
+    observed_epoch: u64,
+) -> io::Result<Response> {
+    let future = request.send();
+    tokio::pin!(future);
+    loop {
+        if control.is_interrupted(observed_epoch) {
+            return Err(interrupted_error());
+        }
+        tokio::select! {
+            result = &mut future => {
+                return result.map_err(|error| io::Error::other(range_error(&error)));
+            }
+            _ = tokio::time::sleep(NETWORK_CANCEL_POLL) => {}
+        }
+    }
+}
+
+async fn fetch_range_response(
+    request: reqwest::RequestBuilder,
+    control: &SegmentControl,
+    observed_epoch: u64,
+    maximum_body_bytes: u64,
+) -> io::Result<RangeResponse> {
+    let response = send_interruptibly(request, control, observed_epoch).await?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    if status != StatusCode::PARTIAL_CONTENT {
+        return Ok(RangeResponse {
+            status,
+            headers,
+            body: Vec::new(),
+        });
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    loop {
+        let chunk = loop {
+            tokio::select! {
+                item = stream.next() => break item,
+                _ = tokio::time::sleep(NETWORK_CANCEL_POLL) => {
+                    if control.is_interrupted(observed_epoch) {
+                        return Err(interrupted_error());
+                    }
+                }
+            }
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk
+            .map_err(|error| io::Error::new(io::ErrorKind::UnexpectedEof, range_error(&error)))?;
+        if control.is_interrupted(observed_epoch) {
+            return Err(interrupted_error());
+        }
+        if body.len() as u64 + chunk.len() as u64 > maximum_body_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Range 响应超过声明区间",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(RangeResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+async fn sequential_download(
+    response: Response,
     mut data: File,
     cache: Arc<CacheInner>,
     entry: Arc<SegmentEntry>,
     control: Arc<SegmentControl>,
     expected_len: Option<u64>,
 ) {
-    let outcome = (|| -> io::Result<()> {
+    let outcome = async {
+        let mut stream = response.bytes_stream();
         let mut offset = 0u64;
         let mut persisted_at = 0u64;
-        let mut buffer = [0u8; 64 * 1024];
         loop {
             if control.is_cancelled() {
                 break;
             }
-            let read = response.read(&mut buffer)?;
-            if read == 0 {
+            let chunk = loop {
+                tokio::select! {
+                    item = stream.next() => break item,
+                    _ = tokio::time::sleep(NETWORK_CANCEL_POLL) => {
+                        if control.is_cancelled() {
+                            break None;
+                        }
+                    }
+                }
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
+            let chunk = chunk.map_err(|error| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, range_error(&error))
+            })?;
+            if control.is_cancelled() {
                 break;
             }
-            if !cache.ensure_capacity(read as u64, Some(&entry.key)) {
+            if !cache.ensure_capacity(chunk.len() as u64, Some(&entry.key)) {
                 return Err(io::Error::new(
                     io::ErrorKind::StorageFull,
                     "音频缓存空间不足或磁盘可用空间低于 1 GiB",
                 ));
             }
             data.seek(SeekFrom::Start(offset))?;
-            data.write_all(&buffer[..read])?;
+            data.write_all(&chunk)?;
             data.flush()?;
-            offset = offset.saturating_add(read as u64);
+            offset = offset.saturating_add(chunk.len() as u64);
             {
                 let mut runtime = entry
                     .runtime
@@ -1080,7 +1230,8 @@ fn sequential_download(
         runtime.index.logical_len = Some(expected_len.unwrap_or(offset));
         runtime.index.add_range(0, offset);
         persist_index_path(&entry.index_path, &runtime.index)
-    })();
+    }
+    .await;
     let failure = outcome.err();
     {
         let mut runtime = entry
@@ -1136,26 +1287,20 @@ fn cache_key(identity: Option<&str>) -> Result<String, String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn build_blocking_clients() -> Result<(Client, Client), String> {
-    std::thread::Builder::new()
-        .name("cadilume-cache-http-init".to_string())
-        .spawn(|| {
-            let range_client = Client::builder()
-                .redirect(Policy::none())
-                .connect_timeout(NETWORK_IDLE_TIMEOUT)
-                .timeout(NETWORK_IDLE_TIMEOUT)
-                .build()
-                .map_err(|error| format!("创建分段媒体客户端失败: {error}"))?;
-            let sequential_client = Client::builder()
-                .redirect(Policy::none())
-                .connect_timeout(NETWORK_IDLE_TIMEOUT)
-                .build()
-                .map_err(|error| format!("创建连续媒体客户端失败: {error}"))?;
-            Ok((range_client, sequential_client))
-        })
-        .map_err(|error| format!("启动媒体客户端初始化线程失败: {error}"))?
-        .join()
-        .map_err(|_| "媒体客户端初始化线程异常退出".to_string())?
+fn build_http_clients() -> Result<(Client, Client), String> {
+    let range_client = Client::builder()
+        .redirect(Policy::none())
+        .connect_timeout(NETWORK_IDLE_TIMEOUT)
+        .timeout(NETWORK_IDLE_TIMEOUT)
+        .build()
+        .map_err(|error| format!("创建分段媒体客户端失败: {error}"))?;
+    let sequential_client = Client::builder()
+        .redirect(Policy::none())
+        .connect_timeout(NETWORK_IDLE_TIMEOUT)
+        .read_timeout(NETWORK_IDLE_TIMEOUT)
+        .build()
+        .map_err(|error| format!("创建连续媒体客户端失败: {error}"))?;
+    Ok((range_client, sequential_client))
 }
 
 fn persist_index_path(path: &Path, index: &SegmentIndex) -> io::Result<()> {
@@ -1423,6 +1568,10 @@ fn range_error(error: &reqwest::Error) -> String {
     } else {
         "分段下载请求失败".to_string()
     }
+}
+
+fn interrupted_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "分段媒体网络读取已取消")
 }
 
 #[cfg(test)]
@@ -1774,6 +1923,35 @@ mod tests {
     }
 
     #[test]
+    fn reader_latches_non_interrupted_network_failures() {
+        let root = temporary_root("latched-reader-failure");
+        let cache = SegmentCache::new_with_policy(root.clone(), 16 * 1024 * 1024, 0).unwrap();
+        let (source, _, server) = scripted_server(1, |_index, _request, stream| {
+            let body = vec![7u8; 512];
+            write!(
+                stream,
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-1023/4096\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let mut reader = cache
+            .open_reader(
+                Some("latched-reader-failure"),
+                &source,
+                CachePriority::Current,
+            )
+            .unwrap();
+        let control = reader.control();
+        let error = reader.read(&mut [0u8; 32]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(control.failure().is_some());
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn changed_validator_discards_old_ranges_before_retry() {
         let root = temporary_root("validator-change");
         let cache = SegmentCache::new_with_policy(root.clone(), 16 * 1024 * 1024, 0).unwrap();
@@ -1946,6 +2124,8 @@ mod tests {
             let _ = sequential_stream.write_all(&vec![5u8; 64 * 1024]);
         });
         let source = format!("http://{address}/audio");
+        let second_data = Arc::new(vec![9u8; 512 * 1024]);
+        let (second_source, _, second_server) = range_server(second_data, 1);
         let reader = cache
             .open_reader(Some("cancel-sequential"), &source, CachePriority::Current)
             .unwrap();
@@ -1959,6 +2139,26 @@ mod tests {
         control.cancel();
         let error = waiting.join().unwrap().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        let second_cache = cache.clone();
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = second_cache
+                .open_reader(
+                    Some("current-after-cancel"),
+                    &second_source,
+                    CachePriority::Current,
+                )
+                .and_then(|mut reader| reader.prefetch_head().map_err(|error| error.to_string()));
+            let _ = second_tx.send(result);
+        });
+        assert_eq!(
+            second_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("取消应在旧响应仍挂起时释放唯一网络许可")
+                .unwrap(),
+            Some(512 * 1024)
+        );
+        second_server.join().unwrap();
         release_tx.send(()).unwrap();
         server.join().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
