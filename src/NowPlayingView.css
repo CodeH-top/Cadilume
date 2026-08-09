@@ -18,18 +18,12 @@
   --now-playing-accent-soft: var(--accent-soft);
   --now-playing-primary-icon: #fff;
   --now-playing-danger: #ff9d93;
-  --now-playing-tonearm: #c9ced5;
-  --now-playing-tonearm-base: #8e97a2;
-  --now-playing-tonearm-head: #262c34;
-  --now-playing-tonearm-plinth: #4a515b;
-  --now-playing-tonearm-plinth-top: #69727d;
-  --now-playing-tonearm-plinth-inset: #333b45;
-  --now-playing-tonearm-edge: rgba(255, 255, 255, 0.2);
-  --now-playing-tonearm-bearing-shell: #303740;
-  --now-playing-tonearm-bearing-core: #9ea6b0;
-  --now-playing-tonearm-bearing-inner: #414a55;
-  --now-playing-tonearm-bearing-cap: #e4e8ed;
-  --now-playing-tonearm-connector: #adb5bf;
+  --now-playing-tonearm: #e8ebef;
+  --now-playing-tonearm-head: #f3f5f7;
+  --now-playing-tonearm-pivot: rgba(113, 120, 130, 0.72);
+  --now-playing-tonearm-bearing: #e8ebef;
+  --now-playing-tonearm-cap: #ffffff;
+  --now-playing-tonearm-edge: rgba(255, 255, 255, 0.26);
   --now-playing-cover-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.16), 0 22px 54px rgba(0, 0, 0, 0.36), 0 48px 90px rgba(0, 0, 0, 0.18);
   --now-playing-header-height: var(--app-titlebar-height, 52px);
   --now-playing-controller-height: 86px;
@@ -102,18 +96,12 @@
   --now-playing-accent-soft: var(--accent-soft);
   --now-playing-primary-icon: #fff;
   --now-playing-danger: #a9362d;
-  --now-playing-tonearm: #606a76;
-  --now-playing-tonearm-base: #8a949f;
-  --now-playing-tonearm-head: #303943;
-  --now-playing-tonearm-plinth: #b5bdc7;
-  --now-playing-tonearm-plinth-top: #d3d8de;
-  --now-playing-tonearm-plinth-inset: #8d97a3;
-  --now-playing-tonearm-edge: rgba(22, 29, 40, 0.24);
-  --now-playing-tonearm-bearing-shell: #697480;
-  --now-playing-tonearm-bearing-core: #e7eaee;
-  --now-playing-tonearm-bearing-inner: #7d8792;
-  --now-playing-tonearm-bearing-cap: #ffffff;
-  --now-playing-tonearm-connector: #707b87;
+  --now-playing-tonearm: #ffffff;
+  --now-playing-tonearm-head: #f8f9fa;
+  --now-playing-tonearm-pivot: rgba(105, 111, 119, 0.62);
+  --now-playing-tonearm-bearing: #eef0f3;
+  --now-playing-tonearm-cap: #ffffff;
+  --now-playing-tonearm-edge: rgba(22, 29, 40, 0.18);
   --now-playing-cover-shadow: 0 0 0 0.5px rgba(38, 34, 30, 0.14), 0 18px 42px rgba(54, 45, 37, 0.2), 0 40px 76px rgba(54, 45, 37, 0.11);
 }
 
@@ -145,18 +133,12 @@
     --now-playing-accent-soft: var(--accent-soft);
     --now-playing-primary-icon: #fff;
     --now-playing-danger: #a9362d;
-    --now-playing-tonearm: #606a76;
-    --now-playing-tonearm-base: #8a949f;
-    --now-playing-tonearm-head: #303943;
-    --now-playing-tonearm-plinth: #b5bdc7;
-    --now-playing-tonearm-plinth-top: #d3d8de;
-    --now-playing-tonearm-plinth-inset: #8d97a3;
-    --now-playing-tonearm-edge: rgba(22, 29, 40, 0.24);
-    --now-playing-tonearm-bearing-shell: #697480;
-    --now-playing-tonearm-bearing-core: #e7eaee;
-    --now-playing-tonearm-bearing-inner: #7d8792;
-    --now-playing-tonearm-bearing-cap: #ffffff;
-    --now-playing-tonearm-connector: #707b87;
+    --now-playing-tonearm: #ffffff;
+    --now-playing-tonearm-head: #f8f9fa;
+    --now-playing-tonearm-pivot: rgba(105, 111, 119, 0.62);
+    --now-playing-tonearm-bearing: #eef0f3;
+    --now-playing-tonearm-cap: #ffffff;
+    --now-playing-tonearm-edge: rgba(22, 29, 40, 0.18);
     --now-playing-cover-shadow: 0 0 0 0.5px rgba(38, 34, 30, 0.14), 0 18px 42px rgba(54, 45, 37, 0.2), 0 40px 76px rgba(54, 45, 37, 0.11);
   }
 
@@ -714,7 +696,7 @@
     conic-gradient(from 18deg, #090a0c 0 10%, #1e2125 15%, #070809 23%, #191c20 35%, #08090a 48%, #22252a 59%, #070809 71%, #181b1e 84%, #090a0b 100%);
   box-shadow: inset 12px -14px 28px rgba(0, 0, 0, 0.68), inset -11px 12px 24px rgba(255, 255, 255, 0.055), inset 0 0 0 1px rgba(255, 255, 255, 0.08), 0 22px 42px rgba(0, 0, 0, 0.46);
   transform: rotate(-5deg);
-  animation: now-playing-record-spin 18s linear infinite;
+  animation: now-playing-record-spin 30s linear infinite;
   animation-play-state: paused;
 }
 
@@ -774,121 +756,91 @@
 .now-playing-tonearm {
   position: absolute;
   z-index: 3;
-  top: -2.5%;
-  right: -1%;
-  width: 58%;
-  height: 58%;
+  top: -8%;
+  left: 15%;
+  width: 70%;
+  height: 60%;
   overflow: visible;
   pointer-events: none;
-  opacity: 0.99;
-  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.26));
+  opacity: 0.98;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.28));
 }
 
 .now-playing-tonearm-base-shadow {
-  fill: rgba(4, 7, 11, 0.4);
-}
-
-.now-playing-tonearm-base-plinth {
-  fill: var(--now-playing-tonearm-plinth);
-  stroke: var(--now-playing-tonearm-edge);
-  stroke-width: 1.25;
-  stroke-linejoin: round;
-}
-
-.now-playing-tonearm-base-top {
-  fill: var(--now-playing-tonearm-plinth-top);
-  stroke: var(--now-playing-tonearm-edge);
-  stroke-width: 1;
-}
-
-.now-playing-tonearm-base-inset {
-  fill: var(--now-playing-tonearm-plinth-inset);
-  stroke: var(--now-playing-tonearm-edge);
-  stroke-width: 1;
+  fill: rgba(4, 7, 11, 0.2);
+  transform: translateY(2px);
 }
 
 .now-playing-tonearm-base-ring {
-  fill: var(--now-playing-tonearm-bearing-shell);
+  fill: var(--now-playing-tonearm-pivot);
   stroke: var(--now-playing-tonearm-edge);
-  stroke-width: 2;
+  stroke-width: 1;
 }
 
 .now-playing-tonearm-base-bearing {
-  fill: var(--now-playing-tonearm-bearing-core);
-  stroke: var(--now-playing-tonearm-base);
-  stroke-width: 2;
-}
-
-.now-playing-tonearm-base-bearing-inner {
-  fill: var(--now-playing-tonearm-bearing-inner);
-  stroke: rgba(255, 255, 255, 0.32);
+  fill: var(--now-playing-tonearm-bearing);
+  stroke: var(--now-playing-tonearm-edge);
   stroke-width: 1;
 }
 
 .now-playing-tonearm-base-cap {
-  fill: var(--now-playing-tonearm-bearing-cap);
+  fill: var(--now-playing-tonearm-cap);
 }
 
-.now-playing-tonearm-connector-shadow,
+.now-playing-tonearm-swing {
+  transform: rotate(-32deg);
+  transform-box: view-box;
+  transform-origin: 150px 35px;
+  transition: transform 520ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+.now-playing-record-stage.is-playing .now-playing-tonearm-swing {
+  transform: rotate(0deg);
+}
+
 .now-playing-tonearm-rail-shadow,
-.now-playing-tonearm-connector,
-.now-playing-tonearm-arm,
-.now-playing-tonearm-rail-highlight {
+.now-playing-tonearm-arm {
   fill: none;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
 .now-playing-tonearm-rail-shadow {
-  stroke: rgba(0, 0, 0, 0.52);
-  stroke-width: 14;
-}
-
-.now-playing-tonearm-connector-shadow {
-  stroke: rgba(0, 0, 0, 0.48);
-  stroke-width: 19;
-}
-
-.now-playing-tonearm-connector {
-  stroke: var(--now-playing-tonearm-connector);
-  stroke-width: 12;
+  stroke: rgba(0, 0, 0, 0.2);
+  stroke-width: 8;
 }
 
 .now-playing-tonearm-arm {
   stroke: var(--now-playing-tonearm);
-  stroke-width: 8;
-}
-
-.now-playing-tonearm-rail-highlight {
-  stroke: rgba(255, 255, 255, 0.5);
-  stroke-width: 1.5;
+  stroke-width: 5.5;
 }
 
 .now-playing-tonearm-cartridge-neck {
   fill: none;
   stroke: var(--now-playing-tonearm);
   stroke-linecap: round;
-  stroke-width: 7;
+  stroke-width: 5.5;
 }
 
 .now-playing-tonearm-cartridge-body {
   fill: var(--now-playing-tonearm-head);
   stroke: var(--now-playing-tonearm-edge);
-  stroke-width: 1.25;
+  stroke-width: 1;
   stroke-linejoin: round;
 }
 
 .now-playing-tonearm-cartridge-face {
-  fill: var(--now-playing-tonearm-base);
-  opacity: 0.78;
+  fill: var(--now-playing-tonearm-bearing);
+  stroke: var(--now-playing-tonearm-edge);
+  stroke-width: 1;
 }
 
 .now-playing-tonearm-stylus {
   fill: none;
-  stroke: #d9dde1;
+  stroke: #34383d;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 2;
+  stroke-width: 1.5;
 }
 
 .now-playing-controller-track {
@@ -1264,6 +1216,7 @@
   .now-playing-control-button,
   .now-playing-play-button,
   .now-playing-lyric-line,
+  .now-playing-tonearm-swing,
   .now-playing-volume-popover,
   .now-playing-timeline input::-webkit-slider-thumb,
   .now-playing-volume-popover input::-webkit-slider-thumb {

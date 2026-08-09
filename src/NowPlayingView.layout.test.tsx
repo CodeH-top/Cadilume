@@ -2,12 +2,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { NowPlayingView } from "./NowPlayingView";
 
-function renderExpandedPlayer() {
+function renderExpandedPlayer(playing = false) {
   return renderToStaticMarkup(
     <NowPlayingView
       open
       track={{ title: "布局验证歌曲", artist: "布局验证歌手", duration: 210_000 }}
-      playing={false}
+      playing={playing}
       queueAvailable
       headerActions={<div data-testid="expanded-player-header-actions">外观与连接状态</div>}
       onSeek={() => undefined}
@@ -75,9 +75,17 @@ describe("expanded player controller layout", () => {
     expect(tonearmStart).toBeGreaterThan(0);
     expect(tonearmStart).toBeLessThan(recordStart);
     expect(markup).toContain('data-testid="tonearm-pivot"');
+    expect(markup).toContain('data-testid="tonearm-swing"');
     expect(markup).toContain('data-testid="tonearm-arm"');
     expect(markup).toContain('data-testid="tonearm-connection"');
     expect(markup).toContain('data-testid="tonearm-cartridge"');
+    expect(markup).toContain('d="M150 35 C153 77 162 113 185 135 C220 154 270 169 320 170"');
+    expect(markup).toContain('cx="150" cy="35"');
+  });
+
+  it("exposes distinct resting and playing tonearm states", () => {
+    expect(renderExpandedPlayer()).toContain("now-playing-record-stage is-paused");
+    expect(renderExpandedPlayer(true)).toContain("now-playing-record-stage is-playing");
   });
 
   it("keeps transport controls tooltip-free while auxiliary icon actions remain described", () => {
