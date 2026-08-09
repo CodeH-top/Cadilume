@@ -98,6 +98,16 @@ impl StreamTarget {
             public_bitrate_marker,
         })
     }
+
+    /// Pin auto quality before issuing a ticket. A ticket can serve many Range
+    /// requests and must therefore keep one media representation throughout
+    /// its lifetime, even if connection ordering changes later.
+    fn resolve_for_connection(&mut self, connection: &StreamConnectionSnapshot) -> String {
+        let effective = effective_quality(&self.quality, connection);
+        self.quality = effective.clone();
+        self.public_bitrate_marker = public_bitrate_marker(&effective);
+        effective
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +274,9 @@ impl StreamProxy {
     }
 
     fn issue(&self, target: StreamTarget) -> Result<String> {
+        if target.quality == "auto" {
+            return Err(anyhow!("自动音质尚未解析为具体媒体表示"));
+        }
         let quality_marker = target
             .public_bitrate_marker
             .map(|bitrate| format!("?maxAudioBitrate={bitrate}"))
@@ -371,15 +384,16 @@ pub fn stream_url(
     plex: TauriState<'_, PlexState>,
     proxy: TauriState<'_, StreamProxy>,
 ) -> Result<String, String> {
-    let target = StreamTarget::new(server_id, metadata_key, part_key, quality)
+    let mut target = StreamTarget::new(server_id, metadata_key, part_key, quality)
         .map_err(|error| error.to_string())?;
+    let requested_quality = target.quality.clone();
     let server = plex
         .stream_server(&target.server_id)
         .map_err(|error| error.to_string())?;
     if server.connections.is_empty() {
         return Err("服务器没有可用连接".to_string());
     }
-    let effective = effective_quality(&target.quality, &server.connections[0]);
+    let effective = target.resolve_for_connection(&server.connections[0]);
     let connection_kind = if server.connections[0].local {
         "local"
     } else if server.connections[0].relay {
@@ -390,7 +404,7 @@ pub fn stream_url(
     eprintln!(
         "[播放] 发行流票据：server={} 请求质量={} 实际质量={} 首选连接={} 连接数={}",
         target.server_id.chars().take(8).collect::<String>(),
-        target.quality,
+        requested_quality,
         effective,
         connection_kind,
         server.connections.len(),
@@ -593,7 +607,9 @@ async fn forward_to_plex(
         } else {
             "remote"
         };
-        let effective_quality = effective_quality(&target.quality, connection);
+        // Ticket issuance already pins the representation. Do not resolve
+        // `auto` again here, or a later Range request could change quality.
+        let effective_quality = target.quality.clone();
         let endpoint_kind = if effective_quality == "original" {
             "direct"
         } else {
@@ -901,12 +917,8 @@ fn build_upstream_urls(
     client_identifier: &str,
 ) -> Result<Vec<Url>> {
     let base = validated_connection_base(&connection.uri)?;
-    let effective_quality = effective_quality(&target.quality, connection);
     let mut candidates = Vec::new();
-    // Auto/original tickets always represent the Part bytes. Compatibility
-    // transcodes use separately issued explicit-quality tickets so one cache
-    // identity cannot change representation between Range requests.
-    if target.quality == "auto" || target.quality == "original" {
+    if target.quality == "original" {
         let endpoint = base.join(&target.part_key)?;
         if !same_origin(&base, &endpoint) || !endpoint.path().starts_with("/library/parts/") {
             return Err(anyhow!("音频路径越过了 Plex 服务器边界"));
@@ -914,8 +926,9 @@ fn build_upstream_urls(
         candidates.push(endpoint);
     }
 
-    if effective_quality != "original" {
-        let bitrate = effective_quality
+    if target.quality != "original" {
+        let bitrate = target
+            .quality
             .parse::<u16>()
             .map_err(|_| anyhow!("无效的转码码率"))?
             .clamp(64, 320)
@@ -1021,12 +1034,11 @@ fn same_origin(left: &Url, right: &Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
-fn effective_quality(quality: &str, _connection: &StreamConnectionSnapshot) -> String {
+fn effective_quality(quality: &str, connection: &StreamConnectionSnapshot) -> String {
     match quality {
-        // An auto ticket has one stable representation: the original Part.
-        // Explicit fallback qualities receive their own ticket and transcode
-        // identity from the frontend quality ladder.
-        "auto" | "original" => "original".to_string(),
+        "auto" if connection.local => "original".to_string(),
+        "auto" if connection.relay => "192".to_string(),
+        "auto" => "320".to_string(),
         quality => quality.to_string(),
     }
 }
@@ -1223,22 +1235,35 @@ mod tests {
     }
 
     #[test]
-    fn auto_quality_uses_one_stable_direct_representation() {
-        let auto = target("auto");
+    fn auto_quality_is_resolved_before_ticket_and_pinned() {
         let local = connection("http://192.168.1.5:32400", true, false);
-        let urls = build_upstream_urls(&auto, &local, "client-1").unwrap();
+        let mut local_target = target("auto");
+        assert_eq!(local_target.resolve_for_connection(&local), "original");
+        assert_eq!(local_target.quality, "original");
+        let urls = build_upstream_urls(&local_target, &local, "client-1").unwrap();
         assert_eq!(urls.len(), 1);
         assert!(urls[0].path().starts_with("/library/parts/"));
 
         let remote = connection("http://media.example.com:10324", false, false);
-        let urls = build_upstream_urls(&auto, &remote, "client-1").unwrap();
-        assert_eq!(urls.len(), 1);
-        assert!(urls[0].path().starts_with("/library/parts/"));
+        let mut remote_target = target("auto");
+        assert_eq!(remote_target.resolve_for_connection(&remote), "320");
+        assert_eq!(remote_target.public_bitrate_marker, Some(320));
+        let urls = build_upstream_urls(&remote_target, &remote, "client-1").unwrap();
+        assert!(urls.iter().all(|url| url.path().contains("transcode")));
+        assert!(urls
+            .iter()
+            .all(|url| url.query().unwrap().contains("musicBitrate=320")));
 
         let relay = connection("https://relay.example.com", false, true);
-        let urls = build_upstream_urls(&auto, &relay, "client-1").unwrap();
-        assert_eq!(urls.len(), 1);
-        assert!(urls[0].path().starts_with("/library/parts/"));
+        let mut relay_target = target("auto");
+        assert_eq!(relay_target.resolve_for_connection(&relay), "192");
+        assert_eq!(relay_target.public_bitrate_marker, Some(192));
+        let urls = build_upstream_urls(&relay_target, &relay, "client-1").unwrap();
+        assert!(urls
+            .iter()
+            .all(|url| url.query().unwrap().contains("musicBitrate=192")));
+
+        assert!(build_upstream_urls(&target("auto"), &remote, "client-1").is_err());
 
         let explicit = target("320");
         let urls = build_upstream_urls(&explicit, &remote, "client-1").unwrap();
@@ -1274,7 +1299,7 @@ mod tests {
             .issue(target("192"))
             .unwrap()
             .ends_with("?maxAudioBitrate=192"));
-        assert!(!proxy.issue(target("auto")).unwrap().contains('?'));
+        assert!(proxy.issue(target("auto")).is_err());
         assert!(!proxy.issue(target("original")).unwrap().contains('?'));
     }
 
@@ -1551,32 +1576,32 @@ mod tests {
     }
 
     #[test]
-    fn auto_quality_is_stable_across_connection_kinds() {
+    fn auto_quality_matches_connection_kind() {
         assert_eq!(
             effective_quality("auto", &connection("https://local.test", true, false)),
             "original"
         );
         assert_eq!(
             effective_quality("auto", &connection("https://remote.test", false, false)),
-            "original"
+            "320"
         );
         assert_eq!(
             effective_quality("auto", &connection("https://relay.test", false, true)),
-            "original"
+            "192"
         );
         assert_eq!(
             public_bitrate_marker(&effective_quality(
                 "auto",
                 &connection("https://remote.test", false, false)
             )),
-            None
+            Some(320)
         );
         assert_eq!(
             public_bitrate_marker(&effective_quality(
                 "auto",
                 &connection("https://relay.test", false, true)
             )),
-            None
+            Some(192)
         );
         assert_eq!(
             public_bitrate_marker(&effective_quality(

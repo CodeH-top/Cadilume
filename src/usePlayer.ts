@@ -685,6 +685,15 @@ export function sourceStreamQuality(source: string): FallbackStreamQuality | und
   }
 }
 
+/** Resolve the representation used by a native cache entry from its ticket. */
+export function nativeAudioCacheQuality(
+  requestedQuality: StreamQuality,
+  source: string,
+): StreamQuality {
+  return sourceStreamQuality(source)
+    || (requestedQuality === "auto" ? "original" : requestedQuality);
+}
+
 /**
  * Return strictly lower compatibility qualities after one native load failed.
  * Each explicit bitrate receives its own loopback ticket and native-cache
@@ -788,6 +797,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const [gaplessHandoffGeneration, setGaplessHandoffGeneration] = useState(0);
   const volumeRef = useRef(volume);
   const mutedRef = useRef(muted);
+  const playingRef = useRef(playing);
   const shuffleRef = useRef(shuffle);
   const repeatRef = useRef(repeat);
   const outputSinkIdRef = useRef(outputSinkId);
@@ -800,6 +810,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   qualityRef.current = quality;
   volumeRef.current = volume;
   mutedRef.current = muted;
+  playingRef.current = playing;
   shuffleRef.current = shuffle;
   repeatRef.current = repeat;
   outputSinkIdRef.current = outputSinkId;
@@ -959,7 +970,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
         playbackLog("info", `原生流地址已取得：index=${index} 质量=${activeQuality}`);
         try {
-          await nativeAudioLoad(url, nativeAudioCacheIdentity(serverId, track, activeQuality), {
+          await nativeAudioLoad(url, nativeAudioCacheIdentity(
+            serverId,
+            track,
+            nativeAudioCacheQuality(activeQuality, url),
+          ), {
             title: track.title,
             artist: trackArtist(track),
             album: trackAlbum(track),
@@ -1531,11 +1546,31 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     };
   }, [flushPlaybackSession]);
 
+  // Native events are long-lived IPC subscriptions. Keep the subscription
+  // stable while exposing the latest stateful callbacks through this ref.
+  const nativeEventHandlersRef = useRef({
+    loadAt,
+    next,
+    previous,
+    schedulePersistedSession,
+    seek,
+    toggle,
+  });
+  nativeEventHandlersRef.current = {
+    loadAt,
+    next,
+    previous,
+    schedulePersistedSession,
+    seek,
+    toggle,
+  };
+
   useEffect(() => {
     if (!isDesktopRuntime()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("native-audio://event", (event) => {
+      const handlers = nativeEventHandlersRef.current;
       const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; ratingKey?: string; reason?: string; buffering?: boolean; deviceId?: string } | null;
       if (!payload) return;
       if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
@@ -1553,7 +1588,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         if (typeof payload.duration === "number" && Number.isFinite(payload.duration) && payload.duration > 0) {
           setDuration(payload.duration);
         }
-        schedulePersistedSession(false);
+        handlers.schedulePersistedSession(false);
         const scrobbleKey = activeServerId && track
           ? `${activeServerId}:${track.ratingKey}`
           : undefined;
@@ -1621,7 +1656,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             "warn",
             `原生流中断：index=${eventIndex} 质量=${failedSource.activeQuality}，从当前进度尝试 ${fallback} kbps`,
           );
-          void loadAt(eventIndex, true, resumeSeconds, true, {
+          void handlers.loadAt(eventIndex, true, resumeSeconds, true, {
             initialQuality: fallback,
             attemptedQualities,
             diagnostics,
@@ -1637,7 +1672,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           technicalDetails: diagnostics.join("；"),
           attemptedQualities,
         });
-        schedulePersistedSession(true);
+        handlers.schedulePersistedSession(true);
       } else if (payload.type === "ended") {
         // Queue authority lives in Rust: it already decided the next item and
         // emits `queue-item` when one exists; here we only settle local state.
@@ -1646,7 +1681,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         setPlaying(false);
         setPlaybackLoading(false);
         setBuffering(false);
-        schedulePersistedSession(true);
+        handlers.schedulePersistedSession(true);
       } else if (payload.type === "playback-protected-stop") {
         // Rust 心跳看门狗判定前端卡死/崩溃后主动停播，前端同步状态。
         playbackLog("warn", `播放保护已停止：${String(payload.reason ?? "unknown")}`);
@@ -1655,7 +1690,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         setPlaying(false);
         setPlaybackLoading(false);
         setBuffering(false);
-        schedulePersistedSession(true);
+        handlers.schedulePersistedSession(true);
       } else if (payload.type === "buffering" && typeof payload.buffering === "boolean") {
         setBuffering(payload.buffering);
       } else if (payload.type === "output-device-recovered") {
@@ -1668,7 +1703,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         setBuffering(false);
         playbackLog("info", `音频输出流已恢复：${recoveredDeviceId ? "所选设备" : "系统默认"}`);
       } else if (payload.type === "queue-item" && typeof payload.index === "number") {
-        void loadAt(payload.index, true);
+        void handlers.loadAt(payload.index, true);
       } else if (payload.type === "track" && typeof payload.index === "number") {
         // Gapless handoff: Rust already queued and started the next source.
         // Mirror the UI without re-requesting a stream URL or reloading the
@@ -1694,15 +1729,15 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         setPlaybackLoading(false);
         setBuffering(false);
         setGaplessHandoffGeneration((generation) => generation + 1);
-        schedulePersistedSession(true);
+        handlers.schedulePersistedSession(true);
       } else if (payload.type === "remote") {
         const command = typeof payload.command === "string" ? payload.command : "";
-        if (command === "play") { if (!playing) toggle(); }
-        else if (command === "toggle") toggle();
-        else if (command === "pause") { if (playing) toggle(); }
-        else if (command === "next") next();
-        else if (command === "previous") previous();
-        else if (command === "seek" && typeof payload.position === "number") seek(payload.position);
+        if (command === "play") { if (!playingRef.current) handlers.toggle(); }
+        else if (command === "toggle") handlers.toggle();
+        else if (command === "pause") { if (playingRef.current) handlers.toggle(); }
+        else if (command === "next") handlers.next();
+        else if (command === "previous") handlers.previous();
+        else if (command === "seek" && typeof payload.position === "number") handlers.seek(payload.position);
       }
     }).then((disposeFn) => {
       if (disposed) disposeFn();
@@ -1712,7 +1747,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       disposed = true;
       unlisten?.();
     };
-  }, [loadAt, next, playing, previous, schedulePersistedSession, seek, toggle]);
+  }, []);
 
   useEffect(() => {
     if (!isDesktopRuntime() || !prebufferNext) return;
@@ -1746,7 +1781,11 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
               attemptedQualities.length > 0,
             );
             if (nextSourceRequestRef.current !== requestId) return;
-            const nextCacheIdentity = nativeAudioCacheIdentity(serverId, nextTrack, activeQuality);
+            const nextCacheIdentity = nativeAudioCacheIdentity(
+              serverId,
+              nextTrack,
+              nativeAudioCacheQuality(activeQuality, url),
+            );
             await nativeAudioQueueNextSource(nextIndex, url, nextCacheIdentity, {
               title: nextTrack.title,
               artist: trackArtist(nextTrack),
@@ -1868,7 +1907,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     if (!isDesktopRuntime()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void listen("tray-player-toggle", toggle).then((dispose) => {
+    void listen("tray-player-toggle", () => nativeEventHandlersRef.current.toggle()).then((dispose) => {
       if (disposed) dispose();
       else unlisten = dispose;
     }).catch(() => undefined);
@@ -1876,7 +1915,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       disposed = true;
       unlisten?.();
     };
-  }, [toggle]);
+  }, []);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;

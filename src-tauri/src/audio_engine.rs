@@ -3089,10 +3089,13 @@ pub async fn native_audio_queue_next_source(
 }
 
 #[tauri::command]
-pub fn native_audio_play(
+pub async fn native_audio_play(
     _app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
 ) -> Result<(), String> {
+    // Serialize playback controls with device replacement so a command issued
+    // during engine construction is applied to the newly installed engine.
+    let _operation = state.output_switch_lock.lock().await;
     let engine = state
         .current()
         .ok_or_else(|| "当前没有可恢复的播放".to_string())?;
@@ -3102,7 +3105,11 @@ pub fn native_audio_play(
 }
 
 #[tauri::command]
-pub fn native_audio_pause(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
+pub async fn native_audio_pause(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+) -> Result<(), String> {
+    let _operation = state.output_switch_lock.lock().await;
     if let Some(engine) = state.current() {
         engine.desired_playing.store(false, Ordering::SeqCst);
         if engine.buffer_paused.swap(false, Ordering::SeqCst) {
@@ -3113,10 +3120,15 @@ pub fn native_audio_pause(app: AppHandle, state: tauri::State<'_, NativeAudioEng
         }
         engine.player().pause();
     }
+    Ok(())
 }
 
 #[tauri::command]
-pub fn native_audio_stop(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
+pub async fn native_audio_stop(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+) -> Result<(), String> {
+    let _operation = state.output_switch_lock.lock().await;
     if let Some(engine) = state.current() {
         engine.stop_immediately();
         let _ = app.emit(
@@ -3124,6 +3136,7 @@ pub fn native_audio_stop(app: AppHandle, state: tauri::State<'_, NativeAudioEngi
             serde_json::json!({ "type": "buffering", "buffering": false }),
         );
     }
+    Ok(())
 }
 
 #[tauri::command]

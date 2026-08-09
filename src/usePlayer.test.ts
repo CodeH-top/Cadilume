@@ -17,6 +17,7 @@ import {
   insertQueueBatchNext,
   mergeFreshTrackMetadata,
   moveShufflePrevious,
+  nativeAudioCacheQuality,
   nativeAudioCacheIdentity,
   normalizeRestoredProgress,
   normalizeQueueBatch,
@@ -53,6 +54,14 @@ describe("native audio cache identity", () => {
       ...source,
       Media: [{ ...source.Media![0], Part: [{ ...source.Media![0].Part![0], size: 5678 }] }],
     }, "original")).not.toBe(first);
+  });
+
+  it("uses the concrete ticket representation for auto-quality cache entries", () => {
+    const loopback = "http://127.0.0.1:49152/stream/ticket";
+    expect(nativeAudioCacheQuality("auto", `${loopback}?maxAudioBitrate=320`)).toBe("320");
+    expect(nativeAudioCacheQuality("auto", `${loopback}?maxAudioBitrate=192`)).toBe("192");
+    expect(nativeAudioCacheQuality("auto", loopback)).toBe("original");
+    expect(nativeAudioCacheQuality("original", loopback)).toBe("original");
   });
 });
 
