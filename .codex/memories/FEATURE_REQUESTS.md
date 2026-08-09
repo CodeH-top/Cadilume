@@ -56,8 +56,8 @@
 
 ## Native playback core
 
-- Move queue authority, Range/cache, decoding, independent gain, gapless/prefetch and output device selection into Rust so desktop playback does not depend on WebView timers.（已完成；Windows 仅保留代码路径，未纳入本轮实机验收。）
-- Add macOS Now Playing/Remote Command Center and Windows SMTC with metadata, progress, Seek and artwork.（macOS 已完成并通过可见验收；Windows 实机验收延期。）
+- Move queue authority, Range/cache, decoding, independent gain, gapless/prefetch and output device selection into Rust so desktop playback does not depend on WebView timers.（已完成；Windows 代码路径已进入自动化构建门禁，真实设备验收待办。）
+- Add macOS Now Playing/Remote Command Center and Windows SMTC with metadata, progress, Seek and artwork.（macOS 已完成并通过可见验收；Windows HWND SMTC、时间轴 Seek、内存封面与清理逻辑已实现并完成交叉编译，Windows 实机 UI 验收待办。）
 - 2026-08-06 用户新增硬约束：程序必须完全独立可用，禁止系统安装依赖（如
   `brew install mpv`），一切依赖必须集成进程序内部。该约束直接排除 libmpv 的
   Homebrew/系统库路线，也排除 tauri-plugin-libmpv（其 setup 在 macOS 明确要求
@@ -71,7 +71,7 @@
   双许可、Rust 绑定 crate 是 LGPL-2.1，不是 MIT。
 - 已知边界（候选版本研究）：symphonia 0.6.0 无 Opus/WMA/APE/DSD/HE-AAC；当前锁定的
   symphonia 0.5.5 由同一 rodio feature 集合编译验证；MP3 gapless 能力有限；
-  Now Playing/SMTC 的 Rust 接入已完成（macOS 已做可见验收，Windows 延期）。PMS 转码回退
+  Now Playing/SMTC 的 Rust 接入已完成（macOS 已做可见验收，Windows 已完成代码与自动化门禁，实机验收待办）。PMS 转码回退
   （container=mp3）可兜住不支持格式；磁盘缓存与“先落盘再解码”设计可同时解决 seek 与
   Plexamp 式 ahead 预缓存。
 - 2026-08-06 用户追问“JS 端是否有现成开源引擎”后补充两条可选路线：
@@ -88,8 +88,10 @@
   kithara 保留为上游稳定后的备选。
 - 2026-08-08 当前状态：Phase 0-6、严格 gapless、PCM 解码/实时线程隔离、缓存身份与并发
   清理、设备恢复、macOS Now Playing 字典契约和《天地一斗》真实 PMS 回归均已完成；
-  Windows 实机验收按用户决定移出本轮。剩余仅为 macOS 长期听感/弱网/睡眠恢复、
-  《完美主义》歌词听感专项，以及 ReplayGain、crossfade、响度扫描和离线下载等后续能力。
+  Windows 已由用户明确纳入当前开发轮次；自动化准备与交叉构建完成，剩余 Windows
+  实机 WASAPI/SMTC/通知区域/Credential Manager/NSIS 验收，以及 macOS 长期听感/弱网/
+  睡眠恢复、《完美主义》歌词听感专项和 ReplayGain、crossfade、响度扫描、离线下载等
+  后续能力。
 
 ## [FR-20260801-001] 页面标题与歌手资料层级
 
@@ -210,7 +212,7 @@
 
 ## 原生状态图标与统一最小化（R11，R10 后、L1/L2 前）
 
-- 删除“关闭主窗口时”的 tray / quit 选择，窗口关闭始终原生最小化且不中断播放；状态图标显示改为独立的持久化开关，macOS 显示“菜单栏图标”、Windows 显示“任务栏图标”（指通知区域状态图标）。
+- 删除“关闭主窗口时”的 tray / quit 选择，窗口关闭始终原生最小化且不中断播放；状态图标显示改为独立的持久化开关，macOS 显示“菜单栏图标”、Windows 显示“通知区域图标”。
 - 升级配置时移除旧 `closeBehavior`、默认保留状态图标；开关须即时生效、不可产生第二个图标实例，也不能在关闭图标后让应用无入口。此项需用唯一 Tauri 开发链在实际平台验证，Windows 不能由 macOS / 浏览器代测。
 
 ## 资料库密度、时长列与多歌手保真（R12，R11 后、L1/L2 前）

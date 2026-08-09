@@ -329,17 +329,30 @@ mod windows {
     use super::PlaybackState;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use tauri::{AppHandle, Emitter};
-    use windows::core::HSTRING;
+    use tauri::{AppHandle, Emitter, Manager};
+    use windows::core::{factory, HSTRING};
     use windows::Foundation::{TimeSpan, TypedEventHandler};
     use windows::Media::{
-        MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls,
-        SystemMediaTransportControlsButton, SystemMediaTransportControlsButtonPressedEventArgs,
+        MediaPlaybackStatus, MediaPlaybackType, PlaybackPositionChangeRequestedEventArgs,
+        SystemMediaTransportControls, SystemMediaTransportControlsButton,
+        SystemMediaTransportControlsButtonPressedEventArgs,
         SystemMediaTransportControlsTimelineProperties,
     };
+    use windows::Storage::Streams::{
+        DataWriter, InMemoryRandomAccessStream, RandomAccessStreamReference,
+    };
+    use windows::Win32::Foundation::HWND as Win32Hwnd;
+    use windows::Win32::System::WinRT::ISystemMediaTransportControlsInterop;
 
     static CONTROLS: OnceLock<SystemMediaTransportControls> = OnceLock::new();
     static COMMAND_APP: OnceLock<Mutex<Option<AppHandle>>> = OnceLock::new();
+    static THUMBNAIL: OnceLock<Mutex<Option<CachedThumbnail>>> = OnceLock::new();
+
+    #[derive(Clone)]
+    struct CachedThumbnail {
+        artwork: Arc<Vec<u8>>,
+        reference: RandomAccessStreamReference,
+    }
 
     fn app_handle() -> Option<AppHandle> {
         COMMAND_APP
@@ -365,10 +378,70 @@ mod windows {
         }
     }
 
+    fn timespan_to_seconds(span: TimeSpan) -> f64 {
+        (span.Duration.max(0) as f64) / 10_000_000.0
+    }
+
+    fn controls_for_window(app: &AppHandle) -> Result<SystemMediaTransportControls, String> {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "主窗口尚未创建".to_string())?;
+        let tauri_hwnd = window
+            .hwnd()
+            .map_err(|error| format!("读取主窗口句柄失败: {error}"))?;
+        let hwnd = Win32Hwnd(tauri_hwnd.0);
+        let interop =
+            factory::<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>()
+                .map_err(|error| format!("创建 SMTC Win32 工厂失败: {error}"))?;
+        unsafe { interop.GetForWindow(hwnd) }
+            .map_err(|error| format!("绑定主窗口 SMTC 失败: {error}"))
+    }
+
+    fn thumbnail_reference(artwork: &Arc<Vec<u8>>) -> Option<RandomAccessStreamReference> {
+        if artwork.is_empty() {
+            return None;
+        }
+        let cache = THUMBNAIL.get_or_init(|| Mutex::new(None));
+        if let Ok(guard) = cache.lock() {
+            if let Some(cached) = guard.as_ref() {
+                if Arc::ptr_eq(&cached.artwork, artwork) {
+                    return Some(cached.reference.clone());
+                }
+            }
+        }
+
+        let result = (|| -> windows::core::Result<RandomAccessStreamReference> {
+            let stream = InMemoryRandomAccessStream::new()?;
+            let writer = DataWriter::CreateDataWriter(&stream)?;
+            writer.WriteBytes(artwork)?;
+            writer.StoreAsync()?.get()?;
+            let _ = writer.DetachStream()?;
+            stream.Seek(0)?;
+            RandomAccessStreamReference::CreateFromStream(&stream)
+        })();
+        let Ok(reference) = result else {
+            eprintln!("[系统媒体] Windows SMTC 封面准备失败");
+            return None;
+        };
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some(CachedThumbnail {
+                artwork: Arc::clone(artwork),
+                reference: reference.clone(),
+            });
+        }
+        Some(reference)
+    }
+
     pub fn install(app: AppHandle) {
-        *COMMAND_APP.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(app);
-        let Ok(controls) = SystemMediaTransportControls::GetForCurrentView() else {
-            return;
+        if let Ok(mut command_app) = COMMAND_APP.get_or_init(|| Mutex::new(None)).lock() {
+            *command_app = Some(app.clone());
+        }
+        let controls = match controls_for_window(&app) {
+            Ok(controls) => controls,
+            Err(error) => {
+                eprintln!("[系统媒体] Windows SMTC 不可用：{error}");
+                return;
+            }
         };
         let _ = controls.SetIsPlayEnabled(true);
         let _ = controls.SetIsPauseEnabled(true);
@@ -396,6 +469,19 @@ mod windows {
             Ok(())
         });
         let _ = controls.ButtonPressed(&handler);
+
+        let seek_handler = TypedEventHandler::<
+            SystemMediaTransportControls,
+            PlaybackPositionChangeRequestedEventArgs,
+        >::new(move |_sender, args| {
+            if let Some(args) = args {
+                if let Ok(position) = args.RequestedPlaybackPosition() {
+                    emit_remote("seek", Some(timespan_to_seconds(position)));
+                }
+            }
+            Ok(())
+        });
+        let _ = controls.PlaybackPositionChangeRequested(&seek_handler);
     }
 
     pub fn update_metadata(
@@ -405,7 +491,7 @@ mod windows {
         duration_seconds: Option<f64>,
         position_seconds: f64,
         playback_state: PlaybackState,
-        _artwork: Option<Arc<Vec<u8>>>,
+        artwork: Option<Arc<Vec<u8>>>,
     ) {
         let Some(controls) = CONTROLS.get() else {
             return;
@@ -413,6 +499,7 @@ mod windows {
         let Ok(updater) = controls.DisplayUpdater() else {
             return;
         };
+        let _ = updater.ClearAll();
         let _ = updater.SetType(MediaPlaybackType::Music);
         let Ok(music) = updater.MusicProperties() else {
             return;
@@ -425,6 +512,13 @@ mod windows {
         }
         if !album.is_empty() {
             let _ = music.SetAlbumTitle(&HSTRING::from(album));
+        }
+        if let Some(artwork) = artwork.as_ref() {
+            if let Some(reference) = thumbnail_reference(artwork) {
+                let _ = updater.SetThumbnail(&reference);
+            }
+        } else if let Ok(mut cache) = THUMBNAIL.get_or_init(|| Mutex::new(None)).lock() {
+            *cache = None;
         }
         let _ = controls.SetPlaybackStatus(match playback_state {
             PlaybackState::Playing => MediaPlaybackStatus::Playing,
@@ -453,6 +547,21 @@ mod windows {
         if let Ok(updater) = controls.DisplayUpdater() {
             let _ = updater.ClearAll();
             let _ = updater.Update();
+        }
+        if let Ok(mut cache) = THUMBNAIL.get_or_init(|| Mutex::new(None)).lock() {
+            *cache = None;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{seconds_to_timespan, timespan_to_seconds};
+
+        #[test]
+        fn timeline_seconds_roundtrip_and_clamps_negative_values() {
+            assert_eq!(seconds_to_timespan(-1.0).Duration, 0);
+            let span = seconds_to_timespan(12.3456789);
+            assert!((timespan_to_seconds(span) - 12.3456789).abs() < 0.0000001);
         }
     }
 }

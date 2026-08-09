@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.1.2",
   "type": "module",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=10"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
@@ -11,6 +15,11 @@
     "preview": "vite preview",
     "bundle:macos:dmg": "sh scripts/build-macos-dmg.sh",
     "icons:macos": "sh scripts/generate-macos-icons.sh",
+    "windows:doctor": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-env.ps1",
+    "verify:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows.ps1",
+    "verify:windows:bundle": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows.ps1 -Bundle",
+    "check:windows:cross": "cargo xwin check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --locked",
+    "build:windows:cross": "tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --debug --no-bundle --ci",
     "tauri": "tauri"
   },
   "dependencies": {

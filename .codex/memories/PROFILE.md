@@ -10,7 +10,7 @@
 - Product/application name: `Cadilume`.
 - Bundle/application identifier: `top.codeh.cadilume`.
 - Repository directory: `Cadilume`.
-- Purpose: lightweight, desktop-first macOS music client that interoperates with authorized Plex Media Server libraries. Windows code paths remain in the repository for compatibility, but are outside the current implementation and acceptance scope.
+- Purpose: lightweight, desktop-first macOS/Windows music client that interoperates with authorized Plex Media Server libraries. Windows is now in the active implementation and acceptance scope; automated MSVC/cargo-xwin gates are prepared, while real Windows device, SMTC, Credential Manager and installer acceptance remains pending.
 - Stack: Tauri 2, React 19, TypeScript, Rust, Vite.
 - Repository: independent git repository on branch `dev` (the active development branch; `main` and `webview` remain historical baselines).
 - UI direction: native system window, equally complete dark/light themes, Plex/Plexamp-like desktop information density through a clean-room Cadilume implementation, fixed bottom player, persistent independent volume, default/minimum size `1280×820`.

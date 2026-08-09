@@ -1,0 +1,70 @@
+name: Windows
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust MSVC
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-msvc --profile minimal --component rustfmt
+          rustup default stable-msvc
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            src-tauri\target
+          key: windows-cargo-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            windows-cargo-${{ runner.arch }}-
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Windows validation
+        shell: pwsh
+        run: .\scripts\verify-windows.ps1 -Bundle -SkipInstall
+
+      - name: Upload unsigned debug installer
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadilume-windows-debug-installer
+          path: src-tauri\target\debug\bundle\nsis\*-setup.exe
+          if-no-files-found: error

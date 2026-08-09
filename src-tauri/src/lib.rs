@@ -42,11 +42,13 @@ pub fn run() {
                 eprintln!("[播放] {}", event.payload());
             });
             window::set_status_icon_enabled(app.handle(), status_icon_enabled)?;
-            // Dev builds start with the window hidden (silent background);
-            // the user brings it up via Dock (Reopen) or the tray menu.
-            #[cfg(debug_assertions)]
+            // macOS development keeps the window hidden so a hot reload does
+            // not steal focus; Dock Reopen and the status icon reveal it.
+            // Windows has no Dock-Reopen equivalent, so the debug window must
+            // remain visible in the taskbar for an unambiguous restore path.
+            #[cfg(all(debug_assertions, target_os = "macos"))]
             let _ = &app;
-            #[cfg(not(debug_assertions))]
+            #[cfg(not(all(debug_assertions, target_os = "macos")))]
             window::reveal_main_window(&app.handle())?;
             Ok(())
         })

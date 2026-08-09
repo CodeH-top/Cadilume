@@ -3455,8 +3455,8 @@ function SettingsView(props: ContentViewProps) {
       {props.statusIconPlatform && (
         <SettingsGroup icon={<PanelTop size={18} />} title="系统状态图标">
           <div className="toggle-row">
-            <span><strong>{props.statusIconPlatform === "macos" ? "显示菜单栏图标" : "显示任务栏图标"}</strong></span>
-            <label className="toggle-switch" aria-label={props.statusIconPlatform === "macos" ? "显示菜单栏图标" : "显示任务栏图标"}>
+            <span><strong>{props.statusIconPlatform === "macos" ? "显示菜单栏图标" : "显示通知区域图标"}</strong></span>
+            <label className="toggle-switch" aria-label={props.statusIconPlatform === "macos" ? "显示菜单栏图标" : "显示通知区域图标"}>
               <input type="checkbox" checked={props.statusIconEnabled} disabled={props.statusIconSaving} onChange={(event) => props.onStatusIconEnabled(event.target.checked)} />
               <span className="toggle-control" aria-hidden="true" />
             </label>

@@ -73,14 +73,14 @@
   加载/切换共 20 次 + 第二轮穿插 seek/暂停/恢复，全部无失败；两个真实 PMS
   回归共用 `load_pms_regression_fixture()`（token/服务器/音乐库/小曲目挑选）。
 - 系统集成：macOS MPNowPlayingInfoCenter + MPRemoteCommandCenter；Windows
-  SystemMediaTransportControls（windows crate 0.58，已跨 target 类型检查，
-  完整构建待 Windows 环境）。前端处理 remote 命令事件（play/pause/toggle/next/
-  previous/seek）。
+  SystemMediaTransportControls 已通过主窗口 HWND 绑定，并实现元数据、状态、时间轴 Seek
+  与内存封面（windows crate 0.58）。Windows debug/release `cfg`、测试 exe 和完整 Tauri PE
+  已交叉编译；前端处理 remote 命令事件（play/pause/toggle/next/previous/seek）。
 - 凭证隔离：debug 构建只读写 ~/.cadilume-dev-token（600），release 只用
-  Keychain；.gitignore 忽略密钥文件；开发态窗口启动隐藏（visible:false +
-  不 reveal），用户点 Dock/托盘显示，避免热重载抢焦点。
+  Keychain/Credential Manager；.gitignore 忽略密钥文件。macOS 开发态窗口启动隐藏，
+  用户点 Dock/菜单栏图标显示；Windows 开发态直接显示并保留任务栏恢复入口。
 - 遗留验证项：真实 PMS 听感回归（用户实听高频切歌 20+ 次、歌词对时）、
-  Windows 实机 SMTC 与隐藏窗口后台播放验收。
+  Windows 实机 WASAPI、SMTC、Credential Manager、通知区域和安装器验收。
 
 ## 2026-08-07 — 真实 PMS 回归测试要点（290b93a）
 
@@ -104,19 +104,30 @@
 - cpal 0.17 `default_output_device()` 返回 `Option<Device>`（不是 Result）；
   `output_devices()` 迭代项直接是 `Device`（无 `Result` 包装）；设备名用
   `description().name()`（`name()` 已废弃）。
-- macOS 上 `cargo check --target x86_64-pc-windows-msvc` 会被 aws-lc-sys 的
-  C 构建挡住（缺 windows.h/SDK），不是 Rust 代码问题；Windows 侧验证必须在
-  Windows 机器上完成，验收清单已写入升级计划文档。
+- macOS 上裸 `cargo check --target x86_64-pc-windows-msvc` 会被 aws-lc-sys 的
+  C 构建挡住（缺 windows.h/SDK），不是 Rust 代码问题；Windows `cfg` 和完整 PE
+  交叉检查应使用 `cargo-xwin`，而 WASAPI/SMTC 等运行行为仍必须在 Windows 机器上完成，
+  验收清单已写入 `docs/WINDOWS_DEVELOPMENT.md`。
 - Windows 真实编译已打通（dev 分支后续提交）：`cargo-xwin 0.22` 已安装且
   `~/.xwin` 有 CRT，`cargo xwin build --target x86_64-pc-windows-msvc` 可完整
   编译链接出 `Cadilume.exe`（此前记录“必须 Windows 机器”只对完整 Tauri 打包
   成立，纯 Rust 构建可用 xwin 提前验证）。
 - 踩坑：`block2` 必须放 `[target.'cfg(target_os = "macos")'.dependencies]`，
   放全平台依赖会在 Windows 目标拉入 objc2 编译失败；windows crate 0.58 的
-  SMTC API 是 PascalCase（`GetForCurrentView`/`SetIsEnabled`/`DisplayUpdater`/
-  `ButtonPressed`），播放状态与时间线在 `SystemMediaTransportControls` 本体
-  （`SetPlaybackStatus` + `UpdateTimelineProperties`），DisplayUpdater 只管
-  类型/属性/Update；`args.Button()` 返回 Result，需先 unwrap。
+  SMTC API 是 PascalCase（`SetIsEnabled`/`DisplayUpdater`/`ButtonPressed`）；桌面
+  Tauri 进程不能依赖 UWP 的 `GetForCurrentView`，应从主窗口 HWND 通过
+  `ISystemMediaTransportControlsInterop::GetForWindow` 绑定。播放状态与时间线在
+  `SystemMediaTransportControls` 本体（`SetPlaybackStatus` + `UpdateTimelineProperties`），
+  DisplayUpdater 只管类型/属性/Update；`args.Button()` 返回 Result，需先 unwrap。
+  Windows SMTC 封面可用 `InMemoryRandomAccessStream` + `RandomAccessStreamReference`，
+  并在无封面/清空时显式清理旧引用。
+- 2026-08-09 Windows 开发门禁已落地：`cargo-xwin check`（debug/release）、Windows
+  `cfg` 测试编译和 Tauri PE 交叉链接均通过；`tauri.windows.conf.json` 会由 Tauri CLI
+  自动合并。真实 Windows 的 WASAPI、SMTC UI、Credential Manager、通知区域和 NSIS
+  仍是实机验收项。
+- `aws-lc-sys` 的 Windows 原生构建需要开发环境可执行的 CMake；当前依赖启用
+  `prebuilt-nasm`，因此通常不必另装 NASM。doctor 应检查 `cmake --version`，不能只检查
+  MSVC 和 Windows SDK。
 
 ## 2026-08-07 — 音量弹层 hover 断链修复（ca9ecd6）
 

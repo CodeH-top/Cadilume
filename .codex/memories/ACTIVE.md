@@ -28,8 +28,9 @@
 - [ACT-020] Cadilume 必须完全独立可用：播放内核及一切运行依赖都必须集成到程序内部，禁止要求用户在系统上安装任何独立依赖（如 `brew install mpv`、`libmpv-dev` 等）。系统自带 API（CoreAudio/WASAPI 等）与静态链接进二进制的 Rust 依赖符合此边界；外部动态库若无法静态集成且需要系统安装，默认不采用。
   Source: user constraint on 2026-08-06（原生播放内核选型轮）。
 - [ACT-021] 开发态（debug）凭证只读写 `~/.cadilume-dev-token`（600 权限，git 忽略），
-  永不访问 Keychain；Release 构建只用 Keychain。开发态启动窗口保持隐藏（用户点
-  Dock/托盘才显示），热重载不抢焦点。
+  永不访问 Keychain/Credential Manager；Release 构建只用当前平台的系统凭据存储。
+  macOS 开发态启动窗口保持隐藏（用户点 Dock/菜单栏图标才显示），热重载不抢焦点；
+  Windows 开发态必须显示主窗口并保留任务栏恢复入口，即使通知区域图标被关闭。
   Source: user requirement on 2026-08-07（凭证隔离与静默启动）。
 - [ACT-022] 音量权威在前端：前端 localStorage 缓存音量并在每次加载/恢复时同步给
   引擎；引擎不设自身默认音量（rodio 原生 1.0 仅作瞬时值），无缓存时前端默认 50%。
@@ -49,6 +50,12 @@
   整条队列、恢复下下首或在下一首无 Range 时完整 fallback。LRU 保护活动条目，超额拒绝新块；
   离线下载保持独立能力。
   Source: user-confirmed fixed 1 GiB + sparse segment cache v2 on 2026-08-09.
+
+- [ACT-026] Windows 目标固定先验收 `x86_64-pc-windows-msvc`；macOS 交叉检查使用
+  `cargo-xwin`，且共享缓存的 `cargo xwin` 命令必须串行运行。交叉编译、GitHub
+  Windows runner 和本机脚本只能证明构建/配置门禁；WASAPI、SMTC UI、通知区域、
+  Credential Manager 与 NSIS 安装器仍须在真实 Windows 会话验收。
+  Source: Windows development scope expansion on 2026-08-09.
 
 ## Validation
 

@@ -44,14 +44,10 @@
     "category": "Music",
     "shortDescription": "轻量、桌面友好的 Plex 音乐播放器",
     "longDescription": "连接你有权访问的 Plex 音乐资料库，提供独立音量、桌面队列、系统窗口和明确退出入口。",
-    "resources": {
-      "icons/Assets.car": "Assets.car"
-    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns",
       "icons/icon.ico"
     ]
   }

@@ -76,12 +76,14 @@ Cadilume 的首要原则：
 
 ## 开发
 
-开发构建要求 Node.js 20+、pnpm 10+、Rust stable 和对应平台 SDK；macOS 分层图标需要 Xcode 26 或更高版本及其中的 Icon Composer。这些都是编译工具，不是发行应用的运行依赖。最终应用不要求用户安装 Homebrew、FFmpeg、libmpv、BASS、sidecar 或后台服务；Rust crates 静态编入程序，运行时只使用系统自带的 CoreAudio/MediaPlayer 或 WASAPI/SMTC 等 API。
+开发构建要求 Node.js 20+、pnpm 10+、Rust stable 和对应平台 SDK；Windows 还需要 Git、CMake、MSVC C++ Build Tools、Windows SDK 和 WebView2 Runtime，macOS 分层图标需要 Xcode 26 或更高版本及其中的 Icon Composer。这些都是编译工具或系统能力，不是发行应用的额外播放依赖。Windows 的安装器会按 `tauri.windows.conf.json` 处理 WebView2；最终应用不要求用户安装 Homebrew、FFmpeg、libmpv、BASS、sidecar 或后台服务；Rust crates 静态编入程序，运行时只使用系统自带的 CoreAudio/MediaPlayer 或 WASAPI/SMTC 等 API。
 
 ```bash
 pnpm install
 pnpm tauri dev
 ```
+
+Windows 首次开发与验证请先阅读 [Windows 开发与调试](docs/WINDOWS_DEVELOPMENT.md)，并运行 `pnpm windows:doctor`。完整 Windows 门禁使用 `pnpm verify:windows`；生成未签名 debug NSIS 包使用 `pnpm verify:windows:bundle`。
 
 验证：
 
