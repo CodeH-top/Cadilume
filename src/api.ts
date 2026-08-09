@@ -855,15 +855,6 @@ export async function nativeAudioSetArtwork(
   await invoke("native_audio_set_artwork", { index, ratingKey, artworkUrl });
 }
 
-export async function nativeAudioPrecache(
-  source: string,
-  cacheKey?: string,
-  rateLimit = false,
-): Promise<void> {
-  if (!isDesktopRuntime()) return;
-  await invoke("native_audio_precache", { source, cacheKey, rateLimit });
-}
-
 export async function nativeAudioQueueNextSource(
   index: number,
   source: string,
@@ -898,13 +889,6 @@ export async function nativeAudioCacheStatus(): Promise<NativeAudioCacheStatus> 
 export async function nativeAudioClearCache(): Promise<void> {
   if (!isDesktopRuntime()) return;
   await invoke("native_audio_clear_cache");
-}
-
-export async function setAudioCacheLimitGib(limitGib: number): Promise<number> {
-  const normalized = Math.round(limitGib);
-  if (normalized < 1 || normalized > 10) throw new Error("音频缓存上限只能设置为 1–10 GiB。");
-  if (!isDesktopRuntime()) return normalized;
-  return invoke("set_audio_cache_limit_gib", { limitGib: normalized });
 }
 
 export async function nativeQueuePeekNext(naturalEnded = true): Promise<number | null> {

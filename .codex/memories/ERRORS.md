@@ -1,5 +1,18 @@
 # ERRORS
 
+## 2026-08-09 — reqwest blocking 客户端不能把分段与连续流共用总超时
+
+- 当前锁定的 reqwest 0.13 blocking `ClientBuilder` 不提供本轮尝试使用的 `read_timeout`；
+  直接调用会编译失败。Range 请求需要有界失败时，可使用 30 秒请求总超时，因为每次响应
+  最多 2 MiB。
+- 无 Range 的当前曲目连续兼容读取不能复用该总超时：大文件在正常慢速网络下可能超过
+  30 秒并被误判失败。为它建立独立 blocking client，只设置 30 秒连接超时；播放取消仍由
+  `SegmentControl` 和分块读取检查处理。不要把这两个 client 再合并。
+- blocking `ClientBuilder::build()` 本身会短暂创建并销毁内部 Tokio runtime；若同步构造器
+  被 `#[tokio::test]` 或其他异步调用方直接调用，会 panic“Cannot drop a runtime in a
+  context where blocking is not allowed”。初始化须在专用 OS 线程完成；缓存最后一个 client
+  若在 Tokio 上下文释放，也要把析构转交 `spawn_blocking`。
+
 ## 2026-08-08 — APFS 大小写迁移后的缓存与开发态地址
 
 - macOS APFS 默认不区分大小写；目录实际改为 `Cadilume` 后，`test -e .../cadilume` 仍可能返回成功，不能用它判断旧目录是否并存。用父目录的大小写保留列表、Git 根路径和进程 cwd 交叉确认实际入口。

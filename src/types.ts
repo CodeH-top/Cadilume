@@ -29,7 +29,6 @@ export interface BootstrapResponse {
   statusIconPlatform?: StatusIconPlatform;
   deviceName: string;
   brandPreset: BrandPreset;
-  audioCacheLimitGib: number;
 }
 
 export interface PlexPin {

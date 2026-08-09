@@ -30,8 +30,9 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 cpal = "0.17"
 filetime = "0.2"
 futures-util = "0.3"
+fs2 = "0.4"
 quick-xml = { version = "0.41", features = ["serialize"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "rustls", "stream"] }
 rodio = { version = "0.22", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
@@ -45,6 +46,7 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+libc = "0.2"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSImage"] }
 objc2-foundation = { version = "0.3.2", features = ["NSData"] }

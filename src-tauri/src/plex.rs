@@ -24,13 +24,7 @@ use tauri::{AppHandle, State};
 use url::Url;
 use uuid::Uuid;
 
-use crate::{
-    audio_engine::{
-        audio_cache_limit_bytes, NativeAudioEngineSlot, DEFAULT_AUDIO_CACHE_LIMIT_GIB,
-        MAX_AUDIO_CACHE_LIMIT_GIB, MIN_AUDIO_CACHE_LIMIT_GIB,
-    },
-    stream_proxy::StreamProxy,
-};
+use crate::{audio_engine::NativeAudioEngineSlot, stream_proxy::StreamProxy};
 
 const PRODUCT_NAME: &str = "Cadilume";
 const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -76,8 +70,6 @@ struct PersistedConfig {
     device_name: String,
     #[serde(default)]
     brand_preset: BrandPreset,
-    #[serde(default = "default_audio_cache_limit_gib")]
-    audio_cache_limit_gib: u64,
 }
 
 impl Default for PersistedConfig {
@@ -87,7 +79,6 @@ impl Default for PersistedConfig {
             status_icon_enabled: default_status_icon_enabled(),
             device_name: default_device_name(),
             brand_preset: BrandPreset::Amber,
-            audio_cache_limit_gib: default_audio_cache_limit_gib(),
         }
     }
 }
@@ -96,31 +87,14 @@ const fn default_status_icon_enabled() -> bool {
     true
 }
 
-const fn default_audio_cache_limit_gib() -> u64 {
-    DEFAULT_AUDIO_CACHE_LIMIT_GIB
-}
-
-fn normalize_audio_cache_limit_gib(value: u64) -> u64 {
-    if (MIN_AUDIO_CACHE_LIMIT_GIB..=MAX_AUDIO_CACHE_LIMIT_GIB).contains(&value) {
-        value
-    } else {
-        default_audio_cache_limit_gib()
-    }
-}
-
-fn normalize_persisted_audio_cache_limit(config: &mut PersistedConfig) -> bool {
-    let previous = config.audio_cache_limit_gib;
-    config.audio_cache_limit_gib = normalize_audio_cache_limit_gib(previous);
-    config.audio_cache_limit_gib != previous
-}
-
 fn strip_retired_config_values(value: &mut Value) -> bool {
     let Some(config) = value.as_object_mut() else {
         return false;
     };
     let removed_sync_recent_plays = config.remove("syncRecentPlays").is_some();
     let removed_close_behavior = config.remove("closeBehavior").is_some();
-    removed_sync_recent_plays || removed_close_behavior
+    let removed_audio_cache_limit = config.remove("audioCacheLimitGib").is_some();
+    removed_sync_recent_plays || removed_close_behavior || removed_audio_cache_limit
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -298,7 +272,6 @@ impl PlexState {
             Err(error) => return Err(error).context("无法读取 Cadilume 配置"),
         };
         should_persist_config |= normalize_persisted_device_name(&mut config);
-        should_persist_config |= normalize_persisted_audio_cache_limit(&mut config);
         if should_persist_config {
             write_persisted_config(&config_path, &config)?;
         }
@@ -330,13 +303,6 @@ impl PlexState {
         self.status_icon_enabled.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn audio_cache_limit_gib(&self) -> u64 {
-        self.config
-            .lock()
-            .map(|config| config.audio_cache_limit_gib)
-            .unwrap_or_else(|_| default_audio_cache_limit_gib())
-    }
-
     fn token(&self) -> Result<String> {
         self.token
             .read()
@@ -355,10 +321,6 @@ impl PlexState {
 
     fn save_device_name(&self, device_name: String) -> Result<()> {
         self.update_preferences(|config| config.device_name = device_name)
-    }
-
-    fn save_audio_cache_limit_gib(&self, limit_gib: u64) -> Result<()> {
-        self.update_preferences(|config| config.audio_cache_limit_gib = limit_gib)
     }
 
     fn update_preferences(&self, update: impl FnOnce(&mut PersistedConfig)) -> Result<()> {
@@ -693,7 +655,6 @@ pub struct BootstrapResponse {
     status_icon_platform: Option<StatusIconPlatform>,
     device_name: String,
     brand_preset: BrandPreset,
-    audio_cache_limit_gib: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -912,7 +873,6 @@ pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse,
         status_icon_platform: status_icon_platform(),
         device_name: state.device_name(),
         brand_preset: state.brand_preset(),
-        audio_cache_limit_gib: state.audio_cache_limit_gib(),
     })
 }
 
@@ -1646,33 +1606,6 @@ pub fn set_device_name(device_name: String, state: State<'_, PlexState>) -> Resu
         .save_device_name(device_name.clone())
         .map_err(|_| "无法保存 Cadilume 设备名称。".to_string())?;
     Ok(device_name)
-}
-
-#[tauri::command]
-pub async fn set_audio_cache_limit_gib(
-    limit_gib: u64,
-    state: State<'_, PlexState>,
-    audio_state: State<'_, NativeAudioEngineSlot>,
-) -> Result<u64, String> {
-    if !(MIN_AUDIO_CACHE_LIMIT_GIB..=MAX_AUDIO_CACHE_LIMIT_GIB).contains(&limit_gib) {
-        return Err(format!(
-            "音频缓存上限只能设置为 {MIN_AUDIO_CACHE_LIMIT_GIB}–{MAX_AUDIO_CACHE_LIMIT_GIB} GiB。"
-        ));
-    }
-    let previous_limit = state.audio_cache_limit_gib();
-    audio_state
-        .set_cache_limit_bytes(audio_cache_limit_bytes(limit_gib))
-        .await
-        .map_err(|_| "无法应用音频缓存上限。".to_string())?;
-    if state.save_audio_cache_limit_gib(limit_gib).is_err() {
-        // Keep disk config and the live engine in the same state if the
-        // preference file becomes unavailable after runtime application.
-        let _ = audio_state
-            .set_cache_limit_bytes(audio_cache_limit_bytes(previous_limit))
-            .await;
-        return Err("无法保存音频缓存上限。".to_string());
-    }
-    Ok(limit_gib)
 }
 
 #[tauri::command]
@@ -2862,12 +2795,13 @@ mod tests {
     #[test]
     fn persisted_config_migrates_device_name_and_removes_retired_preferences() {
         let mut raw = serde_json::from_str::<Value>(
-            r#"{"clientIdentifier":"client-1","closeBehavior":"tray","syncRecentPlays":true,"brandPreset":"plex"}"#,
+            r#"{"clientIdentifier":"client-1","closeBehavior":"tray","syncRecentPlays":true,"audioCacheLimitGib":10,"brandPreset":"plex"}"#,
         )
         .expect("old config should remain readable");
         assert!(strip_retired_config_values(&mut raw));
         assert!(raw.get("closeBehavior").is_none());
         assert!(raw.get("syncRecentPlays").is_none());
+        assert!(raw.get("audioCacheLimitGib").is_none());
         let mut config: PersistedConfig =
             serde_json::from_value(raw).expect("retired preference should not block migration");
 
@@ -2876,13 +2810,9 @@ mod tests {
         assert!(normalize_device_name(&config.device_name).is_ok());
         assert_eq!(config.brand_preset, BrandPreset::Amber);
         assert!(config.status_icon_enabled);
-        assert_eq!(config.audio_cache_limit_gib, DEFAULT_AUDIO_CACHE_LIMIT_GIB);
         let serialized = serde_json::to_value(config).expect("config should serialize");
         assert_eq!(serialized["statusIconEnabled"], true);
-        assert_eq!(
-            serialized["audioCacheLimitGib"],
-            DEFAULT_AUDIO_CACHE_LIMIT_GIB
-        );
+        assert!(serialized.get("audioCacheLimitGib").is_none());
         assert!(serialized.get("closeBehavior").is_none());
         assert!(serialized.get("syncRecentPlays").is_none());
     }
@@ -3124,23 +3054,10 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_to_an_enabled_status_icon() {
+    fn config_defaults_keep_required_local_preferences() {
         assert!(PersistedConfig::default().status_icon_enabled);
         assert!(!PersistedConfig::default().device_name.is_empty());
         assert_eq!(PersistedConfig::default().brand_preset, BrandPreset::Amber);
-        assert_eq!(
-            PersistedConfig::default().audio_cache_limit_gib,
-            DEFAULT_AUDIO_CACHE_LIMIT_GIB
-        );
-        assert_eq!(
-            normalize_audio_cache_limit_gib(0),
-            DEFAULT_AUDIO_CACHE_LIMIT_GIB
-        );
-        assert_eq!(normalize_audio_cache_limit_gib(10), 10);
-        assert_eq!(
-            normalize_audio_cache_limit_gib(11),
-            DEFAULT_AUDIO_CACHE_LIMIT_GIB
-        );
     }
 
     #[test]

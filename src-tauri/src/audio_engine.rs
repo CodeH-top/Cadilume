@@ -3,10 +3,9 @@
 //! kithara's firewheel/cpal pipeline stalled after ~1s in the Tauri process
 //! (decoder produced fixed 4096-frame chunks then stopped), so this spike
 //! uses the simpler, battle-tested rodio path: cpal output + symphonia
-//! decoding, with the Plex stream pre-downloaded to a local cache file.
+//! decoding, with Plex streams backed by a bounded sparse segment cache.
 
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{
     sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
@@ -19,27 +18,10 @@ use reqwest::{redirect::Policy, Client};
 use rodio::source::SeekError;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::AsyncWriteExt;
 
-/// Minimum bytes downloaded before progressive playback may start.
-const MIN_PROGRESSIVE_PRELOAD_BYTES: u64 = 256 * 1024;
-/// The streaming cache is user-configurable. Keep the range deliberately
-/// small and explicit so a queue can never silently turn into an offline copy
-/// of the whole library.
-pub(crate) const DEFAULT_AUDIO_CACHE_LIMIT_GIB: u64 = 1;
-pub(crate) const MIN_AUDIO_CACHE_LIMIT_GIB: u64 = 1;
-pub(crate) const MAX_AUDIO_CACHE_LIMIT_GIB: u64 = 10;
-const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
-const CACHE_CAPACITY_CHECK_GRANULARITY: u64 = 1024 * 1024;
-/// Cache identities cross the WebView boundary but are never used as paths.
-/// Bound their size before hashing to keep command memory predictable.
-const MAX_AUDIO_CACHE_IDENTITY_BYTES: usize = 8 * 1024;
-/// A loopback request or a body chunk that makes no progress for this long is
-/// treated as transiently failed and retried. This bounds precache tasks too;
-/// unlike foreground load they have no separate startup deadline.
-const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+use crate::audio_cache::{CachePriority, SegmentCache, SegmentControl, SegmentReader};
+
 /// Decoder workers feed fixed, frame-aligned chunks to the real-time output.
 const DECODE_CHUNK_FRAMES: usize = 1024;
 /// Keep several seconds of decoded PCM ahead without allowing unbounded memory.
@@ -49,23 +31,14 @@ const DECODE_BUFFER_SECONDS: usize = 4;
 /// rapid pause/resume oscillation on an unstable connection.
 const DECODE_RESUME_BUFFER_MS: usize = 250;
 const DECODE_INITIAL_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
-/// Progressive containers may need bytes beyond the initial preload while
-/// probing metadata. Bound the complete probe + first-PCM preparation so one
-/// incompatible source cannot prevent the frontend from trying another PMS
-/// quality indefinitely.
-const PROGRESSIVE_DECODE_PREPARE_TIMEOUT: Duration = Duration::from_secs(6);
-/// Cancellation wakes ProgressiveFile immediately. Keep a second bound around
-/// joining the blocking probe so timeout/error paths never retain a decoder or
-/// download worker in the background.
-const PROGRESSIVE_PREPARE_CANCEL_TIMEOUT: Duration = Duration::from_secs(3);
+/// Segment-backed containers may need more ranges while probing metadata.
+/// Bound the probe + first-PCM preparation so the frontend can try a compatible
+/// PMS quality when the original source cannot be prepared promptly.
+const SEGMENT_DECODE_PREPARE_TIMEOUT: Duration = Duration::from_secs(6);
+const SEGMENT_PREPARE_CANCEL_TIMEOUT: Duration = Duration::from_secs(3);
 const DECODE_INITIAL_WAIT_POLL: Duration = Duration::from_millis(50);
-const DOWNLOAD_CANCEL_POLL: Duration = Duration::from_millis(50);
 const DECODE_SEND_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 static NEXT_DECODE_WORKER_ID: AtomicUsize = AtomicUsize::new(1);
-/// Background prefetch bandwidth cap (Plexamp desktop default ~5 Mbps).
-/// Only applies to far-ahead cache warming, never to the immediate next
-/// track (gapless handoff must not be delayed by throttling).
-const PRECACHE_RATE_LIMIT_BYTES_PER_SEC: u64 = 5 * 1024 * 1024 / 8;
 /// 前端心跳超时：超过该时长没有收到 heartbeat 且引擎正在出声，就自动停止
 /// 播放，防止 WebView/主线程卡死或崩溃后音乐停不下来。
 const HEARTBEAT_STALL_TIMEOUT: Duration = Duration::from_secs(6);
@@ -101,158 +74,6 @@ fn http_error_category(error: &reqwest::Error) -> &'static str {
     } else {
         "unknown"
     }
-}
-
-fn audio_cache_dir(cache_root: &Path) -> PathBuf {
-    cache_root.join("downloads")
-}
-
-fn audio_cache_key(cache_identity: Option<&str>) -> Result<String, String> {
-    let Some(identity) = cache_identity
-        .map(str::trim)
-        .filter(|identity| !identity.is_empty())
-    else {
-        return Ok(uuid::Uuid::new_v4().simple().to_string());
-    };
-    if identity.len() > MAX_AUDIO_CACHE_IDENTITY_BYTES {
-        return Err("音频缓存身份超过 8 KiB 上限".to_string());
-    }
-    let mut digest = Sha256::new();
-    digest.update(b"cadilume-native-audio-cache-v2\0");
-    digest.update(identity.as_bytes());
-    Ok(format!("{:x}", digest.finalize()))
-}
-
-fn resolve_audio_cache_paths(
-    cache_root: &Path,
-    cache_identity: Option<&str>,
-) -> Result<(String, PathBuf, PathBuf), String> {
-    let key = audio_cache_key(cache_identity)?;
-    let dir = audio_cache_dir(cache_root);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("缓存目录创建失败: {e}"))?;
-    let final_path = dir.join(format!("{key}.audio"));
-    let part_path = dir.join(format!("{key}.audio.part"));
-    Ok((key, final_path, part_path))
-}
-
-fn touch_cache_file(path: &Path) {
-    let _ = filetime::set_file_mtime(path, filetime::FileTime::now());
-}
-
-pub(crate) const fn audio_cache_limit_bytes(limit_gib: u64) -> u64 {
-    limit_gib.saturating_mul(BYTES_PER_GIB)
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct AudioCacheUsage {
-    complete_bytes: u64,
-    partial_bytes: u64,
-    complete_files: usize,
-    partial_files: usize,
-}
-
-impl AudioCacheUsage {
-    fn total_bytes(self) -> u64 {
-        self.complete_bytes.saturating_add(self.partial_bytes)
-    }
-}
-
-fn audio_cache_usage_excluding(cache_root: &Path, excluded_path: Option<&Path>) -> AudioCacheUsage {
-    let dir = audio_cache_dir(cache_root);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return AudioCacheUsage::default();
-    };
-    let mut usage = AudioCacheUsage::default();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if excluded_path.is_some_and(|excluded| excluded == path) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Ok(length) = entry.metadata().map(|metadata| metadata.len()) else {
-            continue;
-        };
-        if name.ends_with(".audio.part") {
-            usage.partial_bytes = usage.partial_bytes.saturating_add(length);
-            usage.partial_files += 1;
-        } else if name.ends_with(".audio") {
-            usage.complete_bytes = usage.complete_bytes.saturating_add(length);
-            usage.complete_files += 1;
-        }
-    }
-    usage
-}
-
-fn audio_cache_usage(cache_root: &Path) -> AudioCacheUsage {
-    audio_cache_usage_excluding(cache_root, None)
-}
-
-/// Make room for an upcoming write. Partial files are counted but never
-/// deleted while active; the caller's download guard removes them on failure.
-/// Returning `false` is preferable to exceeding the user's configured limit.
-fn ensure_audio_cache_capacity(
-    cache_root: &Path,
-    limit_bytes: u64,
-    additional_bytes: u64,
-    protected_paths: &[PathBuf],
-) -> bool {
-    ensure_audio_cache_capacity_excluding(
-        cache_root,
-        limit_bytes,
-        additional_bytes,
-        protected_paths,
-        None,
-    )
-}
-
-fn ensure_audio_cache_capacity_excluding(
-    cache_root: &Path,
-    limit_bytes: u64,
-    additional_bytes: u64,
-    protected_paths: &[PathBuf],
-    excluded_path: Option<&Path>,
-) -> bool {
-    let dir = audio_cache_dir(cache_root);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return additional_bytes <= limit_bytes;
-    };
-    let mut files: Vec<(PathBuf, u64)> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            let name = path.file_name()?.to_string_lossy();
-            if !name.ends_with(".audio") {
-                return None;
-            }
-            let metadata = entry.metadata().ok()?;
-            Some((path, metadata.len()))
-        })
-        .collect();
-    let mut usage = audio_cache_usage_excluding(cache_root, excluded_path).total_bytes();
-    if usage.saturating_add(additional_bytes) <= limit_bytes {
-        return true;
-    }
-    files.sort_by_key(|(path, _)| {
-        std::fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::UNIX_EPOCH)
-    });
-    for (path, length) in files {
-        if usage.saturating_add(additional_bytes) <= limit_bytes {
-            return true;
-        }
-        if protected_paths.iter().any(|protected| protected == &path) {
-            continue;
-        }
-        if std::fs::remove_file(&path).is_ok() {
-            usage = usage.saturating_sub(length);
-            eprintln!(
-                "[原生] 缓存准入淘汰：{}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-        }
-    }
-    usage.saturating_add(additional_bytes) <= limit_bytes
 }
 
 /// Wraps a queued source so the engine can detect the exact sample-level
@@ -303,241 +124,6 @@ impl<S: Source> Source for HandoffMarker<S> {
     }
 }
 
-/// LRU eviction: keep the combined complete + partial footprint within the
-/// configured cap whenever no active partial file has to remain in place.
-fn enforce_audio_cache_limit_with_limit(cache_root: &Path, limit_bytes: u64) {
-    let _ = ensure_audio_cache_capacity(cache_root, limit_bytes, 0, &[]);
-}
-
-fn remove_orphaned_partial_files(cache_root: &Path) {
-    let dir = audio_cache_dir(cache_root);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().ends_with(".audio.part") {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-async fn clear_audio_cache_files(cache_root: &Path) -> Result<(), String> {
-    let dir = audio_cache_dir(cache_root);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(());
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".audio") || name.ends_with(".audio.part") {
-            let path = entry.path();
-            let mut last_error = None;
-            for _ in 0..20 {
-                match tokio::fs::remove_file(&path).await {
-                    Ok(()) => {
-                        last_error = None;
-                        break;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        last_error = None;
-                        break;
-                    }
-                    Err(error) => {
-                        last_error = Some(error);
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                }
-            }
-            if let Some(error) = last_error {
-                return Err(format!("清理音频缓存失败: {error}"));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Shared download state between the background downloader and the
-/// progressive reader (pull-driven, kithara-stream style).
-struct DownloadProgress {
-    downloaded: AtomicU64,
-    expected_len: AtomicU64,
-    failed: AtomicBool,
-    finished: AtomicBool,
-    cancelled: AtomicBool,
-    reader_interrupt_epoch: AtomicU64,
-    lock: Mutex<()>,
-    notify: Condvar,
-}
-
-/// A partial cache file must never survive a failed or aborted download. The
-/// guard is owned by the async future, so aborting its task also performs the
-/// cleanup without relying on a later cache-prune pass.
-struct PartialDownloadCleanup {
-    path: PathBuf,
-}
-
-impl PartialDownloadCleanup {
-    fn new(path: &Path) -> Self {
-        Self {
-            path: path.to_path_buf(),
-        }
-    }
-}
-
-impl Drop for PartialDownloadCleanup {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-impl DownloadProgress {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            downloaded: AtomicU64::new(0),
-            expected_len: AtomicU64::new(0),
-            failed: AtomicBool::new(false),
-            finished: AtomicBool::new(false),
-            cancelled: AtomicBool::new(false),
-            reader_interrupt_epoch: AtomicU64::new(0),
-            lock: Mutex::new(()),
-            notify: Condvar::new(),
-        })
-    }
-
-    fn wait_until(&self, bytes: u64, reader_interrupt_epoch: u64) -> bool {
-        let mut guard = self.lock.lock().unwrap();
-        while self.downloaded.load(Ordering::SeqCst) < bytes
-            && !self.failed.load(Ordering::SeqCst)
-            && !self.finished.load(Ordering::SeqCst)
-            && !self.cancelled.load(Ordering::SeqCst)
-            && self.reader_interrupt_epoch.load(Ordering::SeqCst) == reader_interrupt_epoch
-        {
-            let result = self
-                .notify
-                .wait_timeout(guard, Duration::from_millis(150))
-                .unwrap();
-            guard = result.0;
-        }
-        self.reader_interrupt_epoch.load(Ordering::SeqCst) != reader_interrupt_epoch
-    }
-
-    fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        self.wake();
-    }
-
-    fn interrupt_reader(&self) {
-        self.reader_interrupt_epoch.fetch_add(1, Ordering::SeqCst);
-        self.wake();
-    }
-
-    fn wake(&self) {
-        self.notify.notify_all();
-    }
-}
-
-/// Read+Seek over a file that is still being written by the downloader:
-/// reads beyond the downloaded frontier wait for more bytes (or EOF/failure).
-struct ProgressiveFile {
-    file: std::fs::File,
-    progress: Arc<DownloadProgress>,
-    reader_interrupt_epoch: u64,
-}
-
-impl Read for ProgressiveFile {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        loop {
-            if self.progress.cancelled.load(Ordering::SeqCst) {
-                return Ok(0);
-            }
-            let interrupt_epoch = self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
-            if interrupt_epoch != self.reader_interrupt_epoch {
-                self.reader_interrupt_epoch = interrupt_epoch;
-                // A temporary EOF unwinds symphonia out of a blocking read.
-                // The decoder worker observes its seek epoch and immediately
-                // calls Decoder::try_seek on the still-open source.
-                return Ok(0);
-            }
-            let pos = self.file.stream_position()?;
-            let downloaded = self.progress.downloaded.load(Ordering::SeqCst);
-            if pos < downloaded {
-                let n = self.file.read(buf)?;
-                if n > 0 {
-                    return Ok(n);
-                }
-                if downloaded > pos && !self.progress.finished.load(Ordering::SeqCst) {
-                    if self
-                        .progress
-                        .wait_until(downloaded.saturating_add(1), self.reader_interrupt_epoch)
-                    {
-                        self.reader_interrupt_epoch =
-                            self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
-                        return Ok(0);
-                    }
-                    continue;
-                }
-                return Ok(0);
-            }
-            if self.progress.failed.load(Ordering::SeqCst)
-                || self.progress.finished.load(Ordering::SeqCst)
-                || self.progress.cancelled.load(Ordering::SeqCst)
-            {
-                return Ok(0);
-            }
-            if self
-                .progress
-                .wait_until(pos.saturating_add(1), self.reader_interrupt_epoch)
-            {
-                self.reader_interrupt_epoch =
-                    self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
-                return Ok(0);
-            }
-        }
-    }
-}
-
-impl Seek for ProgressiveFile {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        if self.progress.cancelled.load(Ordering::SeqCst) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "progressive playback was cancelled",
-            ));
-        }
-        self.reader_interrupt_epoch = self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
-        let target = match pos {
-            SeekFrom::Start(p) => p,
-            SeekFrom::Current(delta) => (self.file.stream_position()? as i128 + delta as i128)
-                .clamp(0, u64::MAX as i128) as u64,
-            SeekFrom::End(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "progressive seek from end is unsupported",
-                ));
-            }
-        };
-        while target > self.progress.downloaded.load(Ordering::SeqCst) {
-            if self.progress.failed.load(Ordering::SeqCst)
-                || self.progress.finished.load(Ordering::SeqCst)
-                || self.progress.cancelled.load(Ordering::SeqCst)
-            {
-                break;
-            }
-            if self
-                .progress
-                .wait_until(target.saturating_add(1), self.reader_interrupt_epoch)
-            {
-                self.reader_interrupt_epoch =
-                    self.progress.reader_interrupt_epoch.load(Ordering::SeqCst);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "progressive seek superseded",
-                ));
-            }
-        }
-        self.file.seek(SeekFrom::Start(target))
-    }
-}
-
 struct DecodedChunk {
     epoch: u64,
     samples: Vec<f32>,
@@ -581,7 +167,7 @@ struct DecodeBufferState {
     worker_signal_epoch: AtomicU64,
     worker_signal_lock: Mutex<()>,
     worker_signal: Condvar,
-    reader_progress: Option<Arc<DownloadProgress>>,
+    reader_control: Option<Arc<SegmentControl>>,
     worker_exited: AtomicBool,
     allocated_chunks: AtomicUsize,
     health: Arc<NativeAudioHealth>,
@@ -591,7 +177,7 @@ impl DecodeBufferState {
     fn new(
         sample_rate: rodio::SampleRate,
         buffer_capacity: usize,
-        reader_progress: Option<Arc<DownloadProgress>>,
+        reader_control: Option<Arc<SegmentControl>>,
         health: Arc<NativeAudioHealth>,
     ) -> Self {
         let resume_frames = (sample_rate.get() as usize)
@@ -616,7 +202,7 @@ impl DecodeBufferState {
             worker_signal_epoch: AtomicU64::new(0),
             worker_signal_lock: Mutex::new(()),
             worker_signal: Condvar::new(),
-            reader_progress,
+            reader_control,
             worker_exited: AtomicBool::new(false),
             allocated_chunks: AtomicUsize::new(0),
             health,
@@ -650,8 +236,8 @@ impl DecodeBufferState {
     fn cancel_worker(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         self.notify_worker();
-        if let Some(progress) = self.reader_progress.as_ref() {
-            progress.interrupt_reader();
+        if let Some(control) = self.reader_control.as_ref() {
+            control.cancel();
         }
     }
 
@@ -702,7 +288,7 @@ impl Drop for DecodeWorkerExitGuard {
 
 /// A non-blocking rodio Source backed by a dedicated decoder worker. The
 /// CoreAudio/WASAPI callback only performs `try_recv`; file I/O, codec work and
-/// progressive-network waits remain on the worker thread.
+/// segment-network waits remain on the worker thread.
 struct ThreadedDecoderSource {
     receiver: Receiver<DecodedChunk>,
     recycle_sender: SyncSender<Vec<f32>>,
@@ -847,8 +433,8 @@ impl Source for ThreadedDecoderSource {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some((epoch, pos));
         self.state.notify_worker();
-        if let Some(progress) = self.state.reader_progress.as_ref() {
-            progress.interrupt_reader();
+        if let Some(control) = self.state.reader_control.as_ref() {
+            control.interrupt_reader();
         }
         Ok(())
     }
@@ -892,24 +478,9 @@ where
     spawn_threaded_decoder_with_health(source, None, Arc::new(NativeAudioHealth::default()))
 }
 
-#[cfg(test)]
-fn spawn_threaded_decoder_with_progress<S>(
-    source: S,
-    reader_progress: Option<Arc<DownloadProgress>>,
-) -> Result<(ThreadedDecoderSource, Arc<DecodeBufferState>), String>
-where
-    S: Source + Send + 'static,
-{
-    spawn_threaded_decoder_with_health(
-        source,
-        reader_progress,
-        Arc::new(NativeAudioHealth::default()),
-    )
-}
-
 fn spawn_threaded_decoder_with_health<S>(
     mut source: S,
-    reader_progress: Option<Arc<DownloadProgress>>,
+    reader_control: Option<Arc<SegmentControl>>,
     health: Arc<NativeAudioHealth>,
 ) -> Result<(ThreadedDecoderSource, Arc<DecodeBufferState>), String>
 where
@@ -929,7 +500,7 @@ where
     let state = Arc::new(DecodeBufferState::new(
         sample_rate,
         chunk_capacity,
-        reader_progress,
+        reader_control,
         health,
     ));
     let worker_state = Arc::clone(&state);
@@ -1053,9 +624,9 @@ where
             Ok(chunk) => break chunk,
             Err(RecvTimeoutError::Timeout) => {
                 let reader_cancelled = state
-                    .reader_progress
+                    .reader_control
                     .as_ref()
-                    .is_some_and(|progress| progress.cancelled.load(Ordering::SeqCst));
+                    .is_some_and(|control| control.is_cancelled());
                 if state.cancelled.load(Ordering::SeqCst) || reader_cancelled {
                     state.cancel_worker();
                     return Err("解码准备已取消".to_string());
@@ -1083,39 +654,24 @@ where
     ))
 }
 
-struct PreparedProgressiveDecoder {
+struct PreparedSegmentDecoder {
     decoder: ThreadedDecoderSource,
     decode_state: Arc<DecodeBufferState>,
     total_seconds: Option<f64>,
 }
 
-fn prepare_progressive_decoder(
-    part_path: PathBuf,
-    final_path: PathBuf,
-    progress: Arc<DownloadProgress>,
+fn prepare_segment_decoder(
+    mut reader: SegmentReader,
     metadata_duration_ms: Option<u64>,
     health: Arc<NativeAudioHealth>,
-) -> Result<PreparedProgressiveDecoder, String> {
-    // The downloader renames `.part` atomically just as the probe starts. If
-    // that small-file race occurs, the completed cache is still a valid source
-    // and should be decoded instead of forcing an unnecessary quality retry.
-    let path = if part_path.exists() {
-        part_path
-    } else if progress.finished.load(Ordering::SeqCst) && final_path.exists() {
-        final_path
-    } else {
-        part_path
-    };
-    let file = std::fs::File::open(&path).map_err(|error| format!("打开渐进缓存失败: {error}"))?;
-    let reader = ProgressiveFile {
-        file,
-        progress: Arc::clone(&progress),
-        reader_interrupt_epoch: progress.reader_interrupt_epoch.load(Ordering::SeqCst),
-    };
-    let expected_len = progress.expected_len.load(Ordering::SeqCst);
+) -> Result<PreparedSegmentDecoder, String> {
+    let control = reader.control();
+    let logical_len = reader
+        .prefetch_head()
+        .map_err(|error| format!("准备分段缓存失败: {error}"))?;
     let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
-    if expected_len > 0 {
-        builder = builder.with_byte_len(expected_len);
+    if let Some(logical_len) = logical_len.filter(|length| *length > 0) {
+        builder = builder.with_byte_len(logical_len);
     }
     let decoder = builder
         .build()
@@ -1123,282 +679,14 @@ fn prepare_progressive_decoder(
     let total_seconds = decoder
         .total_duration()
         .map(|duration| duration.as_secs_f64())
-        .or_else(|| metadata_duration_ms.map(|milliseconds| milliseconds as f64 / 1000.0));
+        .or_else(|| metadata_duration_ms.map(|milliseconds| milliseconds as f64 / 1_000.0));
     let (decoder, decode_state) =
-        spawn_threaded_decoder_with_health(decoder, Some(progress), health)?;
-    Ok(PreparedProgressiveDecoder {
+        spawn_threaded_decoder_with_health(decoder, Some(control), health)?;
+    Ok(PreparedSegmentDecoder {
         decoder,
         decode_state,
         total_seconds,
     })
-}
-
-/// One download attempt: stream the loopback media URL into `part_path`,
-/// publishing progress, then atomically promote the completed file.
-async fn download_progressive_once(
-    client: &reqwest::Client,
-    url: &str,
-    cache_root: &Path,
-    part_path: &Path,
-    final_path: &Path,
-    progress: &DownloadProgress,
-    rate_limit_bytes_per_sec: Option<u64>,
-    cache_limit_bytes: &AtomicU64,
-    protected_paths: &[PathBuf],
-) -> Result<u64, String> {
-    if progress.cancelled.load(Ordering::SeqCst) {
-        return Err("下载已取消".to_string());
-    }
-    let response = tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, client.get(url).send())
-        .await
-        .map_err(|_| "下载请求超时".to_string())?
-        .map_err(|error| format!("下载请求失败 ({})", http_error_category(&error)))?;
-    if !response.status().is_success() {
-        return Err(format!("下载返回 HTTP {}", response.status()));
-    }
-    let expected_total = response.content_length();
-    let current_limit = cache_limit_bytes.load(Ordering::SeqCst);
-    if expected_total.is_some_and(|bytes| bytes > current_limit) {
-        return Err(format!(
-            "音频文件超过单文件缓存上限（{} MiB）",
-            current_limit / 1024 / 1024
-        ));
-    }
-    let mut capacity_limit = current_limit;
-    let mut capacity_checkpoint = expected_total.unwrap_or(CACHE_CAPACITY_CHECK_GRANULARITY);
-    if !ensure_audio_cache_capacity_excluding(
-        cache_root,
-        capacity_limit,
-        capacity_checkpoint,
-        protected_paths,
-        Some(part_path),
-    ) {
-        return Err(if expected_total.is_some() {
-            "缓存空间不足，已跳过本次音频下载".to_string()
-        } else {
-            "缓存空间不足，已停止本次音频下载".to_string()
-        });
-    }
-    progress
-        .expected_len
-        .store(expected_total.unwrap_or(0), Ordering::SeqCst);
-    let mut file = tokio::fs::File::create(part_path)
-        .await
-        .map_err(|e| format!("创建缓存文件失败: {e}"))?;
-    let mut stream = response.bytes_stream();
-    let started_at = std::time::Instant::now();
-    let mut total = 0u64;
-    loop {
-        let chunk = tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, stream.next())
-            .await
-            .map_err(|_| "下载数据等待超时".to_string())?;
-        let Some(chunk) = chunk else {
-            break;
-        };
-        if progress.cancelled.load(Ordering::SeqCst) {
-            return Err("下载已取消".to_string());
-        }
-        let chunk =
-            chunk.map_err(|error| format!("下载读取失败 ({})", http_error_category(&error)))?;
-        let current_limit = cache_limit_bytes.load(Ordering::SeqCst);
-        if total.saturating_add(chunk.len() as u64) > current_limit {
-            return Err(format!(
-                "音频文件超过单文件缓存上限（{} MiB）",
-                current_limit / 1024 / 1024
-            ));
-        }
-        let next_total = total.saturating_add(chunk.len() as u64);
-        if current_limit != capacity_limit || next_total > capacity_checkpoint {
-            // A known Content-Length reserves the whole target up front. If
-            // the user changes the limit mid-download, repeat that reservation
-            // before writing another chunk. Unknown-length bodies reserve a
-            // moving window and replace, rather than double-count, their own
-            // existing partial file.
-            let required_total = expected_total
-                .map(|expected| expected.max(next_total))
-                .unwrap_or_else(|| next_total.saturating_add(CACHE_CAPACITY_CHECK_GRANULARITY));
-            if !ensure_audio_cache_capacity_excluding(
-                cache_root,
-                current_limit,
-                required_total,
-                protected_paths,
-                Some(part_path),
-            ) {
-                return Err("缓存空间不足，已停止本次音频下载".to_string());
-            }
-            capacity_limit = current_limit;
-            capacity_checkpoint = required_total;
-        }
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("缓存写入失败: {e}"))?;
-        total += chunk.len() as u64;
-        progress.downloaded.store(total, Ordering::SeqCst);
-        progress.wake();
-        if let Some(limit) = rate_limit_bytes_per_sec {
-            let expected_seconds = total as f64 / limit as f64;
-            let elapsed = started_at.elapsed().as_secs_f64();
-            if expected_seconds > elapsed {
-                let deadline =
-                    std::time::Instant::now() + Duration::from_secs_f64(expected_seconds - elapsed);
-                loop {
-                    if progress.cancelled.load(Ordering::SeqCst) {
-                        return Err("下载已取消".to_string());
-                    }
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    tokio::time::sleep(remaining.min(DOWNLOAD_CANCEL_POLL)).await;
-                }
-            }
-        }
-    }
-    // Cancellation can arrive while the final chunk is being paced. Check
-    // again before making the `.part -> .audio` commit irreversible.
-    if progress.cancelled.load(Ordering::SeqCst) {
-        return Err("下载已取消".to_string());
-    }
-    if let Some(expected) = expected_total {
-        if total != expected {
-            return Err(format!(
-                "下载不完整：期望 {expected} 字节，实际 {total} 字节"
-            ));
-        }
-    }
-    if total == 0 {
-        return Err("下载内容为空".to_string());
-    }
-    file.flush()
-        .await
-        .map_err(|e| format!("缓存刷新失败: {e}"))?;
-    if progress.cancelled.load(Ordering::SeqCst) {
-        return Err("下载已取消".to_string());
-    }
-    // The user may have lowered the limit while the last body chunk was being
-    // paced or flushed. Re-check the actual partial footprint immediately
-    // before the irreversible atomic commit.
-    let current_limit = cache_limit_bytes.load(Ordering::SeqCst);
-    if !ensure_audio_cache_capacity(cache_root, current_limit, 0, protected_paths) {
-        return Err("缓存空间不足，已停止本次音频下载".to_string());
-    }
-    drop(file);
-    tokio::fs::rename(part_path, final_path)
-        .await
-        .map_err(|e| format!("提交缓存文件失败: {e}"))?;
-    // 先改名再标记完成，保证等待方看到 finished 时 final 已可读。
-    progress.finished.store(true, Ordering::SeqCst);
-    progress.wake();
-    Ok(total)
-}
-
-/// Download with bounded retries for transient network/stream failures.
-/// `progress` state is reset before each attempt so a partial failure can
-/// never be mistaken for a usable head by the progressive reader.
-async fn download_progressive(
-    client: &reqwest::Client,
-    url: &str,
-    cache_root: &Path,
-    part_path: &Path,
-    final_path: &Path,
-    progress: &DownloadProgress,
-    rate_limit_bytes_per_sec: Option<u64>,
-    cache_limit_bytes: Arc<AtomicU64>,
-    protected_paths: Vec<PathBuf>,
-    max_attempts: u32,
-) -> Result<u64, String> {
-    let _partial_cleanup = PartialDownloadCleanup::new(part_path);
-    let attempts = max_attempts.max(1);
-    let mut last_error = None::<String>;
-    for attempt in 1..=attempts {
-        if progress.cancelled.load(Ordering::SeqCst) {
-            return Err("下载已取消".to_string());
-        }
-        progress.downloaded.store(0, Ordering::SeqCst);
-        progress.finished.store(false, Ordering::SeqCst);
-        progress.failed.store(false, Ordering::SeqCst);
-        progress.wake();
-        match download_progressive_once(
-            client,
-            url,
-            cache_root,
-            part_path,
-            final_path,
-            progress,
-            rate_limit_bytes_per_sec,
-            cache_limit_bytes.as_ref(),
-            &protected_paths,
-        )
-        .await
-        {
-            Ok(total) => return Ok(total),
-            Err(error) => {
-                last_error = Some(error.clone());
-                if progress.cancelled.load(Ordering::SeqCst) {
-                    return Err("下载已取消".to_string());
-                }
-                if error.starts_with("缓存空间不足")
-                    || error.starts_with("音频文件超过单文件缓存上限")
-                {
-                    progress.failed.store(true, Ordering::SeqCst);
-                    progress.wake();
-                    return Err(error);
-                }
-                if attempt < attempts {
-                    eprintln!("[原生] 下载失败，第 {attempt} 次重试：{error}");
-                    tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
-                }
-            }
-        }
-    }
-    progress.failed.store(true, Ordering::SeqCst);
-    progress.wake();
-    Err(last_error.unwrap_or_else(|| "下载失败".to_string()))
-}
-
-struct ActiveDownload {
-    progress: Arc<DownloadProgress>,
-    part_path: PathBuf,
-    handle: tauri::async_runtime::JoinHandle<()>,
-}
-
-fn clear_active_download_slot(
-    active_download: &Arc<Mutex<Option<ActiveDownload>>>,
-    expected_progress: &Arc<DownloadProgress>,
-) {
-    if let Ok(mut active) = active_download.lock() {
-        let is_same = active
-            .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(&active.progress, expected_progress));
-        if is_same {
-            // Dropping a completed JoinHandle only releases its control handle;
-            // it does not cancel a task that is still finishing its cleanup.
-            let _ = active.take();
-        }
-    }
-}
-
-struct ActivePrecache {
-    cache_key: String,
-    rate_limited: bool,
-    progress: Arc<DownloadProgress>,
-    part_path: PathBuf,
-    handle: tauri::async_runtime::JoinHandle<()>,
-    completion: tokio::sync::watch::Receiver<Option<Result<(), String>>>,
-}
-
-async fn await_precache_completion(
-    mut completion: tokio::sync::watch::Receiver<Option<Result<(), String>>>,
-) -> Result<(), String> {
-    loop {
-        if let Some(outcome) = completion.borrow().clone() {
-            return outcome;
-        }
-        completion
-            .changed()
-            .await
-            .map_err(|_| "预缓存已中止".to_string())?;
-    }
 }
 
 /// Native playback engine (rodio + cpal) owned by the Tauri app.
@@ -1406,8 +694,7 @@ pub struct NativeAudioEngine {
     #[allow(dead_code)]
     sink: MixerDeviceSink,
     player: Mutex<Arc<Player>>,
-    cache_root: PathBuf,
-    cache_limit_bytes: Arc<AtomicU64>,
+    segment_cache: SegmentCache,
     playback_generation: Arc<AtomicU64>,
     artwork_generation: Arc<AtomicU64>,
     transition_lock: Mutex<()>,
@@ -1426,14 +713,7 @@ pub struct NativeAudioEngine {
     stopped: Arc<AtomicBool>,
     last_heartbeat: Arc<Mutex<Option<std::time::Instant>>>,
     heartbeat_stale_observation: Arc<Mutex<Option<(std::time::Instant, std::time::Instant)>>>,
-    /// 真实 PMS 单流限制：同一时刻只允许一条下载，播放优先，预取可被抢占。
-    download_permit: Arc<tokio::sync::Semaphore>,
-    /// Serializes precache admission. An immediate-next request holds this gate
-    /// while it cancels a far-ahead request and acquires the single permit, so
-    /// a throttled request cannot slip in and steal playback-critical capacity.
-    precache_gate: tokio::sync::Mutex<()>,
-    active_download: Arc<Mutex<Option<ActiveDownload>>>,
-    active_precache: Arc<Mutex<Option<ActivePrecache>>>,
+    active_segment_prepare: Arc<Mutex<Option<Arc<SegmentControl>>>>,
     health: Arc<NativeAudioHealth>,
     output_recovery_pending: Arc<AtomicBool>,
 }
@@ -1726,8 +1006,8 @@ fn reconcile_pending_track(pending: &mut Option<PendingTrack>, queue: &mut Queue
 }
 
 /// Where the current track is being read from, so a device switch can rebuild
-/// the player and resume from the same source (cache hit first, otherwise a
-/// fresh progressive download).
+/// the player and resume from the same source (cached ranges first, otherwise
+/// on-demand segment fetches).
 #[derive(Clone, Debug)]
 struct CurrentSource {
     source: String,
@@ -1758,8 +1038,7 @@ struct PlaybackSnapshot {
 
 /// Lazy engine slot so the device stream opens on first use.
 pub struct NativeAudioEngineSlot {
-    cache_root: PathBuf,
-    cache_limit_bytes: AtomicU64,
+    segment_cache: SegmentCache,
     inner: Mutex<Option<Arc<NativeAudioEngine>>>,
     preferred_device: Mutex<Option<String>>,
     preferred_volume: Mutex<Option<f32>>,
@@ -1777,20 +1056,11 @@ impl Drop for SlotMaintenanceGuard<'_> {
 }
 
 impl NativeAudioEngineSlot {
-    #[cfg(test)]
     pub fn new(cache_root: PathBuf) -> Self {
-        Self::new_with_cache_limit(
-            cache_root,
-            audio_cache_limit_bytes(DEFAULT_AUDIO_CACHE_LIMIT_GIB),
-        )
-    }
-
-    pub fn new_with_cache_limit(cache_root: PathBuf, cache_limit_bytes: u64) -> Self {
-        remove_orphaned_partial_files(&cache_root);
-        enforce_audio_cache_limit_with_limit(&cache_root, cache_limit_bytes);
+        let segment_cache = SegmentCache::new(cache_root.clone())
+            .unwrap_or_else(|error| panic!("初始化分段音频缓存失败: {error}"));
         Self {
-            cache_root,
-            cache_limit_bytes: AtomicU64::new(cache_limit_bytes),
+            segment_cache,
             inner: Mutex::new(None),
             preferred_device: Mutex::new(None),
             preferred_volume: Mutex::new(None),
@@ -1800,36 +1070,12 @@ impl NativeAudioEngineSlot {
         }
     }
 
-    pub fn cache_root(&self) -> &PathBuf {
-        &self.cache_root
-    }
-
     pub fn cache_limit_bytes(&self) -> u64 {
-        self.cache_limit_bytes.load(Ordering::SeqCst)
+        self.segment_cache.limit_bytes()
     }
 
-    pub async fn set_cache_limit_bytes(&self, cache_limit_bytes: u64) -> Result<(), String> {
-        // Keep the limit change ordered with load, device-switch and account
-        // reset operations. The downloader also observes the engine's atomic
-        // value while it is running, so this does not require stopping the
-        // foreground decoder.
-        let _operation = self.output_switch_lock.lock().await;
-        self.cache_limit_bytes
-            .store(cache_limit_bytes, Ordering::SeqCst);
-        let Some(engine) = self.current() else {
-            enforce_audio_cache_limit_with_limit(&self.cache_root, cache_limit_bytes);
-            return Ok(());
-        };
-        engine
-            .cache_limit_bytes
-            .store(cache_limit_bytes, Ordering::SeqCst);
-        let _gate = engine.precache_gate.lock().await;
-        // A limit change is a user-directed cache maintenance action. Stop
-        // speculative work so the new budget takes effect immediately while
-        // leaving the foreground decoder alone.
-        engine.cancel_active_precache();
-        engine.enforce_audio_cache_limit();
-        Ok(())
+    fn segment_cache_status(&self) -> crate::audio_cache::CacheStatus {
+        self.segment_cache.status()
     }
 
     fn current(&self) -> Option<Arc<NativeAudioEngine>> {
@@ -1867,7 +1113,7 @@ impl NativeAudioEngineSlot {
 
     /// Stop all media work before deleting account-scoped files. The output
     /// switch lock serializes this with foreground loads/device changes, while
-    /// the engine gate prevents a new precache from appearing mid-cleanup.
+    /// the engine gate prevents a new current/next read head mid-cleanup.
     pub(crate) async fn reset_and_clear_cache(&self) -> Result<(), String> {
         let _operation = self.output_switch_lock.lock().await;
         let _maintenance = self.begin_maintenance();
@@ -1878,11 +1124,10 @@ impl NativeAudioEngineSlot {
             .take();
         if let Some(engine) = engine {
             engine.accepting_work.store(false, Ordering::SeqCst);
-            let _precache = engine.precache_gate.lock().await;
             engine.clear_session_state_and_wait().await;
             engine.stopped.store(true, Ordering::SeqCst);
         }
-        clear_audio_cache_files(&self.cache_root).await?;
+        self.segment_cache.clear()?;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         crate::now_playing::clear();
         Ok(())
@@ -1913,11 +1158,10 @@ impl NativeAudioEngineSlot {
             .map(|guard| *guard)
             .unwrap_or(None);
         let engine = Arc::new(
-            NativeAudioEngine::new_with_device_and_health(
-                self.cache_root.clone(),
+            NativeAudioEngine::new_with_segment_cache_and_health(
+                self.segment_cache.clone(),
                 preferred_device.as_deref().unwrap_or(""),
                 Arc::clone(&self.health),
-                self.cache_limit_bytes(),
             )
             .map_err(|e| format!("原生引擎创建失败: {e}"))?,
         );
@@ -1930,8 +1174,8 @@ impl NativeAudioEngineSlot {
     }
 
     /// Switch the live engine to another output device. The current track is
-    /// captured and resumed on the new device from cache (or a fresh
-    /// progressive download); the old event forwarder stops cleanly.
+    /// captured and resumed on the new device from cached ranges (or on-demand
+    /// segment fetches); the old event forwarder stops cleanly.
     pub async fn set_output_device(
         &self,
         app: &AppHandle,
@@ -2005,17 +1249,15 @@ impl NativeAudioEngineSlot {
         }
         let snapshot = old.capture_playback_snapshot();
         let new_engine = Arc::new(
-            NativeAudioEngine::new_with_device_and_health(
-                self.cache_root.clone(),
+            NativeAudioEngine::new_with_segment_cache_and_health(
+                self.segment_cache.clone(),
                 &device_id,
                 Arc::clone(&self.health),
-                self.cache_limit_bytes(),
             )
             .map_err(|e| format!("切换输出设备失败: {e}"))?,
         );
-        // Stop and cancel the old progressive source before the new engine
-        // touches the shared cache path. Merely stopping its event forwarder
-        // leaves rodio's output stream audible and can corrupt a shared `.part`.
+        // Stop the old decoder before the new engine restores from the shared
+        // segment cache so only one playback authority remains audible.
         old.accepting_work.store(false, Ordering::SeqCst);
         let stopped_generation = old.stop_immediately_and_wait().await;
         if let Err(error) = new_engine.restore_playback_snapshot(&snapshot).await {
@@ -2140,40 +1382,30 @@ fn renderer_requires_heartbeat(is_visible: bool, is_minimized: bool) -> bool {
 impl NativeAudioEngine {
     #[allow(dead_code)]
     pub fn new(cache_root: PathBuf) -> anyhow::Result<Self> {
-        Self::new_with_device_and_cache_limit(
-            cache_root,
+        let segment_cache =
+            SegmentCache::new(cache_root).map_err(|error| anyhow::anyhow!(error))?;
+        Self::new_with_segment_cache_and_health(
+            segment_cache,
             "",
-            audio_cache_limit_bytes(DEFAULT_AUDIO_CACHE_LIMIT_GIB),
+            Arc::new(NativeAudioHealth::default()),
         )
     }
 
     #[cfg(test)]
     fn new_with_device(cache_root: PathBuf, device_id: &str) -> anyhow::Result<Self> {
-        Self::new_with_device_and_cache_limit(
-            cache_root,
-            device_id,
-            audio_cache_limit_bytes(DEFAULT_AUDIO_CACHE_LIMIT_GIB),
-        )
-    }
-
-    fn new_with_device_and_cache_limit(
-        cache_root: PathBuf,
-        device_id: &str,
-        cache_limit_bytes: u64,
-    ) -> anyhow::Result<Self> {
-        Self::new_with_device_and_health(
-            cache_root,
+        let segment_cache =
+            SegmentCache::new(cache_root).map_err(|error| anyhow::anyhow!(error))?;
+        Self::new_with_segment_cache_and_health(
+            segment_cache,
             device_id,
             Arc::new(NativeAudioHealth::default()),
-            cache_limit_bytes,
         )
     }
 
-    fn new_with_device_and_health(
-        cache_root: PathBuf,
+    fn new_with_segment_cache_and_health(
+        segment_cache: SegmentCache,
         device_id: &str,
         health: Arc<NativeAudioHealth>,
-        cache_limit_bytes: u64,
     ) -> anyhow::Result<Self> {
         use cpal::traits::{DeviceTrait, HostTrait};
         let builder = if device_id.is_empty() {
@@ -2218,8 +1450,7 @@ impl NativeAudioEngine {
         Ok(Self {
             sink,
             player: Mutex::new(player),
-            cache_root,
-            cache_limit_bytes: Arc::new(AtomicU64::new(cache_limit_bytes)),
+            segment_cache,
             playback_generation: Arc::new(AtomicU64::new(0)),
             artwork_generation: Arc::new(AtomicU64::new(0)),
             transition_lock: Mutex::new(()),
@@ -2238,10 +1469,7 @@ impl NativeAudioEngine {
             stopped: Arc::new(AtomicBool::new(false)),
             last_heartbeat: Arc::new(Mutex::new(None)),
             heartbeat_stale_observation: Arc::new(Mutex::new(None)),
-            download_permit: Arc::new(tokio::sync::Semaphore::new(1)),
-            precache_gate: tokio::sync::Mutex::new(()),
-            active_download: Arc::new(Mutex::new(None)),
-            active_precache: Arc::new(Mutex::new(None)),
+            active_segment_prepare: Arc::new(Mutex::new(None)),
             health,
             output_recovery_pending,
         })
@@ -2266,116 +1494,51 @@ impl NativeAudioEngine {
             .unwrap_or_else(|| self.player().get_pos().as_secs_f64())
     }
 
-    fn take_active_work(&self) -> Vec<tauri::async_runtime::JoinHandle<()>> {
-        let mut handles = Vec::new();
-        if let Ok(mut active) = self.active_download.lock() {
-            if let Some(active) = active.take() {
-                active.progress.cancel();
-                active.handle.abort();
-                let _ = std::fs::remove_file(active.part_path);
-                handles.push(active.handle);
-            }
-        }
-        if let Ok(mut active) = self.active_precache.lock() {
-            if let Some(active) = active.take() {
-                active.progress.cancel();
-                active.handle.abort();
-                let _ = std::fs::remove_file(active.part_path);
-                handles.push(active.handle);
-            }
-        }
-        handles
-    }
-
-    fn cancel_active_precache(&self) {
-        if let Ok(mut active) = self.active_precache.lock() {
-            if let Some(active) = active.take() {
-                active.progress.cancel();
-                active.handle.abort();
-                let _ = std::fs::remove_file(active.part_path);
+    fn cancel_active_prepare(&self) {
+        if let Ok(mut active) = self.active_segment_prepare.lock() {
+            if let Some(control) = active.take() {
+                control.cancel();
             }
         }
     }
 
-    fn cancel_active_download_for(
+    fn register_segment_prepare(
         &self,
-        expected_progress: &Arc<DownloadProgress>,
-    ) -> Option<ActiveDownload> {
+        generation: u64,
+        control: Arc<SegmentControl>,
+    ) -> Result<(), String> {
         let _transition = self
             .transition_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let mut active = self.active_download.lock().ok()?;
-        let matches = active
-            .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(&active.progress, expected_progress));
-        if !matches {
-            return None;
+        if !self.playback_is_current(generation) {
+            control.cancel();
+            return Err("播放加载已被新操作替代".to_string());
         }
-        let active = active.take()?;
-        active.progress.cancel();
-        active.handle.abort();
-        let _ = std::fs::remove_file(&active.part_path);
-        Some(active)
-    }
-
-    async fn cancel_progressive_download(&self, progress: &Arc<DownloadProgress>) {
-        progress.cancel();
-        let Some(active) = self.cancel_active_download_for(progress) else {
-            return;
-        };
-        if tokio::time::timeout(PROGRESSIVE_PREPARE_CANCEL_TIMEOUT, active.handle)
-            .await
-            .is_err()
-        {
-            eprintln!("[原生] 渐进下载任务取消超时");
+        let mut active = self
+            .active_segment_prepare
+            .lock()
+            .map_err(|_| "分段缓存准备状态锁失败".to_string())?;
+        if let Some(previous) = active.replace(control) {
+            previous.cancel();
         }
+        Ok(())
     }
 
-    fn release_active_download(&self, progress: &Arc<DownloadProgress>) {
-        clear_active_download_slot(&self.active_download, progress);
-    }
-
-    async fn cancel_progressive_prepare(
-        &self,
-        progress: &Arc<DownloadProgress>,
-        prepare_task: &mut tauri::async_runtime::JoinHandle<
-            Result<PreparedProgressiveDecoder, String>,
-        >,
-    ) {
-        progress.cancel();
-        let active_download = self.cancel_active_download_for(progress);
-        let shutdown = async {
-            if let Some(active) = active_download {
-                let _ = active.handle.await;
-            }
-            let _ = (&mut *prepare_task).await;
-        };
-        if tokio::time::timeout(PROGRESSIVE_PREPARE_CANCEL_TIMEOUT, shutdown)
-            .await
-            .is_err()
-        {
-            prepare_task.abort();
-            eprintln!("[原生] 渐进解码准备任务取消超时");
-        }
-    }
-
-    fn clear_active_precache(&self, progress: &Arc<DownloadProgress>) {
-        if let Ok(mut active) = self.active_precache.lock() {
-            let is_same = active
+    fn clear_segment_prepare(&self, control: &Arc<SegmentControl>) {
+        if let Ok(mut active) = self.active_segment_prepare.lock() {
+            if active
                 .as_ref()
-                .map(|active| Arc::ptr_eq(&active.progress, progress))
-                .unwrap_or(false);
-            if is_same {
+                .is_some_and(|active| Arc::ptr_eq(active, control))
+            {
                 *active = None;
             }
         }
     }
 
     /// Replace the rodio control handle instead of calling `Player::clear()`.
-    /// rodio's clear waits synchronously for the audio thread; a progressive
-    /// source may be waiting for network bytes, which can otherwise freeze a
-    /// synchronous Tauri command and the WebView that issued it.
+    /// The decoder may be waiting on a segment read; replacing the player keeps
+    /// synchronous Tauri commands from waiting on the audio thread.
     fn replace_player(&self) {
         let mut player = self
             .player
@@ -2388,7 +1551,7 @@ impl NativeAudioEngine {
         previous.stop();
     }
 
-    fn prepare_playback_transition(&self) -> (u64, Vec<tauri::async_runtime::JoinHandle<()>>) {
+    fn prepare_playback_transition(&self) -> u64 {
         let _transition = self
             .transition_lock
             .lock()
@@ -2411,15 +1574,13 @@ impl NativeAudioEngine {
                 decode_state.cancel_worker();
             }
         }
-        let handles = self.take_active_work();
+        self.cancel_active_prepare();
         self.replace_player();
-        (generation, handles)
+        generation
     }
 
     fn begin_playback_transition(&self) -> u64 {
-        let (generation, handles) = self.prepare_playback_transition();
-        drop(handles);
-        generation
+        self.prepare_playback_transition()
     }
 
     fn playback_is_current(&self, generation: u64) -> bool {
@@ -2439,11 +1600,7 @@ impl NativeAudioEngine {
     }
 
     async fn stop_immediately_and_wait(&self) -> u64 {
-        let (generation, handles) = self.prepare_playback_transition();
-        for handle in handles {
-            let _ = handle.await;
-        }
-        generation
+        self.prepare_playback_transition()
     }
 
     async fn clear_session_state_and_wait(&self) {
@@ -2464,41 +1621,6 @@ impl NativeAudioEngine {
         if let Ok(mut queue) = self.queue.lock() {
             *queue = QueueState::default();
         }
-    }
-
-    fn resolve_cache_paths(
-        &self,
-        cache_key: Option<String>,
-    ) -> Result<(String, PathBuf, PathBuf), String> {
-        resolve_audio_cache_paths(&self.cache_root, cache_key.as_deref())
-    }
-
-    fn protected_cache_paths(&self) -> Vec<PathBuf> {
-        let mut identities = Vec::new();
-        if let Ok(source) = self.current_source.lock() {
-            if let Some(cache_key) = source.as_ref().and_then(|source| source.cache_key.clone()) {
-                identities.push(cache_key);
-            }
-        }
-        if let Ok(pending) = self.pending.lock() {
-            if let Some(cache_key) = pending
-                .as_ref()
-                .and_then(|pending| pending.cache_key.clone())
-            {
-                identities.push(cache_key);
-            }
-        }
-        identities
-            .into_iter()
-            .filter_map(|identity| self.resolve_cache_paths(Some(identity)).ok())
-            .map(|(_, final_path, _)| final_path)
-            .collect()
-    }
-
-    fn enforce_audio_cache_limit(&self) {
-        let protected = self.protected_cache_paths();
-        let limit = self.cache_limit_bytes.load(Ordering::SeqCst);
-        let _ = ensure_audio_cache_capacity(&self.cache_root, limit, 0, &protected);
     }
 
     /// Background-fetch the album artwork bytes from the loopback artwork
@@ -2788,9 +1910,8 @@ impl NativeAudioEngine {
         Ok(player.len())
     }
 
-    /// Stream a loopback media URL into the local cache and start playing
-    /// once the head is available (progressive download, kithara-stream
-    /// style). Completed downloads are promoted to a reusable cache file.
+    /// Start a loopback media URL from its cached 256 KiB head, then persist
+    /// only the later ranges requested by the decoder.
     #[cfg(test)]
     pub async fn load_cached_and_play(
         &self,
@@ -2813,7 +1934,7 @@ impl NativeAudioEngine {
             cache_key,
             metadata,
             start_playing,
-            PROGRESSIVE_DECODE_PREPARE_TIMEOUT,
+            SEGMENT_DECODE_PREPARE_TIMEOUT,
         )
         .await
     }
@@ -2850,195 +1971,47 @@ impl NativeAudioEngine {
                 start_playing,
             );
         }
-        // Foreground playback owns admission priority over all speculative
-        // work. Holding the gate until its download task owns the single PMS
-        // permit prevents a newly-arriving precache from recreating the same
-        // `.part` after the generation transition cancelled the old one.
-        let precache_gate = self.precache_gate.lock().await;
-        self.cancel_active_precache();
-        let (key, final_path, part_path) = self.resolve_cache_paths(cache_key.clone())?;
-        let final_ready = std::fs::metadata(&final_path)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false);
-        if final_ready {
-            match self.load_file_for_generation(
-                final_path.to_str().unwrap(),
-                generation,
-                CurrentSource {
-                    source: source.to_string(),
-                    cache_key: cache_key.clone(),
-                    metadata: metadata_for_source.clone().unwrap_or_default(),
-                },
-                start_playing,
-            ) {
-                Ok(len) => {
-                    eprintln!("[原生] 命中完整缓存 key={key}");
-                    touch_cache_file(&final_path);
-                    self.enforce_audio_cache_limit();
-                    return Ok(len);
-                }
-                Err(error) => {
-                    // 损坏/截断的缓存文件不能挡住播放：删除后走渐进下载自愈。
-                    eprintln!("[原生] 缓存文件损坏，自动重下 key={key}：{error}");
-                    let _ = std::fs::remove_file(&final_path);
-                }
-            }
-        }
-
-        let _ = std::fs::remove_file(&part_path);
-        let progress = DownloadProgress::new();
-        let progress_task = Arc::clone(&progress);
-        let part_for_task = part_path.clone();
-        let final_for_task = final_path.clone();
-        let source_for_task = source.to_string();
-        let cache_root_for_task = self.cache_root.clone();
-        let cache_limit_bytes = Arc::clone(&self.cache_limit_bytes);
-        let protected_paths = self.protected_cache_paths();
-        let client = loopback_http_client(None)?;
-        if !self.playback_is_current(generation) {
-            return Err("播放加载已被新操作替代".to_string());
-        }
-        let permit = self
-            .download_permit
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| "下载并发控制失败".to_string())?;
-        if !self.playback_is_current(generation) {
-            return Err("播放加载已被新操作替代".to_string());
-        }
-        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-        let task = tauri::async_runtime::spawn(async move {
-            let _permit = permit;
-            if let Err(error) = download_progressive(
-                &client,
-                &source_for_task,
-                &cache_root_for_task,
-                &part_for_task,
-                &final_for_task,
-                &progress_task,
-                None,
-                cache_limit_bytes,
-                protected_paths,
-                3,
-            )
-            .await
-            {
-                progress_task.failed.store(true, Ordering::SeqCst);
-                progress_task.wake();
-                eprintln!("[原生] 渐进下载失败：{error}");
-            }
-            let _ = completion_tx.send(());
-        });
-        let mut task = Some(task);
-        let registered = {
-            let _transition = self
-                .transition_lock
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let mut active = self
-                .active_download
-                .lock()
-                .map_err(|_| "播放下载状态锁失败".to_string())?;
-            if self.playback_is_current(generation) {
-                *active = Some(ActiveDownload {
-                    progress: Arc::clone(&progress),
-                    part_path: part_path.clone(),
-                    handle: task.take().expect("下载任务只能登记一次"),
-                });
-                true
-            } else {
-                false
-            }
-        };
-        if !registered {
-            progress.cancel();
-            if let Some(task) = task {
-                task.abort();
-            }
-            return Err("播放加载已被新操作替代".to_string());
-        }
-        let active_download_slot = Arc::clone(&self.active_download);
-        let progress_for_cleanup = Arc::clone(&progress);
-        tauri::async_runtime::spawn(async move {
-            let _ = completion_rx.await;
-            clear_active_download_slot(&active_download_slot, &progress_for_cleanup);
-        });
-        drop(precache_gate);
-
-        // Wait for the head bytes (or terminal state) before decoding.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        while progress.downloaded.load(Ordering::SeqCst) < MIN_PROGRESSIVE_PRELOAD_BYTES
-            && !progress.failed.load(Ordering::SeqCst)
-            && !progress.finished.load(Ordering::SeqCst)
-            && !progress.cancelled.load(Ordering::SeqCst)
-            && self.playback_is_current(generation)
-            && tokio::time::Instant::now() < deadline
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        if progress.cancelled.load(Ordering::SeqCst) || !self.playback_is_current(generation) {
-            return Err("播放加载已被新操作替代".to_string());
-        }
-        if progress.downloaded.load(Ordering::SeqCst) < MIN_PROGRESSIVE_PRELOAD_BYTES
-            && !progress.finished.load(Ordering::SeqCst)
-        {
-            self.cancel_progressive_download(&progress).await;
-            return Err("下载歌曲超时，无法开始播放".to_string());
-        }
-        if progress.failed.load(Ordering::SeqCst) {
-            self.cancel_progressive_download(&progress).await;
-            return Err("下载歌曲失败，无法开始播放".to_string());
-        }
-        if progress.finished.load(Ordering::SeqCst) {
-            // 小文件/快速下载可能在等待期间已完整落盘并改名。
-            self.release_active_download(&progress);
-            return self.load_file_for_generation(
-                final_path.to_str().unwrap(),
-                generation,
-                CurrentSource {
-                    source: source.to_string(),
-                    cache_key,
-                    metadata: metadata_for_source.unwrap_or_default(),
-                },
-                start_playing,
-            );
-        }
-        let part_for_prepare = part_path.clone();
-        let final_for_prepare = final_path.clone();
-        let progress_for_prepare = Arc::clone(&progress);
+        let reader =
+            self.segment_cache
+                .open_reader(cache_key.as_deref(), source, CachePriority::Current)?;
+        let control = reader.control();
+        self.register_segment_prepare(generation, Arc::clone(&control))?;
         let metadata_duration_ms = metadata_for_source
             .as_ref()
             .and_then(|metadata| metadata.duration_ms);
         let health = Arc::clone(&self.health);
         let mut prepare_task = tauri::async_runtime::spawn_blocking(move || {
-            prepare_progressive_decoder(
-                part_for_prepare,
-                final_for_prepare,
-                progress_for_prepare,
-                metadata_duration_ms,
-                health,
-            )
+            prepare_segment_decoder(reader, metadata_duration_ms, health)
         });
         let prepared = match tokio::time::timeout(prepare_timeout, &mut prepare_task).await {
             Ok(Ok(Ok(prepared))) => prepared,
             Ok(Ok(Err(error))) => {
-                self.cancel_progressive_download(&progress).await;
+                control.cancel();
+                self.clear_segment_prepare(&control);
                 return Err(error);
             }
             Ok(Err(error)) => {
-                self.cancel_progressive_download(&progress).await;
-                return Err(format!("渐进解码准备任务失败: {error}"));
+                control.cancel();
+                self.clear_segment_prepare(&control);
+                return Err(format!("分段解码准备任务失败: {error}"));
             }
             Err(_) => {
-                self.cancel_progressive_prepare(&progress, &mut prepare_task)
-                    .await;
+                control.cancel();
+                if tokio::time::timeout(SEGMENT_PREPARE_CANCEL_TIMEOUT, &mut prepare_task)
+                    .await
+                    .is_err()
+                {
+                    prepare_task.abort();
+                    eprintln!("[原生] 分段解码准备任务取消超时");
+                }
+                self.clear_segment_prepare(&control);
                 return Err(format!(
                     "媒体解码准备超过 {} 秒，尝试兼容质量",
                     prepare_timeout.as_secs_f64()
                 ));
             }
         };
+        self.clear_segment_prepare(&control);
         let total = prepared.total_seconds;
         let decoder = prepared.decoder;
         let decode_state = prepared.decode_state;
@@ -3075,168 +2048,19 @@ impl NativeAudioEngine {
         self.buffer_paused.store(false, Ordering::SeqCst);
         self.loaded.store(true, Ordering::SeqCst);
         self.ended_sent.store(false, Ordering::SeqCst);
+        let status = self.segment_cache.status();
         eprintln!(
-            "[原生] 渐进播放开始 key={key} 已预载={} 时长={:?}",
-            progress.downloaded.load(Ordering::SeqCst),
-            total,
+            "[原生] 分段播放开始 实际缓存={} 时长={:?}",
+            status.allocated_bytes, total,
         );
-        let cache_root = self.cache_root.clone();
-        let cache_limit_bytes = Arc::clone(&self.cache_limit_bytes);
-        let protected_paths = self.protected_cache_paths();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let _ = ensure_audio_cache_capacity(
-                &cache_root,
-                cache_limit_bytes.load(Ordering::SeqCst),
-                0,
-                &protected_paths,
-            );
-        });
         Ok(player.len())
     }
 
-    /// Pre-download a future track into the cache without playing it, so the
-    /// next switch can start from the local file (reduces cross-track gap).
-    /// Completes only when the download is fully committed, so callers can
-    /// follow it with `queue_next_source` for a gapless handoff.
-    pub async fn precache(
-        &self,
-        source: &str,
-        cache_key: Option<String>,
-        rate_limit_bytes_per_sec: Option<u64>,
-    ) -> Result<(), String> {
-        self.ensure_accepting_work()?;
-        let generation = self.playback_generation.load(Ordering::SeqCst);
-        if !(source.starts_with("http://") || source.starts_with("https://")) {
-            return Ok(());
-        }
-        let (key, final_path, part_path) = self.resolve_cache_paths(cache_key)?;
-        if std::fs::metadata(&final_path)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
-        {
-            touch_cache_file(&final_path);
-            return Ok(());
-        }
-        let gate = self.precache_gate.lock().await;
-        // Recheck after admission: the preceding task may have committed while
-        // this caller was waiting for the gate.
-        if std::fs::metadata(&final_path)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
-        {
-            touch_cache_file(&final_path);
-            return Ok(());
-        }
-        let immediate_next = rate_limit_bytes_per_sec.is_none();
-        let shared_completion = self
-            .active_precache
-            .lock()
-            .map_err(|_| "预缓存任务状态锁失败".to_string())?
-            .as_ref()
-            .filter(|active| active.cache_key == key && !(immediate_next && active.rate_limited))
-            .map(|active| active.completion.clone());
-        if let Some(completion) = shared_completion {
-            drop(gate);
-            return await_precache_completion(completion).await;
-        }
-        let permit = if immediate_next {
-            // Immediate next is playback-critical. Cancel any throttled
-            // far-ahead job, then wait for the single PMS stream permit.
-            self.cancel_active_precache();
-            self.download_permit
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| "下载并发控制失败".to_string())?
-        } else {
-            // Far-ahead warming is opportunistic and must never queue ahead of
-            // either active playback or an immediate-next download.
-            let Ok(permit) = self.download_permit.clone().try_acquire_owned() else {
-                return Ok(());
-            };
-            permit
-        };
-        if !self.playback_is_current(generation) {
-            return Ok(());
-        }
-        // The previous owner can finish between the admission recheck and the
-        // permit handoff. Avoid issuing a duplicate request or replacing an
-        // already-committed file (notably invalid on Windows).
-        if std::fs::metadata(&final_path)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
-        {
-            touch_cache_file(&final_path);
-            return Ok(());
-        }
-        let _ = std::fs::remove_file(&part_path);
-        let progress = DownloadProgress::new();
-        let progress_task = Arc::clone(&progress);
-        let part_for_task = part_path.clone();
-        let final_for_task = final_path;
-        let source_for_task = source.to_string();
-        let cache_root_for_task = self.cache_root.clone();
-        let cache_limit_bytes = Arc::clone(&self.cache_limit_bytes);
-        let protected_paths = self.protected_cache_paths();
-        let client = loopback_http_client(None)?;
-        let (completion_tx, completion_rx) =
-            tokio::sync::watch::channel::<Option<Result<(), String>>>(None);
-        let task = tauri::async_runtime::spawn(async move {
-            let _permit = permit;
-            let outcome = download_progressive(
-                &client,
-                &source_for_task,
-                &cache_root_for_task,
-                &part_for_task,
-                &final_for_task,
-                &progress_task,
-                rate_limit_bytes_per_sec,
-                cache_limit_bytes,
-                protected_paths,
-                3,
-            )
-            .await;
-            if let Err(error) = &outcome {
-                progress_task.failed.store(true, Ordering::SeqCst);
-                progress_task.wake();
-                eprintln!("[原生] 预缓存下载失败：{error}");
-            }
-            let _ = completion_tx.send(Some(outcome.map(|_| ())));
-        });
-        {
-            let mut active = self
-                .active_precache
-                .lock()
-                .map_err(|_| "预缓存任务状态锁失败".to_string())?;
-            if self.playback_is_current(generation) {
-                *active = Some(ActivePrecache {
-                    cache_key: key,
-                    rate_limited: rate_limit_bytes_per_sec.is_some(),
-                    progress: Arc::clone(&progress),
-                    part_path,
-                    handle: task,
-                    completion: completion_rx.clone(),
-                });
-            } else {
-                task.abort();
-                return Ok(());
-            }
-        }
-        drop(gate);
-        let outcome = await_precache_completion(completion_rx).await;
-        self.clear_active_precache(&progress);
-        outcome?;
-        self.enforce_audio_cache_limit();
-        Ok(())
-    }
-
-    /// Queue a fully-cached next track onto the rodio queue. The current
-    /// source keeps playing; when it ends, rodio pulls the queued source in
-    /// the same sample loop, producing a gapless PCM handoff. The marker flips
-    /// exactly when the handoff happens so the event forwarder can publish a
-    /// `track` event without any polling race.
-    pub fn queue_next_source(
+    /// Prepare the actual next track with a second segmented read head. Once
+    /// its bounded PCM queue is ready (or the media is already at EOF), append
+    /// it to rodio for a sample-contiguous handoff without downloading the
+    /// complete source first.
+    pub async fn queue_next_source(
         &self,
         index: i64,
         source: &str,
@@ -3271,27 +2095,6 @@ impl NativeAudioEngine {
                 .cloned()
                 .ok_or_else(|| "曲目不在队列中".to_string())?
         };
-        let (_, final_path, _) = self.resolve_cache_paths(cache_key.clone())?;
-        if !std::fs::metadata(&final_path)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
-        {
-            return Err("下一首尚未完整下载".to_string());
-        }
-        let file =
-            std::fs::File::open(&final_path).map_err(|e| format!("打开预排缓存失败: {e}"))?;
-        let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-        let decoder = Decoder::builder()
-            .with_data(file)
-            .with_byte_len(len)
-            .build()
-            .map_err(|e| format!("预排解码失败: {e}"))?;
-        let decoded_total = decoder
-            .total_duration()
-            .map(|duration| duration.as_secs_f64());
-        let (decoder, decode_state) =
-            spawn_threaded_decoder_with_health(decoder, None, Arc::clone(&self.health))
-                .map_err(|error| format!("预排{error}"))?;
         let mut metadata = metadata.unwrap_or_default();
         if metadata.title.as_deref().unwrap_or("").is_empty() {
             metadata.title = Some(track.title);
@@ -3302,11 +2105,89 @@ impl NativeAudioEngine {
         if metadata.album.as_deref().unwrap_or("").is_empty() {
             metadata.album = Some(track.album);
         }
-        let total = decoded_total.or_else(|| {
-            metadata
-                .duration_ms
-                .map(|milliseconds| milliseconds as f64 / 1000.0)
-        });
+        let metadata_duration_ms = metadata.duration_ms;
+        let (decoder, decode_state, decoded_total) = if source.starts_with("http://")
+            || source.starts_with("https://")
+        {
+            let reader = self.segment_cache.open_reader(
+                cache_key.as_deref(),
+                source,
+                CachePriority::Next,
+            )?;
+            let control = reader.control();
+            self.register_segment_prepare(generation, Arc::clone(&control))?;
+            let health = Arc::clone(&self.health);
+            let mut prepare_task = tauri::async_runtime::spawn_blocking(move || {
+                prepare_segment_decoder(reader, metadata_duration_ms, health)
+            });
+            let prepared =
+                match tokio::time::timeout(SEGMENT_DECODE_PREPARE_TIMEOUT, &mut prepare_task).await
+                {
+                    Ok(Ok(Ok(prepared))) => prepared,
+                    Ok(Ok(Err(error))) => {
+                        control.cancel();
+                        self.clear_segment_prepare(&control);
+                        return Err(format!("预排{error}"));
+                    }
+                    Ok(Err(error)) => {
+                        control.cancel();
+                        self.clear_segment_prepare(&control);
+                        return Err(format!("预排分段解码任务失败: {error}"));
+                    }
+                    Err(_) => {
+                        control.cancel();
+                        if tokio::time::timeout(SEGMENT_PREPARE_CANCEL_TIMEOUT, &mut prepare_task)
+                            .await
+                            .is_err()
+                        {
+                            prepare_task.abort();
+                        }
+                        self.clear_segment_prepare(&control);
+                        return Err("预排分段解码准备超时".to_string());
+                    }
+                };
+            let deadline = tokio::time::Instant::now() + SEGMENT_DECODE_PREPARE_TIMEOUT;
+            while !prepared.decode_state.ready_to_resume()
+                && !prepared.decode_state.finished.load(Ordering::SeqCst)
+                && !prepared.decode_state.worker_exited.load(Ordering::SeqCst)
+                && self.playback_is_current(generation)
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            self.clear_segment_prepare(&control);
+            if !self.playback_is_current(generation) {
+                prepared.decode_state.cancel_worker();
+                return Err("当前播放已切换".to_string());
+            }
+            if !prepared.decode_state.ready_to_resume() {
+                prepared.decode_state.cancel_worker();
+                return Err("下一首未能形成足够的解码缓冲".to_string());
+            }
+            (
+                prepared.decoder,
+                prepared.decode_state,
+                prepared.total_seconds,
+            )
+        } else {
+            let file = std::fs::File::open(source)
+                .map_err(|error| format!("打开预排媒体失败: {error}"))?;
+            let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            let decoder = Decoder::builder()
+                .with_data(file)
+                .with_byte_len(len)
+                .build()
+                .map_err(|error| format!("预排解码失败: {error}"))?;
+            let decoded_total = decoder
+                .total_duration()
+                .map(|duration| duration.as_secs_f64());
+            let (decoder, decode_state) =
+                spawn_threaded_decoder_with_health(decoder, None, Arc::clone(&self.health))
+                    .map_err(|error| format!("预排{error}"))?;
+            (decoder, decode_state, decoded_total)
+        };
+        let total = decoded_total
+            .or_else(|| metadata_duration_ms.map(|milliseconds| milliseconds as f64 / 1000.0));
         let artwork_url = metadata.artwork_url.clone().unwrap_or_default();
         let started = Arc::new(AtomicBool::new(false));
         let marker = HandoffMarker {
@@ -3387,6 +2268,7 @@ impl NativeAudioEngine {
             self.rebuild_after_pending_queue_change().await?;
         }
         self.queue_next_source(index, source, cache_key, metadata)
+            .await
     }
 
     /// Consume a queued source whose gapless handoff has started (the previous
@@ -3528,12 +2410,15 @@ impl NativeAudioEngine {
                 self.desired_playing.store(false, Ordering::SeqCst);
             }
             if let Some(pending) = snapshot.pending.as_ref() {
-                if let Err(error) = self.queue_next_source(
-                    pending.index as i64,
-                    &pending.source,
-                    pending.cache_key.clone(),
-                    Some(pending.metadata.clone()),
-                ) {
+                if let Err(error) = self
+                    .queue_next_source(
+                        pending.index as i64,
+                        &pending.source,
+                        pending.cache_key.clone(),
+                        Some(pending.metadata.clone()),
+                    )
+                    .await
+                {
                     // Current playback recovery is more important than a stale
                     // speculative tail; ordinary queue advance can load it.
                     eprintln!("[原生] 输出设备恢复后重新预排下一首失败：{error}");
@@ -4058,12 +2943,12 @@ fn validate_now_playing_metadata(
 pub fn native_audio_cache_status(
     state: tauri::State<'_, NativeAudioEngineSlot>,
 ) -> NativeCacheStatus {
-    let usage = audio_cache_usage(state.cache_root());
+    let usage = state.segment_cache_status();
     NativeCacheStatus {
-        size_bytes: usage.total_bytes(),
-        file_count: usage.complete_files,
+        size_bytes: usage.allocated_bytes,
+        file_count: usage.complete_entries,
         partial_size_bytes: usage.partial_bytes,
-        partial_file_count: usage.partial_files,
+        partial_file_count: usage.partial_entries,
         limit_bytes: state.cache_limit_bytes(),
     }
 }
@@ -4094,27 +2979,6 @@ pub async fn native_audio_load(
     engine
         .load_cached(&source, cache_key, metadata, autoplay.unwrap_or(true))
         .await
-}
-
-#[tauri::command]
-pub async fn native_audio_precache(
-    app: AppHandle,
-    audio_state: tauri::State<'_, NativeAudioEngineSlot>,
-    stream_proxy: tauri::State<'_, crate::stream_proxy::StreamProxy>,
-    source: String,
-    cache_key: Option<String>,
-    rate_limit: Option<bool>,
-) -> Result<(), String> {
-    if !stream_proxy.owns_audio_url(&source) {
-        return Err("音频地址不是当前 Cadilume 本机票据".to_string());
-    }
-    let engine = audio_state.ensure(&app)?;
-    let limit = if rate_limit.unwrap_or(false) {
-        Some(PRECACHE_RATE_LIMIT_BYTES_PER_SEC)
-    } else {
-        None
-    };
-    engine.precache(&source, cache_key, limit).await
 }
 
 #[tauri::command]
@@ -4408,7 +3272,6 @@ pub async fn native_queue_set_shuffle(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
 
     use super::*;
@@ -4470,25 +3333,8 @@ mod tests {
         std::fs::write(path, wav).unwrap();
     }
 
-    fn stalled_wave_probe_head() -> Vec<u8> {
-        const JUNK_BYTES: u32 = 1024 * 1024;
-        let mut head = Vec::with_capacity(512 * 1024);
-        head.extend_from_slice(b"RIFF");
-        head.extend_from_slice(&(JUNK_BYTES + 64).to_le_bytes());
-        head.extend_from_slice(b"WAVEJUNK");
-        head.extend_from_slice(&JUNK_BYTES.to_le_bytes());
-        head.resize(512 * 1024, 0);
-        head
-    }
-
     fn unique_temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("cadilume-{label}-{}", uuid::Uuid::new_v4()))
-    }
-
-    fn test_cache_paths(cache_root: &Path, identity: &str) -> (PathBuf, PathBuf) {
-        let (_, final_path, part_path) =
-            resolve_audio_cache_paths(cache_root, Some(identity)).unwrap();
-        (final_path, part_path)
     }
 
     struct StallingSource {
@@ -4736,67 +3582,6 @@ mod tests {
     }
 
     #[test]
-    fn backward_seek_interrupts_a_decoder_waiting_at_the_progressive_frontier() {
-        let full_wav = unique_temp_path("seek-interrupt-full.wav");
-        let partial_wav = unique_temp_path("seek-interrupt.audio.part");
-        write_test_wav_of_seconds(&full_wav, 30);
-        let bytes = std::fs::read(&full_wav).unwrap();
-        let partial_len = 64 * 1024;
-        std::fs::write(&partial_wav, &bytes[..partial_len]).unwrap();
-
-        let progress = DownloadProgress::new();
-        progress
-            .downloaded
-            .store(partial_len as u64, Ordering::SeqCst);
-        progress
-            .expected_len
-            .store(bytes.len() as u64, Ordering::SeqCst);
-        let reader = ProgressiveFile {
-            file: std::fs::File::open(&partial_wav).unwrap(),
-            progress: Arc::clone(&progress),
-            reader_interrupt_epoch: 0,
-        };
-        let decoder = Decoder::builder()
-            .with_data(reader)
-            .with_seekable(true)
-            .with_byte_len(bytes.len() as u64)
-            .build()
-            .unwrap();
-        let (mut source, state) =
-            spawn_threaded_decoder_with_progress(decoder, Some(Arc::clone(&progress))).unwrap();
-
-        std::thread::sleep(Duration::from_millis(100));
-        source.try_seek(Duration::from_millis(100)).unwrap();
-        let seek_deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while (state.seek_target.lock().unwrap().is_some()
-            || state.buffered_chunks.load(Ordering::SeqCst) == 0)
-            && std::time::Instant::now() < seek_deadline
-        {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(
-            state.seek_target.lock().unwrap().is_none(),
-            "向后 seek 不应继续等待尚未下载的前沿"
-        );
-        assert!(
-            state.buffered_chunks.load(Ordering::SeqCst) > 0,
-            "定位到已下载区域后应重新产生 PCM"
-        );
-
-        drop(source);
-        progress.cancel();
-        let exit_deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while !state.worker_exited.load(Ordering::SeqCst)
-            && std::time::Instant::now() < exit_deadline
-        {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(state.worker_exited.load(Ordering::SeqCst));
-        let _ = std::fs::remove_file(full_wav);
-        let _ = std::fs::remove_file(partial_wav);
-    }
-
-    #[test]
     fn heartbeat_watchdog_requires_visible_two_phase_staleness() {
         let base = std::time::Instant::now();
         let heartbeat = base;
@@ -4855,137 +3640,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_identity_is_stable_isolated_and_not_exposed_in_paths() {
-        let identity = "server-secret:account-a:track-7:original:/library/parts/99.flac";
-        let same = audio_cache_key(Some(identity)).unwrap();
-        assert_eq!(same, audio_cache_key(Some(identity)).unwrap());
-        assert_eq!(same.len(), 64, "SHA-256 key 应为 64 位十六进制");
-        assert!(same.chars().all(|character| character.is_ascii_hexdigit()));
-        assert!(!same.contains("server") && !same.contains("track"));
-        assert_ne!(
-            same,
-            audio_cache_key(Some("server-b:track-7:original")).unwrap()
-        );
-        assert_ne!(
-            same,
-            audio_cache_key(Some("server-secret:track-7:192")).unwrap()
-        );
-        assert!(audio_cache_key(Some(&"x".repeat(MAX_AUDIO_CACHE_IDENTITY_BYTES + 1))).is_err());
-    }
-
-    #[test]
-    fn lru_evicts_oldest_complete_file_without_touching_active_partial() {
-        let cache_root = unique_temp_path("lru-cache");
-        let downloads = audio_cache_dir(&cache_root);
-        std::fs::create_dir_all(&downloads).unwrap();
-        let old = downloads.join("old.audio");
-        let recent = downloads.join("recent.audio");
-        let active = downloads.join("active.audio.part");
-        std::fs::write(&old, [1u8; 6]).unwrap();
-        std::fs::write(&recent, [2u8; 6]).unwrap();
-        std::fs::write(&active, [3u8; 64]).unwrap();
-        filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(10, 0)).unwrap();
-        filetime::set_file_mtime(&recent, filetime::FileTime::from_unix_time(20, 0)).unwrap();
-
-        enforce_audio_cache_limit_with_limit(&cache_root, 70);
-
-        assert!(!old.exists(), "最旧的完整缓存应先淘汰");
-        assert!(recent.exists(), "达到容量后应保留较新的完整缓存");
-        assert!(active.exists(), "LRU 不得删除活动 .part");
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[test]
-    fn cache_usage_includes_partial_files_and_protected_capacity_can_fail() {
-        let cache_root = unique_temp_path("cache-budget");
-        let downloads = audio_cache_dir(&cache_root);
-        std::fs::create_dir_all(&downloads).unwrap();
-        let old = downloads.join("old.audio");
-        let protected = downloads.join("protected.audio");
-        let partial = downloads.join("active.audio.part");
-        std::fs::write(&old, [1u8; 6]).unwrap();
-        std::fs::write(&protected, [2u8; 6]).unwrap();
-        std::fs::write(&partial, [3u8; 64]).unwrap();
-        filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(10, 0)).unwrap();
-
-        let usage = audio_cache_usage(&cache_root);
-        assert_eq!(usage.total_bytes(), 76);
-        assert_eq!(usage.complete_files, 2);
-        assert_eq!(usage.partial_files, 1);
-        assert!(!ensure_audio_cache_capacity(
-            &cache_root,
-            70,
-            10,
-            std::slice::from_ref(&protected),
-        ));
-        assert!(!old.exists(), "准入应先淘汰最旧的完整缓存");
-        assert!(protected.exists(), "当前来源不得被准入淘汰");
-        assert!(partial.exists(), "活动 .part 只能由下载任务清理");
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[test]
-    fn retry_reservation_replaces_its_existing_partial_without_double_counting() {
-        let cache_root = unique_temp_path("retry-cache-budget");
-        let downloads = audio_cache_dir(&cache_root);
-        std::fs::create_dir_all(&downloads).unwrap();
-        let retained = downloads.join("retained.audio");
-        let retry_partial = downloads.join("retry.audio.part");
-        std::fs::write(&retained, [1u8; 40]).unwrap();
-        std::fs::write(&retry_partial, [2u8; 60]).unwrap();
-
-        assert!(ensure_audio_cache_capacity_excluding(
-            &cache_root,
-            100,
-            60,
-            &[],
-            Some(&retry_partial),
-        ));
-        assert!(retained.exists(), "重试不得因重复计算自身 .part 而淘汰缓存");
-        assert!(
-            retry_partial.exists(),
-            "实际截断由同 inode 的下一次写入负责"
-        );
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[test]
-    fn slot_startup_removes_only_orphaned_partial_files() {
-        let cache_root = unique_temp_path("startup-cleanup-cache");
-        let downloads = audio_cache_dir(&cache_root);
-        std::fs::create_dir_all(&downloads).unwrap();
-        let complete = downloads.join("keep.audio");
-        let orphan = downloads.join("remove.audio.part");
-        std::fs::write(&complete, [1u8; 8]).unwrap();
-        std::fs::write(&orphan, [2u8; 8]).unwrap();
-
-        let _slot = NativeAudioEngineSlot::new(cache_root.clone());
-
-        assert!(complete.exists());
-        assert!(!orphan.exists());
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[test]
-    fn slot_startup_enforces_the_persisted_cache_limit() {
-        let cache_root = unique_temp_path("startup-cache-limit");
-        let downloads = audio_cache_dir(&cache_root);
-        std::fs::create_dir_all(&downloads).unwrap();
-        let old = downloads.join("old.audio");
-        let recent = downloads.join("recent.audio");
-        std::fs::write(&old, [1u8; 6]).unwrap();
-        std::fs::write(&recent, [2u8; 6]).unwrap();
-        filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(10, 0)).unwrap();
-        filetime::set_file_mtime(&recent, filetime::FileTime::from_unix_time(20, 0)).unwrap();
-
-        let _slot = NativeAudioEngineSlot::new_with_cache_limit(cache_root.clone(), 6);
-
-        assert!(!old.exists(), "启动时应先淘汰最旧的超额缓存");
-        assert!(recent.exists(), "启动时应保留限额内的最近缓存");
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[test]
     fn now_playing_metadata_accepts_frontend_camel_case_artwork_url() {
         let metadata: NowPlayingMetadata = serde_json::from_value(serde_json::json!({
             "title": "Track",
@@ -5000,93 +3654,6 @@ mod tests {
             Some("http://127.0.0.1:1234/artwork/ticket")
         );
         assert_eq!(metadata.duration_ms, Some(180_000));
-    }
-
-    #[test]
-    fn cancelling_progressive_reader_wakes_it_immediately() {
-        let path = unique_temp_path("cancel-reader.part");
-        std::fs::write(&path, []).unwrap();
-        let progress = DownloadProgress::new();
-        let progress_for_reader = Arc::clone(&progress);
-        let path_for_reader = path.clone();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut reader = ProgressiveFile {
-                file: std::fs::File::open(path_for_reader).unwrap(),
-                progress: progress_for_reader,
-                reader_interrupt_epoch: 0,
-            };
-            let mut byte = [0u8; 1];
-            let result = reader.read(&mut byte);
-            let _ = done_tx.send(result);
-        });
-
-        std::thread::sleep(Duration::from_millis(50));
-        let started = std::time::Instant::now();
-        progress.cancel();
-        let result = done_rx
-            .recv_timeout(Duration::from_millis(500))
-            .expect("取消后 reader 必须立即醒来")
-            .expect("取消按 EOF 结束，不应产生 I/O 错误");
-        assert_eq!(result, 0);
-        assert!(
-            started.elapsed() < Duration::from_millis(250),
-            "取消唤醒不应依赖 150ms 轮询超时"
-        );
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn stop_does_not_wait_for_a_progressive_reader() {
-        let cache_root = unique_temp_path("stop-progressive-cache");
-        let full_wav = unique_temp_path("stop-progressive.wav");
-        let partial_wav = unique_temp_path("stop-progressive.audio.part");
-        write_test_wav_of_seconds(&full_wav, 30);
-        let bytes = std::fs::read(&full_wav).unwrap();
-        std::fs::write(&partial_wav, &bytes[..8 * 1024]).unwrap();
-
-        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
-        engine.player().set_volume(0.0);
-        let progress = DownloadProgress::new();
-        progress.downloaded.store(8 * 1024, Ordering::SeqCst);
-        progress
-            .expected_len
-            .store(bytes.len() as u64, Ordering::SeqCst);
-        *engine.active_download.lock().unwrap() = Some(ActiveDownload {
-            progress: Arc::clone(&progress),
-            part_path: partial_wav.clone(),
-            handle: tauri::async_runtime::spawn(async {
-                std::future::pending::<()>().await;
-            }),
-        });
-        let reader = ProgressiveFile {
-            file: std::fs::File::open(&partial_wav).unwrap(),
-            progress,
-            reader_interrupt_epoch: 0,
-        };
-        let decoder = Decoder::builder()
-            .with_data(reader)
-            .with_seekable(true)
-            .with_byte_len(bytes.len() as u64)
-            .build()
-            .unwrap();
-        engine.player().append(decoder);
-        engine.loaded.store(true, Ordering::SeqCst);
-        engine.player().play();
-        // The short partial body is exhausted well before this deadline, so
-        // the audio thread is waiting for bytes when stop is issued.
-        tokio::time::sleep(Duration::from_millis(600)).await;
-
-        let started = std::time::Instant::now();
-        engine.stop_immediately();
-        assert!(
-            started.elapsed() < Duration::from_millis(250),
-            "stop 必须是非阻塞控制操作，实际 {:?}",
-            started.elapsed()
-        );
-        let _ = std::fs::remove_file(full_wav);
-        let _ = std::fs::remove_file(partial_wav);
-        let _ = std::fs::remove_dir_all(cache_root);
     }
 
     #[tokio::test]
@@ -5179,263 +3746,6 @@ mod tests {
                 .iter()
                 .all(|state| state.worker_exited.load(Ordering::SeqCst)),
             "160 个被替换的解码 worker 都必须在有界时间内退出"
-        );
-        let _ = std::fs::remove_file(wav);
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn immediate_next_preempts_rate_limited_ahead_and_cleans_partial_file() {
-        let wav = unique_temp_path("precache-priority.wav");
-        write_test_wav_of_seconds(&wav, 1);
-        let data = std::fs::read(&wav).unwrap();
-        let ahead_data = data.clone();
-        let next_data = data.clone();
-        let app = axum::Router::new()
-            .route(
-                "/ahead.wav",
-                axum::routing::get(|| async move {
-                    (
-                        [(axum::http::header::CONTENT_TYPE, "audio/wav")],
-                        ahead_data,
-                    )
-                }),
-            )
-            .route(
-                "/next.wav",
-                axum::routing::get(|| async move {
-                    ([(axum::http::header::CONTENT_TYPE, "audio/wav")], next_data)
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let cache_root = unique_temp_path("precache-priority-cache");
-        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
-        engine.player().set_volume(0.0);
-        let ahead_url = format!("http://127.0.0.1:{}/ahead.wav", addr.port());
-        let next_url = format!("http://127.0.0.1:{}/next.wav", addr.port());
-        let ahead_engine = Arc::clone(&engine);
-        let ahead = tokio::spawn(async move {
-            ahead_engine
-                .precache(&ahead_url, Some("ahead".into()), Some(1024))
-                .await
-        });
-        let active_deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while engine.active_precache.lock().unwrap().is_none()
-            && std::time::Instant::now() < active_deadline
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            engine.active_precache.lock().unwrap().is_some(),
-            "限速 ahead 应先进入活动状态"
-        );
-
-        let started = std::time::Instant::now();
-        engine
-            .precache(&next_url, Some("next".into()), None)
-            .await
-            .expect("即时下一首应抢占并完成");
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "即时下一首不能等待限速 ahead，实际 {:?}",
-            started.elapsed()
-        );
-        let (next_cache, _) = test_cache_paths(&cache_root, "next");
-        assert_eq!(
-            std::fs::metadata(next_cache).unwrap().len(),
-            data.len() as u64
-        );
-        let (_, ahead_partial) = test_cache_paths(&cache_root, "ahead");
-        assert!(!ahead_partial.exists(), "取消的 ahead 不得遗留 .part");
-        assert!(ahead.await.unwrap().is_err(), "被抢占的 ahead 应明确中止");
-        let _ = std::fs::remove_file(wav);
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn concurrent_same_identity_precache_uses_one_http_request() {
-        let wav = unique_temp_path("deduplicated-precache.wav");
-        write_test_wav_of_seconds(&wav, 2);
-        let data = Arc::new(std::fs::read(&wav).unwrap());
-        let requests = Arc::new(AtomicUsize::new(0));
-        let app = axum::Router::new().route(
-            "/same.wav",
-            axum::routing::get({
-                let data = Arc::clone(&data);
-                let requests = Arc::clone(&requests);
-                move || {
-                    let data = Arc::clone(&data);
-                    let requests = Arc::clone(&requests);
-                    async move {
-                        requests.fetch_add(1, AtomicOrdering::SeqCst);
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        (
-                            [(axum::http::header::CONTENT_TYPE, "audio/wav")],
-                            data.as_ref().clone(),
-                        )
-                    }
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let cache_root = unique_temp_path("deduplicated-precache-cache");
-        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
-        engine.player().set_volume(0.0);
-        let url = format!("http://127.0.0.1:{}/same.wav", addr.port());
-        let mut callers = Vec::new();
-        for _ in 0..64 {
-            let engine = Arc::clone(&engine);
-            let url = url.clone();
-            callers.push(tokio::spawn(async move {
-                engine
-                    .precache(&url, Some("same-media-identity".into()), None)
-                    .await
-            }));
-        }
-        for caller in callers {
-            caller.await.unwrap().expect("共享预取调用均应成功");
-        }
-        assert_eq!(
-            requests.load(AtomicOrdering::SeqCst),
-            1,
-            "64 个同键调用只能触发一次 HTTP 下载"
-        );
-        let (cached, partial) = test_cache_paths(&cache_root, "same-media-identity");
-        assert_eq!(std::fs::metadata(cached).unwrap().len(), data.len() as u64);
-        assert!(!partial.exists());
-        let _ = std::fs::remove_file(wav);
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn immediate_next_promotes_same_identity_out_of_rate_limited_ahead() {
-        let wav = unique_temp_path("promoted-precache.wav");
-        write_test_wav_of_seconds(&wav, 2);
-        let data = std::fs::read(&wav).unwrap();
-        let requests = Arc::new(AtomicUsize::new(0));
-        let app = axum::Router::new().route(
-            "/promote.wav",
-            axum::routing::get({
-                let data = data.clone();
-                let requests = Arc::clone(&requests);
-                move || {
-                    let data = data.clone();
-                    let requests = Arc::clone(&requests);
-                    async move {
-                        requests.fetch_add(1, AtomicOrdering::SeqCst);
-                        ([(axum::http::header::CONTENT_TYPE, "audio/wav")], data)
-                    }
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let cache_root = unique_temp_path("promoted-precache-cache");
-        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
-        engine.player().set_volume(0.0);
-        let url = format!("http://127.0.0.1:{}/promote.wav", addr.port());
-        let ahead_engine = Arc::clone(&engine);
-        let ahead_url = url.clone();
-        let ahead = tokio::spawn(async move {
-            ahead_engine
-                .precache(&ahead_url, Some("same-promoted-media".into()), Some(1024))
-                .await
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while (engine.active_precache.lock().unwrap().is_none()
-            || requests.load(AtomicOrdering::SeqCst) == 0)
-            && std::time::Instant::now() < deadline
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let started = std::time::Instant::now();
-        engine
-            .precache(&url, Some("same-promoted-media".into()), None)
-            .await
-            .expect("即时下一首应取消同键限速任务并全速完成");
-        assert!(started.elapsed() < Duration::from_secs(3));
-        assert!(ahead.await.unwrap().is_err());
-        assert_eq!(requests.load(AtomicOrdering::SeqCst), 2);
-        let (cached, partial) = test_cache_paths(&cache_root, "same-promoted-media");
-        assert_eq!(std::fs::metadata(cached).unwrap().len(), data.len() as u64);
-        assert!(!partial.exists());
-        let _ = std::fs::remove_file(wav);
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn account_reset_cancels_active_precache_and_removes_all_audio_files() {
-        let wav = unique_temp_path("account-reset.wav");
-        write_test_wav_of_seconds(&wav, 4);
-        let data = std::fs::read(&wav).unwrap();
-        let app = axum::Router::new().route(
-            "/slow.wav",
-            axum::routing::get(move || {
-                let data = data.clone();
-                async move { ([(axum::http::header::CONTENT_TYPE, "audio/wav")], data) }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let cache_root = unique_temp_path("account-reset-cache");
-        let slot = Arc::new(NativeAudioEngineSlot::new(cache_root.clone()));
-        let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
-        engine.player().set_volume(0.0);
-        *slot.inner.lock().unwrap() = Some(Arc::clone(&engine));
-        let url = format!("http://127.0.0.1:{}/slow.wav", addr.port());
-        let precache_url = url.clone();
-        let precache_engine = Arc::clone(&engine);
-        let precache = tokio::spawn(async move {
-            precache_engine
-                .precache(&precache_url, Some("account-a-media".into()), Some(1024))
-                .await
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while engine.active_precache.lock().unwrap().is_none()
-            && std::time::Instant::now() < deadline
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(engine.active_precache.lock().unwrap().is_some());
-
-        slot.reset_and_clear_cache().await.unwrap();
-
-        assert!(precache.await.unwrap().is_err(), "账号清理应取消活动预取");
-        let remaining = std::fs::read_dir(audio_cache_dir(&cache_root))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                name.ends_with(".audio") || name.ends_with(".audio.part")
-            })
-            .count();
-        assert_eq!(remaining, 0, "账号清理后不得残留完整或部分音频缓存");
-        assert!(!engine.loaded.load(Ordering::SeqCst));
-        assert!(engine.queue.lock().unwrap().tracks.is_empty());
-        assert!(slot.current().is_none(), "账号清理后旧引擎必须从 slot 移除");
-        assert!(!engine.accepting_work.load(Ordering::SeqCst));
-        assert!(
-            engine
-                .precache(&url, Some("stale-account-media".into()), None)
-                .await
-                .is_err(),
-            "已经移除的账号引擎不得重新创建缓存"
         );
         let _ = std::fs::remove_file(wav);
         let _ = std::fs::remove_dir_all(cache_root);
@@ -5606,7 +3916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_download_then_play() {
+    async fn no_range_http_fallback_downloads_then_plays() {
         let flac = PathBuf::from("/tmp/sample.flac");
         if !flac.exists() {
             eprintln!("跳过：/tmp/sample.flac 不存在");
@@ -5638,563 +3948,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1_200)).await;
         let position = engine.player().get_pos().as_secs_f64();
         assert!(position > 0.2, "缓存下载后播放进度应前进，实际 {position}");
-        let (cached, _) = test_cache_paths(&cache_root, "sample-cache-test");
-        assert!(cached.exists(), "缓存文件应落盘");
+        let status = engine.segment_cache.status();
+        assert_eq!(status.complete_entries, 1, "连续兼容下载应完整落盘");
         engine.stop_immediately();
-    }
-
-    #[tokio::test]
-    async fn stalled_progressive_probe_times_out_cleans_and_allows_next_quality() {
-        let next_wav = unique_temp_path("progressive-probe-next.wav");
-        write_test_wav_of_seconds(&next_wav, 1);
-        let next_data = std::fs::read(&next_wav).unwrap();
-        let stalled_head = stalled_wave_probe_head();
-        let stalled_requests = Arc::new(AtomicUsize::new(0));
-        let app = axum::Router::new()
-            .route(
-                "/stalled.wav",
-                axum::routing::get({
-                    let requests = Arc::clone(&stalled_requests);
-                    move || {
-                        let requests = Arc::clone(&requests);
-                        let head = stalled_head.clone();
-                        async move {
-                            requests.fetch_add(1, AtomicOrdering::SeqCst);
-                            let first = futures_util::stream::once(async move {
-                                Ok::<_, std::io::Error>(axum::body::Bytes::from(head))
-                            });
-                            let body = first.chain(futures_util::stream::pending::<
-                                Result<axum::body::Bytes, std::io::Error>,
-                            >());
-                            axum::response::Response::builder()
-                                .header(axum::http::header::CONTENT_TYPE, "audio/wav")
-                                .body(axum::body::Body::from_stream(body))
-                                .unwrap()
-                        }
-                    }
-                }),
-            )
-            .route(
-                "/next.wav",
-                axum::routing::get(move || {
-                    let data = next_data.clone();
-                    async move { ([(axum::http::header::CONTENT_TYPE, "audio/wav")], data) }
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        let cache_root = unique_temp_path("progressive-probe-timeout-cache");
-        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
-        engine.player().set_volume(0.0);
-        let stalled_url = format!("http://127.0.0.1:{}/stalled.wav", addr.port());
-        let stalled = tokio::time::timeout(
-            Duration::from_secs(3),
-            engine.load_cached_with_prepare_timeout(
-                &stalled_url,
-                Some("stalled-original".into()),
-                None,
-                true,
-                Duration::from_millis(300),
-            ),
-        )
-        .await
-        .expect("渐进探测必须在有界时间内返回")
-        .expect_err("永久停流的媒体探测必须失败并允许质量回退");
-        assert!(
-            stalled.contains("媒体解码准备超过"),
-            "应由解码准备超时终止，实际：{stalled}"
-        );
-        assert_eq!(stalled_requests.load(AtomicOrdering::SeqCst), 1);
-        let (_, stalled_part) = test_cache_paths(&cache_root, "stalled-original");
-        assert!(!stalled_part.exists(), "超时后不得残留 .audio.part");
-        assert!(
-            engine.active_download.lock().unwrap().is_none(),
-            "超时后活动下载槽必须释放"
-        );
-
-        let next_url = format!("http://127.0.0.1:{}/next.wav", addr.port());
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            engine.load_cached_and_play(&next_url, Some("fallback-320".into()), None),
-        )
-        .await
-        .expect("下一质量请求不应被旧探测或下载任务阻塞")
-        .expect("下一质量请求应立即开始播放");
-        assert!(engine.loaded.load(Ordering::SeqCst));
-        let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        while engine.active_download.lock().unwrap().is_some()
-            && tokio::time::Instant::now() < cleanup_deadline
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            engine.active_download.lock().unwrap().is_none(),
-            "完整下载完成后活动下载槽应自动释放"
-        );
-        engine.stop_immediately_and_wait().await;
-        let _ = std::fs::remove_file(next_wav);
         let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn download_retries_after_transient_truncation() {
-        use axum::response::IntoResponse;
-        let wav = std::env::temp_dir().join("cadilume-download-retry.wav");
-        write_test_wav_of_seconds(&wav, 1);
-        let data = std::fs::read(&wav).unwrap();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_for_server = Arc::clone(&attempts);
-        let data_for_server = data.clone();
-        let app = axum::Router::new().route(
-            "/retry.wav",
-            axum::routing::get(move || {
-                let attempts = Arc::clone(&attempts_for_server);
-                let data = data_for_server.clone();
-                async move {
-                    let count = attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                    if count == 0 {
-                        // 第一次：声明完整长度但只发送一半，触发完整性校验失败。
-                        let partial = data[..data.len() / 2].to_vec();
-                        let stream = futures_util::stream::iter(vec![
-                            Ok::<_, std::io::Error>(axum::body::Bytes::from(partial)),
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "simulated truncated response",
-                            )),
-                        ]);
-                        let mut response =
-                            axum::response::Response::new(axum::body::Body::from_stream(stream));
-                        response.headers_mut().insert(
-                            axum::http::header::CONTENT_LENGTH,
-                            axum::http::HeaderValue::from_str(&data.len().to_string()).unwrap(),
-                        );
-                        return response;
-                    }
-                    ([(axum::http::header::CONTENT_TYPE, "audio/wav")], data).into_response()
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let url = format!("http://127.0.0.1:{}/retry.wav", addr.port());
-        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-retry");
-        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
-        engine.player().set_volume(0.0);
-        engine
-            .load_cached_and_play(&url, Some("retry-test".into()), None)
-            .await
-            .expect("首次截断后重试应成功并开始播放");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(
-            !engine.player().empty() && !engine.player().is_paused(),
-            "重试成功后应处于播放中"
-        );
-        assert!(attempts.load(AtomicOrdering::SeqCst) >= 2, "应至少请求两次");
-        let (cached, _) = test_cache_paths(&cache_root, "retry-test");
-        assert_eq!(
-            std::fs::metadata(&cached)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0),
-            data.len() as u64,
-            "重试成功后缓存应完整"
-        );
-        engine.stop_immediately();
-        let _ = std::fs::remove_file(&wav);
-        let _ = std::fs::remove_dir_all(&cache_root);
-    }
-
-    #[tokio::test]
-    async fn chunked_download_without_content_length_commits_complete_cache() {
-        let wav = unique_temp_path("chunked-download.wav");
-        write_test_wav_of_seconds(&wav, 1);
-        let data = std::fs::read(&wav).unwrap();
-        let data_for_server = data.clone();
-        let app = axum::Router::new().route(
-            "/chunked.wav",
-            axum::routing::get(move || {
-                let split = data_for_server.len() / 2;
-                let chunks = vec![
-                    Ok::<_, std::io::Error>(axum::body::Bytes::copy_from_slice(
-                        &data_for_server[..split],
-                    )),
-                    Ok(axum::body::Bytes::copy_from_slice(
-                        &data_for_server[split..],
-                    )),
-                ];
-                async move {
-                    axum::response::Response::new(axum::body::Body::from_stream(
-                        futures_util::stream::iter(chunks),
-                    ))
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let cache_root = unique_temp_path("chunked-download-cache");
-        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
-        engine.player().set_volume(0.0);
-        let url = format!("http://127.0.0.1:{}/chunked.wav", addr.port());
-
-        engine
-            .precache(&url, Some("chunked-media".into()), None)
-            .await
-            .expect("无 Content-Length 的完整响应应可缓存");
-
-        let (cached, partial) = test_cache_paths(&cache_root, "chunked-media");
-        assert_eq!(std::fs::read(cached).unwrap(), data);
-        assert!(!partial.exists());
-        let _ = std::fs::remove_file(wav);
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn empty_download_is_rejected_without_cache_residue() {
-        let requests = Arc::new(AtomicUsize::new(0));
-        let app = axum::Router::new().route(
-            "/empty",
-            axum::routing::get({
-                let requests = Arc::clone(&requests);
-                move || {
-                    requests.fetch_add(1, AtomicOrdering::SeqCst);
-                    async { axum::response::Response::new(axum::body::Body::empty()) }
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let cache_root = unique_temp_path("empty-download-cache");
-        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
-        engine.player().set_volume(0.0);
-        let url = format!("http://127.0.0.1:{}/empty", addr.port());
-
-        let outcome = engine
-            .precache(&url, Some("empty-media".into()), None)
-            .await;
-
-        assert!(outcome.is_err());
-        assert_eq!(
-            requests.load(AtomicOrdering::SeqCst),
-            3,
-            "空响应应按策略重试"
-        );
-        let (cached, partial) = test_cache_paths(&cache_root, "empty-media");
-        assert!(!cached.exists());
-        assert!(!partial.exists());
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn oversized_download_is_rejected_before_allocating_cache_space() {
-        let app = axum::Router::new().route(
-            "/oversized",
-            axum::routing::get(|| async {
-                axum::response::Response::builder()
-                    .header(
-                        axum::http::header::CONTENT_LENGTH,
-                        (audio_cache_limit_bytes(DEFAULT_AUDIO_CACHE_LIMIT_GIB) + 1).to_string(),
-                    )
-                    .body(axum::body::Body::from_stream(
-                        futures_util::stream::pending::<
-                            Result<axum::body::Bytes, std::convert::Infallible>,
-                        >(),
-                    ))
-                    .unwrap()
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let cache_root = unique_temp_path("oversized-cache");
-        let (_, final_path, part_path) =
-            resolve_audio_cache_paths(&cache_root, Some("oversized-media")).unwrap();
-        let progress = DownloadProgress::new();
-        let limit = Arc::new(AtomicU64::new(audio_cache_limit_bytes(
-            DEFAULT_AUDIO_CACHE_LIMIT_GIB,
-        )));
-        let error = download_progressive_once(
-            &loopback_http_client(None).unwrap(),
-            &format!("http://127.0.0.1:{}/oversized", addr.port()),
-            &cache_root,
-            &part_path,
-            &final_path,
-            &progress,
-            None,
-            limit.as_ref(),
-            &[],
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("单文件缓存上限"), "实际错误：{error}");
-        assert!(!part_path.exists());
-        assert!(!final_path.exists());
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn lowering_cache_limit_during_download_aborts_before_commit() {
-        let first = vec![1_u8; 1024 * 1024];
-        let second = vec![2_u8; 1024 * 1024];
-        let app = axum::Router::new().route(
-            "/dynamic-limit",
-            axum::routing::get({
-                let first = first.clone();
-                let second = second.clone();
-                move || {
-                    let first = first.clone();
-                    let second = second.clone();
-                    async move {
-                        let total_length = first.len() + second.len();
-                        let first_chunk = futures_util::stream::once(async move {
-                            Ok::<_, std::io::Error>(axum::body::Bytes::from(first))
-                        });
-                        let second_chunk = futures_util::stream::once(async move {
-                            tokio::time::sleep(Duration::from_millis(250)).await;
-                            Ok::<_, std::io::Error>(axum::body::Bytes::from(second))
-                        });
-                        axum::response::Response::builder()
-                            .header(axum::http::header::CONTENT_LENGTH, total_length.to_string())
-                            .body(axum::body::Body::from_stream(
-                                first_chunk.chain(second_chunk),
-                            ))
-                            .unwrap()
-                    }
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        let cache_root = unique_temp_path("dynamic-limit-cache");
-        let protected_path = audio_cache_dir(&cache_root).join("protected.audio");
-        std::fs::create_dir_all(audio_cache_dir(&cache_root)).unwrap();
-        std::fs::write(&protected_path, vec![3_u8; 2 * 1024 * 1024]).unwrap();
-        let (_, final_path, part_path) =
-            resolve_audio_cache_paths(&cache_root, Some("dynamic-limit-media")).unwrap();
-        let progress = DownloadProgress::new();
-        let limit = Arc::new(AtomicU64::new(4 * 1024 * 1024));
-        let progress_for_task = Arc::clone(&progress);
-        let limit_for_task = Arc::clone(&limit);
-        let root_for_task = cache_root.clone();
-        let part_for_task = part_path.clone();
-        let final_for_task = final_path.clone();
-        let protected_for_task = vec![protected_path.clone()];
-        let url = format!("http://127.0.0.1:{}/dynamic-limit", addr.port());
-        let client = loopback_http_client(None).unwrap();
-        let task = tokio::spawn(async move {
-            download_progressive(
-                &client,
-                &url,
-                &root_for_task,
-                &part_for_task,
-                &final_for_task,
-                &progress_for_task,
-                None,
-                limit_for_task,
-                protected_for_task,
-                1,
-            )
-            .await
-        });
-        let first_deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while progress.downloaded.load(Ordering::SeqCst) < 1024 * 1024
-            && std::time::Instant::now() < first_deadline
-        {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert_eq!(progress.downloaded.load(Ordering::SeqCst), 1024 * 1024);
-        limit.store(3 * 1024 * 1024, Ordering::SeqCst);
-
-        let result = tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .expect("动态上限变化后下载应及时结束")
-            .expect("下载任务不应 panic");
-        assert!(result.unwrap_err().contains("空间"));
-        assert_eq!(
-            progress.downloaded.load(Ordering::SeqCst),
-            1024 * 1024,
-            "降低组合缓存上限后，第二个 chunk 应在写入前被拒绝"
-        );
-        assert!(!part_path.exists(), "动态限额失败后不得残留 .part");
-        assert!(!final_path.exists(), "动态限额失败后不得提交完整缓存");
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn cancelling_final_rate_limit_never_commits_partial_download() {
-        let data = vec![1_u8, 2, 3, 4];
-        let data_for_server = data.clone();
-        let app = axum::Router::new().route(
-            "/cancel-final",
-            axum::routing::get(move || {
-                let data = data_for_server.clone();
-                async move {
-                    axum::response::Response::builder()
-                        .header(axum::http::header::CONTENT_TYPE, "audio/wav")
-                        .header(axum::http::header::CONTENT_LENGTH, data.len().to_string())
-                        .body(axum::body::Body::from(data))
-                        .unwrap()
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        let cache_root = unique_temp_path("cancel-final-download-cache");
-        let (_, final_path, part_path) =
-            resolve_audio_cache_paths(&cache_root, Some("cancel-final-download")).unwrap();
-        let progress = DownloadProgress::new();
-        let progress_for_cancel = Arc::clone(&progress);
-        let cancel_task = tokio::spawn(async move {
-            // The 1 byte/s pacing keeps the future inside its final wait long
-            // enough for this cancellation to race the commit deterministically.
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            progress_for_cancel.cancel();
-        });
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            download_progressive(
-                &loopback_http_client(None).unwrap(),
-                &format!("http://127.0.0.1:{}/cancel-final", addr.port()),
-                &cache_root,
-                &part_path,
-                &final_path,
-                &progress,
-                Some(1),
-                Arc::new(AtomicU64::new(audio_cache_limit_bytes(
-                    DEFAULT_AUDIO_CACHE_LIMIT_GIB,
-                ))),
-                Vec::new(),
-                1,
-            ),
-        )
-        .await
-        .expect("取消限速下载应及时返回");
-        cancel_task.await.unwrap();
-        assert!(result.unwrap_err().contains("取消"));
-        assert!(!part_path.exists(), "取消后不得残留 .part");
-        assert!(!final_path.exists(), "取消后不得提交完整缓存");
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[tokio::test]
-    async fn precache_honors_rate_limit_and_commits_complete_file() {
-        let wav = std::env::temp_dir().join("cadilume-rate-limit.wav");
-        write_test_wav_of_seconds(&wav, 1);
-        let data = std::fs::read(&wav).unwrap();
-        let data_for_server = data.clone();
-        let app = axum::Router::new().route(
-            "/rate.wav",
-            axum::routing::get(|| async move {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "audio/wav")],
-                    data_for_server,
-                )
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let url = format!("http://127.0.0.1:{}/rate.wav", addr.port());
-        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-rate");
-        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
-        engine.player().set_volume(0.0);
-
-        // 约 44KB 文件、限制 22KB/s：理想耗时约 2 秒，容忍 1.2 秒以上。
-        let started = std::time::Instant::now();
-        engine
-            .precache(&url, Some("rate-limit-test".into()), Some(22 * 1024))
-            .await
-            .expect("限速预取应完整完成");
-        let elapsed = started.elapsed().as_secs_f64();
-        assert!(elapsed >= 1.2, "限速预取应至少耗时 1.2 秒，实际 {elapsed}");
-        let (cached, _) = test_cache_paths(&cache_root, "rate-limit-test");
-        assert_eq!(
-            std::fs::metadata(&cached)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0),
-            data.len() as u64,
-            "限速预取文件应完整落盘"
-        );
-        let _ = std::fs::remove_file(&wav);
-        let _ = std::fs::remove_dir_all(&cache_root);
-    }
-
-    #[tokio::test]
-    async fn corrupt_cache_file_is_self_healed_and_redownloaded() {
-        let wav = std::env::temp_dir().join("cadilume-self-heal.wav");
-        write_test_wav_of_seconds(&wav, 1);
-        let data = std::fs::read(&wav).unwrap();
-        let data_for_server = data.clone();
-        let app = axum::Router::new().route(
-            "/heal.wav",
-            axum::routing::get(|| async move {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "audio/wav")],
-                    data_for_server,
-                )
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let url = format!("http://127.0.0.1:{}/heal.wav", addr.port());
-        let cache_root = std::env::temp_dir().join("cadilume-rodio-cache-heal");
-        let downloads = cache_root.join("downloads");
-        std::fs::create_dir_all(&downloads).unwrap();
-        // 预置一个损坏的缓存文件（头合法但内容不是有效媒体）。
-        let (healed, _) = test_cache_paths(&cache_root, "heal-test");
-        std::fs::write(
-            &healed,
-            b"RIFFxxxxWAVEfmt corrupt garbage that cannot decode",
-        )
-        .unwrap();
-
-        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
-        engine.player().set_volume(0.0);
-        engine
-            .load_cached_and_play(&url, Some("heal-test".into()), None)
-            .await
-            .expect("损坏缓存应自动重下并开始播放");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(
-            !engine.player().empty() && !engine.player().is_paused(),
-            "自愈后应处于播放中"
-        );
-        assert_eq!(
-            std::fs::metadata(&healed)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0),
-            data.len() as u64,
-            "损坏缓存应被完整新文件替换"
-        );
-        engine.stop_immediately();
-        let _ = std::fs::remove_file(&wav);
-        let _ = std::fs::remove_dir_all(&cache_root);
     }
 
     fn queue_track(key: &str) -> QueueTrack {
@@ -6467,8 +4224,6 @@ mod tests {
                 false,
             );
         }
-        let (cached_b, _) = test_cache_paths(&cache_root, "queue-reconcile-b");
-        std::fs::copy(&wav_b, cached_b).unwrap();
         engine
             .queue_next_source(
                 1,
@@ -6476,6 +4231,7 @@ mod tests {
                 Some("queue-reconcile-b".into()),
                 None,
             )
+            .await
             .unwrap();
         let original_player = engine.player();
         assert_eq!(original_player.len(), 2);
@@ -6505,9 +4261,6 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(250)).await;
         let position_before_quality_change = engine.playback_position_seconds();
-        let (cached_b_new_quality, _) =
-            test_cache_paths(&cache_root, "queue-reconcile-b-new-quality");
-        std::fs::copy(&wav_b, cached_b_new_quality).unwrap();
         engine
             .queue_next_source_replacing(
                 1,
@@ -6577,17 +4330,14 @@ mod tests {
             queue.current_index = 0;
             queue.repeat = NativeRepeatMode::All;
         }
-        // 下一首缓存文件缺失。
+        // 下一首本地来源缺失。
         let missing = engine.queue_next_source(1, "missing", Some("missing-b".into()), None);
-        assert!(missing.is_err(), "缓存未就绪时不应预排");
+        assert!(missing.await.is_err(), "来源未就绪时不应预排");
         // 队列已前进（与前端预取目标不一致）时拒绝。
         engine.queue.lock().unwrap().current_index = 1;
-        let downloads = cache_root.join("downloads");
-        std::fs::create_dir_all(&downloads).unwrap();
-        let (stale_cache, _) = test_cache_paths(&cache_root, "stale-b");
-        std::fs::copy(&wav, stale_cache).unwrap();
-        let stale = engine.queue_next_source(1, "stale", Some("stale-b".into()), None);
-        assert!(stale.is_err(), "预排顺序与队列不一致时应拒绝");
+        let stale =
+            engine.queue_next_source(1, wav.to_str().unwrap(), Some("stale-b".into()), None);
+        assert!(stale.await.is_err(), "预排顺序与队列不一致时应拒绝");
         engine.stop_immediately();
         let _ = std::fs::remove_file(&wav);
     }
@@ -6609,10 +4359,6 @@ mod tests {
             queue.repeat = NativeRepeatMode::All;
             queue.shuffle = false;
         }
-        let downloads = cache_root.join("downloads");
-        std::fs::create_dir_all(&downloads).unwrap();
-        let (gapless_cache, _) = test_cache_paths(&cache_root, "gapless-b");
-        std::fs::copy(&wav_b, gapless_cache).unwrap();
         engine
             .queue_next_source(
                 1,
@@ -6626,6 +4372,7 @@ mod tests {
                     artwork_url: None,
                 }),
             )
+            .await
             .unwrap();
         assert_eq!(engine.player().len(), 2, "预排后播放器队列应有两首");
         *engine.artwork_bytes.lock().unwrap() = Some(Arc::new(vec![9u8; 8]));
@@ -6692,10 +4439,6 @@ mod tests {
             queue.repeat = NativeRepeatMode::All;
             queue.shuffle = false;
         }
-        let downloads = cache_root.join("downloads");
-        std::fs::create_dir_all(&downloads).unwrap();
-        let (gapless_mp3_cache, _) = test_cache_paths(&cache_root, "gapless-b.mp3");
-        std::fs::copy(&mp3_b, gapless_mp3_cache).unwrap();
         engine
             .queue_next_source(
                 1,
@@ -6703,6 +4446,7 @@ mod tests {
                 Some("gapless-b.mp3".into()),
                 None,
             )
+            .await
             .unwrap();
 
         // MP3 带编码 padding（约 2 秒曲目）：等 A 结束、B 的握手标记翻转。
@@ -6779,8 +4523,6 @@ mod tests {
             queue.history_cursor = Some(1);
         }
         engine.load_and_play(wav.to_str().unwrap()).unwrap();
-        let (next_cache, _) = test_cache_paths(&cache_root, "device-next");
-        std::fs::copy(&next_wav, next_cache).unwrap();
         engine
             .queue_next_source(
                 2,
@@ -6792,6 +4534,7 @@ mod tests {
                     ..NowPlayingMetadata::default()
                 }),
             )
+            .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(600)).await;
         let snapshot = engine.capture_playback_snapshot();
@@ -7019,7 +4762,7 @@ mod tests {
     /// 真实 PMS 端到端回归（默认忽略，显式运行：
     /// `cargo test -- --ignored real_pms_engine_regression --nocapture`）。
     /// 使用开发态明文 token，从真实资料库取两首小曲目，静音走完整链路：
-    /// 真实下载 → 磁盘缓存 → 渐进播放 → 预排下一首 → 无缝交接 → seek → 暂停/恢复。
+    /// 分段读取 → 稀疏缓存 → 预排下一首 → 无缝交接 → seek → 暂停/恢复。
     #[tokio::test]
     #[ignore = "需要真实 PMS 与开发 token"]
     async fn real_pms_engine_regression() {
@@ -7036,16 +4779,8 @@ mod tests {
         };
         let cache_root =
             std::env::temp_dir().join(format!("cadilume-pms-regression-{}", uuid::Uuid::new_v4()));
-        let downloads_dir = cache_root.join("downloads");
-        std::fs::create_dir_all(&downloads_dir).expect("创建回归缓存目录失败");
         let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
         engine.player().set_volume(0.0);
-        // 先串行预缓存 B（引擎每次新建下载客户端、单条活跃流），
-        // 避免真实服务器（尤其免费/共享账号）的单流限制打断并发下载。
-        engine
-            .precache(&stream_url(&track_b.4), Some(track_b.2.clone()), None)
-            .await
-            .expect("真实 PMS 曲目 B 应完整预缓存");
         engine
             .load_cached_and_play(
                 &stream_url(&track_a.4),
@@ -7093,15 +4828,10 @@ mod tests {
                     artwork_url: None,
                 }),
             )
+            .await
             .expect("真实 PMS 曲目 B 应能预排");
 
-        // A 完整落盘后 seek 到结尾附近，让真实曲目在几秒内自然结束。
-        let (a_final, _) = test_cache_paths(&cache_root, &track_a.2);
-        let download_deadline = std::time::Instant::now() + Duration::from_secs(60);
-        while !a_final.exists() && std::time::Instant::now() < download_deadline {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        assert!(a_final.exists(), "真实 PMS 曲目 A 应完整落盘");
+        // 稀疏 reader 会按需拉取 seek 目标区间，无需等待整首完整落盘。
         let a_duration = engine.duration_seconds.lock().unwrap().unwrap_or(0.0);
         assert!(a_duration > 10.0, "真实 PMS 曲目 A 时长应有效");
         engine
@@ -7150,16 +4880,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!engine.player().is_paused(), "真实 PMS 恢复应生效");
 
-        // 两首曲目都应落入缓存。
-        let downloads = cache_root.join("downloads");
-        let cache_files = std::fs::read_dir(&downloads)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".audio"))
-            .count();
-        assert!(cache_files >= 2, "真实 PMS 回归后缓存应有至少两首曲目");
-        eprintln!("真实 PMS 引擎回归通过：下载/缓存/渐进播放/预排/无缝交接/seek/暂停恢复均正常");
+        let status = engine.segment_cache.status();
+        assert!(
+            status.complete_entries + status.partial_entries >= 2,
+            "真实 PMS 回归后应记录当前曲目与下一首分段"
+        );
+        eprintln!("真实 PMS 引擎回归通过：分段缓存/播放/预排/无缝交接/seek/暂停恢复均正常");
 
         engine.stop_immediately();
         let _ = std::fs::remove_dir_all(&cache_root);
@@ -7167,8 +4893,8 @@ mod tests {
 
     /// 真实 PMS 高频切歌回归（默认忽略，显式运行：
     /// `cargo test -- --ignored real_pms_engine_rapid_switch_regression --nocapture`）。
-    /// 串行预缓存多首真实曲目后连续快速加载/切换两轮（≥20 次加载），中途穿插
-    /// seek 与暂停/恢复，覆盖历史上 WebView 播放的高频切歌 error4/卡顿场景。
+    /// 连续快速加载/切换两轮（≥20 次加载），中途穿插 seek 与暂停/恢复，
+    /// 覆盖分段缓存复用与历史上 WebView 播放的高频切歌 error4/卡顿场景。
     #[tokio::test]
     #[ignore = "需要真实 PMS 与开发 token"]
     async fn real_pms_engine_rapid_switch_regression() {
@@ -7191,14 +4917,6 @@ mod tests {
             std::env::temp_dir().join(format!("cadilume-pms-rapid-{}", uuid::Uuid::new_v4()));
         let engine = Arc::new(NativeAudioEngine::new(cache_root.clone()).unwrap());
         engine.player().set_volume(0.0);
-
-        // 串行预缓存全部选中曲目（单条活跃流，避免服务器单流限制）。
-        for (_, _, rating_key, _title, part_key) in &selected {
-            engine
-                .precache(&stream_url(part_key), Some(rating_key.clone()), None)
-                .await
-                .expect("高频切换预缓存应完整");
-        }
 
         // 两轮连续快速加载/切换，模拟用户高频点下一首；第二轮穿插 seek/暂停。
         let mut loads = 0usize;
@@ -7241,20 +4959,15 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(120)).await;
                     assert!(!engine.player().is_paused(), "高频切歌中恢复应生效");
                 }
-                eprintln!("[回归] 高频切歌 #{loads} 缓存命中");
+                eprintln!("[回归] 高频切歌 #{loads} 分段读取成功");
             }
         }
 
-        let downloads = cache_root.join("downloads");
-        let cache_files = std::fs::read_dir(&downloads)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".audio"))
-            .count();
+        let status = engine.segment_cache.status();
+        let cache_entries = status.complete_entries + status.partial_entries;
         assert!(
-            cache_files >= selected.len(),
-            "高频切换后缓存应覆盖全部选中曲目"
+            cache_entries >= selected.len(),
+            "高频切换后分段索引应覆盖全部选中曲目"
         );
         assert!(loads >= 20, "高频切换应至少 20 次加载，实际 {loads}");
         eprintln!("真实 PMS 高频切歌回归通过：{loads} 次加载/切换、seek/暂停恢复均无失败");

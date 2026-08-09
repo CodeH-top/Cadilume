@@ -43,29 +43,25 @@
 
 ## 2026-08-07 — 原生播放引擎替换完成（dev 分支，Phase 0-6）
 
-- 播放链路：PMS 票据 → Rust 流代理 → 渐进下载缓存（ProgressiveFile 等待式
-  Read+Seek，头部 256KB 就绪即播）→ rodio（cpal+symphonia）出声；进度/结束/
-  远程命令事件经 native-audio://event 回传前端。
+- 播放链路：PMS 票据 → Rust 流代理 → `SegmentReader`（256 KiB 首段、缺口按需取对齐
+  2 MiB Range、稀疏文件持久化）→ rodio（cpal+symphonia）出声；进度/结束/远程命令
+  事件经 native-audio://event 回传前端。
 - 队列权威已迁入 Rust：tracks/currentIndex/repeat/shuffle 决策在
   NativeAudioEngine.queue，自然结束由事件线程决策并 emit queue-item；前端每次
   加载前 nativeQueueSet 同步快照，next/previous 走 Rust 命令。
 - WebView 播放退役完成：usePlayer native-only，删除 DualAudioPool/预缓冲/
   MediaError 回退约 1400 行及对应单测（163 项全绿）。开发态不再创建 HTMLAudio。
-- 缓存（2026-08-09 更新）：默认 1 GiB、可选 1–10 GiB；完整 `.audio` 与活动
-  `.audio.part` 共同计费，按 mtime LRU 淘汰未受保护的完整文件。预缓冲只完整下载 Rust
-  队列确认的真实下一首，完成后挂入 rodio 队列。
+- 缓存（2026-08-09 v2）：固定 1 GiB，以稀疏文件实际分配块计费；LRU 淘汰未活动条目，
+  并要求写后至少保留 1 GiB 系统可用空间。预缓冲只为 Rust 确认的真实下一首建立第二
+  read head，有界 PCM 就绪后挂入 rodio，不等待整首下载。
 - 严格 gapless（29dc62b）：预排下一首解码器进 rodio 顺序队列，
   `HandoffMarker` 在样本级交接（上一首耗尽、下一首首个样本被拉取）时翻转，
   事件线程据此发 `track` 事件；前端只镜像 UI 不重载流。重复一首/队列不一致时
   自动降级为 ended + queue-item 的普通顺序播放。MP3 padding 由 rodio 队列帧对齐
   处理，FLAC 天然无缝。
-- 缓存完整性（290b93a）：`download_progressive` 按 Content-Length 校验，
-  静默截断不再提交为完整缓存。
-- 预取收口（2026-08-09 更新）：历史“下下首”限速预热已从产品流程删除，只保留当前播放
-  和真实下一首；Rust 的低优先级限速接口仍保留为受测底层能力，但前端当前不调用。
-- 缓存自愈与小文件竞态（90c0d75）：命中缓存解码失败时删坏文件并走渐进下载
-  自愈；`download_progressive` 必须先 rename 再置 `finished`（否则 <256KB 的
-  小文件在等待方打开 `.part` 前已被改名，导致“打开渐进缓存失败”）。
+- 预取收口（2026-08-09 更新）：历史“下下首”限速预热与独立 precache 命令已删除，只保留
+  当前播放和真实下一首两个分段 read head；下一首遇到无 Range 的 `200` 必须直接放弃，
+  不能退回完整文件下载。
 - Now Playing 封面与字典契约已于 2026-08-08 完成：objc2 标记为 MainThreadOnly 的
   NSImage/MPMediaItemArtwork 只在主线程构造和发布，真实控制中心已验收封面、元数据、
   时间轴、状态和远程命令。
@@ -261,19 +257,19 @@
 - Plexamp 公开资料能稳定确认的是原则，不是当前私有实现细节：ahead 数量与磁盘容量独立；
   准入必须计入即将缓存的目标文件；低磁盘要主动收口；播放产生的流式缓存与用户显式离线
   下载是不同语义。历史版本的具体默认值或 ahead 数量不能继续当作当前事实。
-- Cadilume 已落地 Rust 有界流式缓存：默认 1 GiB、设置范围 1–10 GiB；当前曲目渐进下载，
-  可选预取真实下一首，不扫描曲库或整条队列。已知 `Content-Length` 时预留整首，上限变化
-  立即重做预留；未知长度约每 1 MiB 扩展窗口；最终提交前再次按完整文件与所有 `.part`
-  的实时总量复核。重试排除自身旧 `.part`，避免重复计费。
-- “14 首约 491 MB”是原始质量完整媒体的累计，平均约 35 MiB/首，符合 FLAC/ALAC 等无损
-  文件量级；它不是下载整个资料库的证据。连续收听的旧曲会留在 LRU 内，主动范围至多比已
-  实际播放的曲目多一个真实下一首。
+- Cadilume 已落地固定 1 GiB 的 Rust 稀疏分段缓存 v2：当前首段 256 KiB，后续解码/seek
+  缺口按对齐 2 MiB Range 获取；可选下一首使用第二 read head，只解码到约 4 秒有界 PCM，
+  不扫描曲库或整条队列。只有当前曲目在 PMS 不支持 Range 时允许连续兼容读取。
+- “14 首约 491 MB”来自旧版原始质量完整媒体累计，平均约 35 MiB/首，符合 FLAC/ALAC 等
+  无损文件量级；v2 启动会删除旧 `downloads`，之后只保存实际读取区间。完整听完一首仍可能
+  最终缓存整首，但未播放的资料库项目不会被主动下载。
 - 本机网易云音乐 macOS 3.1.10 的 `online_play_cache` 使用 `.uc!` 稀疏媒体文件、`.idx!`
   的 `size/zone` 区间索引和独立 `.info` 元数据。现场 3 个媒体逻辑大小约 123.5 MB，实际
   分配约 65.6 MiB，说明只写入已请求区间，适合减少跳歌浪费。
-- Cadilume 当前 `ProgressiveFile`/symphonia 依赖连续前缀；直接制造稀疏洞会把未下载区域
-  当成零字节或损坏媒体。若采用网易云式策略，必须另做 Range 缺口调度、区间合并索引、
-  缺口感知随机 Reader、seek/read-head 优先级、崩溃恢复和按实际分配块计费，作为缓存 v2。
+- v2 的关键不是单纯 `set_len` 制造稀疏文件，而是 `index.json` 只声明已 sync 的区间，
+  `SegmentReader` 在读取缺口前先拉取并校验 Range。APFS 对扩展后的零区间不保证持续保持
+  稀疏，恢复和写入后须显式用 `F_PUNCHHOLE` 打掉所有未提交区间；预算用 `st_blocks * 512`
+  统计实际分配块，不能用逻辑 `len()`。
 - Plexamp 连接层可借鉴且已落地：并行测试全部连接（非 relay 优先、relay 最后兜底），
   用 `/identity` 的 machineIdentifier 校验连接归属（防错连；期望值必须是 PMS 服务器
   标识 `resource.clientIdentifier`，不是客户端自身标识，否则所有连接都会被判不可达）；

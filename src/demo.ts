@@ -43,7 +43,6 @@ export const demoBootstrap: BootstrapResponse = {
   statusIconPlatform: "macos",
   deviceName: "演示 Mac",
   brandPreset: "amber",
-  audioCacheLimitGib: 1,
   account: {
     id: 1,
     username: "hogan",

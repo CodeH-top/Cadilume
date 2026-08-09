@@ -82,7 +82,6 @@ import {
   openWindowsAudioSettings,
   removeTracksFromPlaylist,
   searchLibrary,
-  setAudioCacheLimitGib as saveAudioCacheLimitGib,
   setStatusIconEnabled as saveStatusIconEnabled,
   setBrandPreset as saveBrandPreset,
   setDeviceName as saveDeviceName,
@@ -201,7 +200,6 @@ interface MusicShellRuntime {
   statusIconSaving: boolean;
   deviceName: string;
   quality: StreamQuality;
-  audioCacheLimitGib: number;
   prebufferNext: boolean;
   cacheStatus?: CacheStatus;
   nativeCacheStatus?: NativeAudioCacheStatus;
@@ -217,7 +215,6 @@ interface MusicShellRuntime {
   changeBrandPreset: BrandPresetChange;
   changeDeviceName: (nextDeviceName: string) => Promise<string>;
   changeQuality: (value: StreamQuality) => void;
-  changeAudioCacheLimit: (value: number) => Promise<void>;
   setServerId: (value: string) => void;
   setSectionKey: (value: string) => void;
   setPrebufferNext: (value: boolean) => void;
@@ -488,11 +485,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [statusIconSaving, setStatusIconSaving] = useState(false);
   const [deviceName, setDeviceName] = useState(initialSession.deviceName);
   const [quality, setQuality] = useState<StreamQuality>(() => readStoredQuality(initialPlaybackSession?.quality));
-  const [audioCacheLimitGib, setAudioCacheLimitGib] = useState(() => (
-    Number.isInteger(initialSession.audioCacheLimitGib)
-      ? Math.min(10, Math.max(1, initialSession.audioCacheLimitGib))
-      : 1
-  ));
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>();
   const [nativeCacheStatus, setNativeCacheStatus] = useState<NativeAudioCacheStatus>();
   const [cacheStatusError, setCacheStatusError] = useState<string>();
@@ -885,19 +877,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     }
   };
 
-  const changeAudioCacheLimit = useCallback(async (value: number) => {
-    const normalized = Math.min(10, Math.max(1, Math.round(value)));
-    const previous = audioCacheLimitGib;
-    setAudioCacheLimitGib(normalized);
-    try {
-      setAudioCacheLimitGib(await saveAudioCacheLimitGib(normalized));
-      await refreshCacheStatus();
-    } catch (reason) {
-      setAudioCacheLimitGib(previous);
-      notify(reason instanceof Error ? reason.message : String(reason), "error");
-    }
-  }, [audioCacheLimitGib, notify, refreshCacheStatus]);
-
   const clearCache = async () => {
     cacheStatusRequestRef.current += 1;
     setCacheBusy(true);
@@ -1123,7 +1102,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     statusIconSaving,
     deviceName,
     quality,
-    audioCacheLimitGib,
     prebufferNext: player.prebufferNext,
     cacheStatus,
     nativeCacheStatus,
@@ -1139,7 +1117,6 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     changeBrandPreset,
     changeDeviceName,
     changeQuality,
-    changeAudioCacheLimit,
     setServerId,
     setSectionKey,
     setPrebufferNext: player.setPrebufferNext,
@@ -1946,7 +1923,6 @@ function RoutePage() {
       brandPreset={runtime.brandPreset}
       deviceName={runtime.deviceName}
       quality={runtime.quality}
-      audioCacheLimitGib={runtime.audioCacheLimitGib}
       prebufferNext={runtime.prebufferNext}
       cacheStatus={runtime.cacheStatus}
       nativeCacheStatus={runtime.nativeCacheStatus}
@@ -1969,7 +1945,6 @@ function RoutePage() {
       onBrandPreset={runtime.changeBrandPreset}
       onEditDeviceName={runtime.openDeviceNameDialog}
       onQuality={runtime.changeQuality}
-      onAudioCacheLimit={(value) => void runtime.changeAudioCacheLimit(value)}
       onServerChange={runtime.setServerId}
       onSectionChange={runtime.setSectionKey}
       onPrebufferNext={runtime.setPrebufferNext}
@@ -2005,7 +1980,6 @@ interface ContentViewProps {
   brandPreset: BrandPreset;
   deviceName: string;
   quality: StreamQuality;
-  audioCacheLimitGib: number;
   prebufferNext: boolean;
   cacheStatus?: CacheStatus;
   nativeCacheStatus?: NativeAudioCacheStatus;
@@ -2028,7 +2002,6 @@ interface ContentViewProps {
   onBrandPreset: BrandPresetChange;
   onEditDeviceName: () => void;
   onQuality: (value: StreamQuality) => void;
-  onAudioCacheLimit: (value: number) => void;
   onServerChange: (value: string) => void;
   onSectionChange: (value: string) => void;
   onPrebufferNext: (value: boolean) => void;
@@ -3442,12 +3415,12 @@ function SettingsView(props: ContentViewProps) {
       : "正在统计…";
   const cacheDescription = props.cacheStatus ? `${props.cacheStatus.fileCount} 个缓存文件` : undefined;
   const nativeCacheSummary = props.nativeCacheStatus
-    ? `${formatBytes(props.nativeCacheStatus.size_bytes)} / ${formatBytes(props.nativeCacheStatus.limit_bytes)}`
-    : `暂无 / ${props.audioCacheLimitGib} GiB`;
+    ? `${formatBytes(props.nativeCacheStatus.size_bytes)} / 1 GiB`
+    : "暂无 / 1 GiB";
   const nativeCacheDescription = props.nativeCacheStatus
     ? [
       props.nativeCacheStatus.file_count ? `${props.nativeCacheStatus.file_count} 首完整音频` : "暂无完整音频",
-      props.nativeCacheStatus.partial_file_count ? `${props.nativeCacheStatus.partial_file_count} 首下载中` : undefined,
+      props.nativeCacheStatus.partial_file_count ? `${props.nativeCacheStatus.partial_file_count} 首部分缓存` : undefined,
     ].filter(Boolean).join(" · ")
     : undefined;
   return (
@@ -3494,21 +3467,10 @@ function SettingsView(props: ContentViewProps) {
       <SettingsGroup icon={<Database size={18} />} title="缓存">
         <div className="cache-row">
           <span className="cache-row-copy" aria-live="polite"><strong>封面缓存</strong><span>{cacheSummary}{cacheDescription && ` · ${cacheDescription}`}</span></span>
-          <button className="danger-button" type="button" aria-label="清理封面与音频缓存" disabled={props.cacheBusy || (!props.cacheStatus?.fileCount && !props.nativeCacheStatus?.file_count && !props.nativeCacheStatus?.partial_file_count)} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
+          <button className="danger-button" type="button" aria-label="清理封面与音频缓存" disabled={props.cacheBusy || (!props.cacheStatus?.fileCount && !props.nativeCacheStatus?.size_bytes)} onClick={props.onClearCache}>{props.cacheBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}清理缓存</button>
         </div>
         <div className="cache-row">
           <span className="cache-row-copy" aria-live="polite"><strong>音频缓存</strong><span>{nativeCacheSummary}{nativeCacheDescription && ` · ${nativeCacheDescription}`}</span></span>
-          <SettingsSelect
-            label="音频缓存上限"
-            value={String(props.audioCacheLimitGib)}
-            placeholder="选择上限"
-            disabled={props.cacheBusy}
-            options={Array.from({ length: 10 }, (_, index) => {
-              const gib = index + 1;
-              return { value: String(gib), label: `${gib} GiB` };
-            })}
-            onValueChange={(value) => props.onAudioCacheLimit(Number(value))}
-          />
         </div>
       </SettingsGroup>
       <SettingsGroup icon={<Server size={18} />} title="音乐来源">

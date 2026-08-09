@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioClearCache, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioPrecache, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
+import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioClearCache, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { readOutputDevicePreference, writeOutputDevicePreference } from "./outputDevicePreference";
 import { playbackLog } from "./playbackLog";
@@ -739,7 +739,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const streamUrlInflightRef = useRef(new Map<string, Promise<string>>());
   const streamUrlInflightAtRef = useRef(new Map<string, number>());
   const loadRequestRef = useRef(0);
-  const precacheRequestRef = useRef(0);
+  const nextSourceRequestRef = useRef(0);
   const serverIdRef = useRef(serverId);
   const qualityRef = useRef(quality);
   const queueServerIdRef = useRef<string | undefined>(undefined);
@@ -1170,7 +1170,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     // and delete files; otherwise a stale WebView promise can recreate a cache
     // entry immediately after the user pressed Clear.
     loadRequestRef.current += 1;
-    precacheRequestRef.current += 1;
+    nextSourceRequestRef.current += 1;
     const timer = persistedSessionTimerRef.current;
     if (timer !== undefined) {
       window.clearTimeout(timer);
@@ -1390,7 +1390,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       // the old session look like it belongs to the newly selected PMS.
       flushPlaybackSession();
       loadRequestRef.current += 1;
-      precacheRequestRef.current += 1;
+      nextSourceRequestRef.current += 1;
       if (isDesktopRuntime()) {
         void nativeQueueBarrierRef.current!.enqueue(async () => {
           await nativeAudioStop().catch(() => undefined);
@@ -1585,19 +1585,19 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const tracks = queueRef.current;
     if (!tracks.length || currentIndex < 0) return;
     if (!serverId) return;
-    const requestId = ++precacheRequestRef.current;
+    const requestId = ++nextSourceRequestRef.current;
     void (async () => {
       try {
         // Rust owns the queue decision. Using the same reserved shuffle
         // candidate for prefetch and natural advance prevents a random frontend
         // preview from disagreeing with the native gapless queue.
         const nextIndex = await nativeQueueBarrierRef.current!.enqueue(() => nativeQueuePeekNext(true));
-        if (precacheRequestRef.current !== requestId || nextIndex == null) return;
+        if (nextSourceRequestRef.current !== requestId || nextIndex == null) return;
         const nextTrack = tracks[nextIndex];
         if (!nextTrack) return;
-        // Only the actual next item is warmed. A second full-track download can
-        // consume hundreds of MiB before the listener has expressed any intent
-        // to continue, while the current track remains progressively streamed.
+        // Only Rust's actual next item gets a second segmented read head. Rust
+        // queues it after its bounded PCM buffer is ready; no complete-file
+        // download is required before the gapless handoff can be prepared.
         const artworkTicketPromise = playbackArtworkTicket(serverId, nextTrack);
         const attemptedQualities: StreamQuality[] = [];
         let activeQuality: StreamQuality | undefined = quality;
@@ -1610,12 +1610,8 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
               activeQuality,
               attemptedQualities.length > 0,
             );
-            if (precacheRequestRef.current !== requestId) return;
+            if (nextSourceRequestRef.current !== requestId) return;
             const nextCacheIdentity = nativeAudioCacheIdentity(serverId, nextTrack, activeQuality);
-            await nativeAudioPrecache(url, nextCacheIdentity);
-            if (precacheRequestRef.current !== requestId) return;
-            // Carry the complete source identity into Rust. Device switching and
-            // Now Playing remain correct after a sample-level gapless handoff.
             await nativeAudioQueueNextSource(nextIndex, url, nextCacheIdentity, {
               title: nextTrack.title,
               artist: trackArtist(nextTrack),
@@ -1625,7 +1621,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             });
             if (!nextTrack.imageUrl) {
               void artworkTicketPromise.then((artworkTicket) => {
-                if (!artworkTicket || precacheRequestRef.current !== requestId) return;
+                if (!artworkTicket || nextSourceRequestRef.current !== requestId) return;
                 return nativeAudioSetArtwork(
                   nextIndex,
                   nextTrack.ratingKey,
@@ -1635,7 +1631,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             }
             break;
           } catch {
-            if (precacheRequestRef.current !== requestId) return;
+            if (nextSourceRequestRef.current !== requestId) return;
             appendAttemptedQuality(attemptedQualities, activeQuality, sourceStreamQuality(url));
             activeQuality = playbackFallbackQualities(
               quality,
@@ -1651,7 +1647,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       }
     })();
     return () => {
-      if (precacheRequestRef.current === requestId) precacheRequestRef.current += 1;
+      if (nextSourceRequestRef.current === requestId) nextSourceRequestRef.current += 1;
     };
   }, [currentIndex, outputSinkId, prebufferNext, quality, queue, repeat, requestStreamUrl, serverId, shuffle]);
 
