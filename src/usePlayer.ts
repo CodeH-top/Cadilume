@@ -46,6 +46,7 @@ const FALLBACK_QUALITY_ORDER: readonly FallbackStreamQuality[] = ["320", "256", 
  */
 export interface PersistedPlaybackTrack {
   ratingKey: string;
+  queueInstanceId?: string;
   key: string;
   type: "track";
   title: string;
@@ -87,6 +88,39 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
 const finiteNumber = (value: unknown): value is number => (
   typeof value === "number" && Number.isFinite(value)
 );
+
+let queueInstanceSequence = 0;
+
+function validQueueInstanceId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized && normalized.length <= 128 && /^[a-z\d._:-]+$/iu.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+function createQueueInstanceId(): string {
+  const randomUUID = globalThis.crypto?.randomUUID?.bind(globalThis.crypto);
+  if (randomUUID) return randomUUID();
+  queueInstanceSequence += 1;
+  return `queue-${Date.now().toString(36)}-${queueInstanceSequence.toString(36)}`;
+}
+
+/** Preserve existing queue occurrences while repairing legacy or duplicate IDs. */
+export function ensureQueueInstanceIds(items: readonly PlexItem[]): PlexItem[] {
+  const seen = new Set<string>();
+  return items.map((item) => {
+    let queueInstanceId = validQueueInstanceId(item.queueInstanceId);
+    if (!queueInstanceId || seen.has(queueInstanceId)) queueInstanceId = createQueueInstanceId();
+    seen.add(queueInstanceId);
+    return item.queueInstanceId === queueInstanceId ? item : { ...item, queueInstanceId };
+  });
+}
+
+/** A newly queued item is always a new occurrence, even when it is the same song. */
+function createQueueInstances(items: readonly PlexItem[]): PlexItem[] {
+  return items.map((item) => ({ ...item, queueInstanceId: createQueueInstanceId() }));
+}
 
 /**
  * Versioned identity for the native disk cache. Rust hashes this value before
@@ -155,6 +189,8 @@ function compactPersistedTrack(item: PlexItem): PersistedPlaybackTrack | null {
     type: "track",
     title: item.title,
   };
+  const queueInstanceId = validQueueInstanceId(item.queueInstanceId);
+  if (queueInstanceId) compact.queueInstanceId = queueInstanceId;
   const copyString = (name: "parentTitle" | "parentRatingKey" | "originalTitle" | "grandparentTitle" | "grandparentRatingKey" | "thumb" | "art") => {
     const value = safePersistedPath(item[name]);
     if (value) compact[name] = value;
@@ -196,6 +232,7 @@ function restorePersistedTrack(value: unknown): PersistedPlaybackTrack | null {
   if (!isRecord(value) || value.type !== "track") return null;
   const item = {
     ratingKey: value.ratingKey,
+    queueInstanceId: value.queueInstanceId,
     key: value.key,
     type: "track" as const,
     title: value.title,
@@ -242,7 +279,7 @@ export function createPersistedPlaybackSession(input: {
 }): PersistedPlaybackSession | null {
   if (!safePersistedPath(input.serverId) || !STREAM_QUALITY_VALUES.includes(input.quality)) return null;
   const requestedIndex = Number.isInteger(input.currentIndex) ? input.currentIndex : -1;
-  const compactEntries = input.queue
+  const compactEntries = ensureQueueInstanceIds(input.queue)
     .map((item, originalIndex) => ({ originalIndex, track: compactPersistedTrack(item) }))
     .filter((entry): entry is { originalIndex: number; track: PersistedPlaybackTrack } => Boolean(entry.track));
   const requestedEntry = compactEntries.find((entry) => entry.originalIndex === requestedIndex);
@@ -284,7 +321,7 @@ export function parsePersistedPlaybackSession(raw: string | null | undefined, no
     if (!Array.isArray(value.queue) || value.queue.length > PLAYBACK_SESSION_MAX_QUEUE) return null;
     const queue = value.queue.map(restorePersistedTrack);
     if (queue.some((item): item is null => item === null)) return null;
-    const restoredQueue = queue as PersistedPlaybackTrack[];
+    const restoredQueue = ensureQueueInstanceIds(queue as PersistedPlaybackTrack[]) as PersistedPlaybackTrack[];
     if (!Number.isInteger(value.currentIndex) || (value.currentIndex as number) < -1 || (value.currentIndex as number) >= restoredQueue.length) return null;
     if (!finiteNumber(value.progress) || value.progress < 0 || value.progress > 24 * 60 * 60) return null;
     if (typeof value.shuffle !== "boolean" || !["off", "all", "one"].includes(String(value.repeat))) return null;
@@ -411,10 +448,10 @@ export function appendQueueBatch(
   currentIndex: number,
   incoming: readonly PlexItem[],
 ): QueueBatchTransition {
-  const tracks = normalizeQueueBatch(incoming);
+  const tracks = createQueueInstances(normalizeQueueBatch(incoming));
   if (!tracks.length) return { queue: [...queue], currentIndex, addedCount: 0, shouldStart: false };
 
-  const nextQueue = [...queue, ...tracks];
+  const nextQueue = [...ensureQueueInstanceIds(queue), ...tracks];
   const hasCurrent = validQueueIndex(currentIndex, queue.length);
   return {
     queue: nextQueue,
@@ -430,11 +467,17 @@ export function insertQueueBatchNext(
   currentIndex: number,
   incoming: readonly PlexItem[],
 ): QueueBatchTransition {
-  const tracks = normalizeQueueBatch(incoming);
+  const tracks = createQueueInstances(normalizeQueueBatch(incoming));
   if (!tracks.length) return { queue: [...queue], currentIndex, addedCount: 0, shouldStart: false };
 
   if (!validQueueIndex(currentIndex, queue.length)) {
-    return appendQueueBatch(queue, currentIndex, tracks);
+    const nextQueue = [...ensureQueueInstanceIds(queue), ...tracks];
+    return {
+      queue: nextQueue,
+      currentIndex: 0,
+      addedCount: tracks.length,
+      shouldStart: true,
+    };
   }
 
   const insertAt = currentIndex + 1;
@@ -673,16 +716,19 @@ export interface PlaybackFailure {
 interface NativePlaybackSource {
   index: number;
   ratingKey: string;
+  queueInstanceId: string;
   activeQuality: StreamQuality;
   source: string;
   attemptedQualities: StreamQuality[];
   diagnostics: string[];
+  runtimeRetryUsed: boolean;
 }
 
 interface NativeLoadRecovery {
   initialQuality: StreamQuality;
   attemptedQualities: StreamQuality[];
   diagnostics: string[];
+  runtimeRetryUsed: boolean;
 }
 
 /** Read the effective public transcode marker without exposing the loopback ticket. */
@@ -931,8 +977,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     if (!isDesktopRuntime()) return Promise.resolve();
     // Capture an immutable snapshot before entering the serialized IPC chain;
     // later React updates must not rewrite an already-enqueued native mutation.
-    const tracks = queueRef.current.map((track) => ({
+    const queueSnapshot = ensureQueueInstanceIds(queueRef.current);
+    if (queueSnapshot.some((track, index) => track !== queueRef.current[index])) {
+      queueRef.current = queueSnapshot;
+      setQueue(queueSnapshot);
+    }
+    const tracks = queueSnapshot.map((track) => ({
         rating_key: track.ratingKey,
+        occurrence_id: track.queueInstanceId!,
         title: track.title || "",
         artist: trackArtist(track),
         album: trackAlbum(track),
@@ -999,10 +1051,12 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           activeNativeSourceRef.current = {
             index,
             ratingKey: track.ratingKey,
+            queueInstanceId: track.queueInstanceId || "",
             activeQuality,
             source: url,
             attemptedQualities: successfulQualities,
             diagnostics: [...diagnostics],
+            runtimeRetryUsed: recovery?.runtimeRetryUsed ?? false,
           };
           pendingNativeSourceRef.current = undefined;
           if (!track.imageUrl) {
@@ -1010,7 +1064,12 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
               if (!artworkTicket
                 || requestId !== loadRequestRef.current
                 || indexRef.current !== index) return;
-              return nativeAudioSetArtwork(index, track.ratingKey, artworkTicket).catch(() => undefined);
+              return nativeAudioSetArtwork(
+                index,
+                track.ratingKey,
+                track.queueInstanceId || "",
+                artworkTicket,
+              ).catch(() => undefined);
             });
           }
           break;
@@ -1112,8 +1171,13 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
   const playContext = useCallback((track: PlexItem, context: PlexItem[] = [track]) => {
     const playable = context.filter((item) => item.type === "track");
-    const tracks = playable.some((item) => item.ratingKey === track.ratingKey) ? playable : [track, ...playable];
-    const index = Math.max(0, tracks.findIndex((item) => item.ratingKey === track.ratingKey));
+    const contextIndex = playable.findIndex((item) => (
+      item === track
+      || Boolean(track.playlistItemID && item.playlistItemID === track.playlistItemID)
+    ));
+    const queueSource = contextIndex >= 0 ? playable : [track, ...playable];
+    const tracks = createQueueInstances(queueSource);
+    const index = Math.max(0, contextIndex);
     queueRef.current = tracks;
     queueServerIdRef.current = serverIdRef.current;
     resumeProgressRef.current = null;
@@ -1128,7 +1192,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [loadAt, schedulePersistedSession]);
 
   const playTracks = useCallback((incoming: readonly PlexItem[]): boolean => {
-    const tracks = normalizeQueueBatch(incoming);
+    const tracks = createQueueInstances(normalizeQueueBatch(incoming));
     if (!tracks.length) return false;
     queueRef.current = tracks;
     queueServerIdRef.current = serverIdRef.current;
@@ -1501,7 +1565,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       return () => { disposed = true; };
     }
 
-    const restoredQueue = persisted.queue.map((item) => ({ ...item })) as PlexItem[];
+    const restoredQueue = ensureQueueInstanceIds(
+      persisted.queue.map((item) => ({ ...item })) as PlexItem[],
+    );
     const restoredIndex = persisted.currentIndex >= 0 && persisted.currentIndex < restoredQueue.length
       ? persisted.currentIndex
       : -1;
@@ -1583,7 +1649,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     let unlisten: (() => void) | undefined;
     void listen("native-audio://event", (event) => {
       const handlers = nativeEventHandlersRef.current;
-      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; ratingKey?: string; reason?: string; buffering?: boolean; deviceId?: string } | null;
+      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; ratingKey?: string; occurrenceId?: string; reason?: string; buffering?: boolean; deviceId?: string } | null;
       if (!payload) return;
       if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
         // 加载期间忽略旧歌的残留进度事件，保证切歌瞬间进度归 0 不被覆盖。
@@ -1617,15 +1683,23 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         const track = Number.isInteger(eventIndex) ? queueRef.current[eventIndex as number] : undefined;
         const active = activeNativeSourceRef.current;
         const pending = pendingNativeSourceRef.current;
-        const failedSource = active && active.index === eventIndex && active.ratingKey === payload.ratingKey
+        const failedSource = active
+          && active.index === eventIndex
+          && active.ratingKey === payload.ratingKey
+          && active.queueInstanceId === payload.occurrenceId
           ? active
-          : pending && pending.index === eventIndex && pending.ratingKey === payload.ratingKey
+          : pending
+            && pending.index === eventIndex
+            && pending.ratingKey === payload.ratingKey
+            && pending.queueInstanceId === payload.occurrenceId
             ? pending
             : undefined;
         if (
           typeof eventIndex !== "number"
           || typeof payload.ratingKey !== "string"
+          || typeof payload.occurrenceId !== "string"
           || track?.ratingKey !== payload.ratingKey
+          || track?.queueInstanceId !== payload.occurrenceId
           || !failedSource
           || (eventIndex !== indexRef.current && failedSource !== pending)
         ) {
@@ -1659,11 +1733,24 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         pendingNativeSourceRef.current = undefined;
         setPlaying(false);
         setBuffering(false);
-        if (fallback) {
-          const resumeSeconds = boundedResumeSeconds(
-            progressRef.current,
-            (track.duration || 0) / 1000,
+        const resumeSeconds = boundedResumeSeconds(
+          progressRef.current,
+          (track.duration || 0) / 1000,
+        );
+        if (!failedSource.runtimeRetryUsed) {
+          playbackLog(
+            "warn",
+            `原生流中断：index=${eventIndex} 质量=${failedSource.activeQuality}，从当前进度静默重试`,
           );
+          void handlers.loadAt(eventIndex, true, resumeSeconds, true, {
+            initialQuality: failedSource.activeQuality,
+            attemptedQualities,
+            diagnostics,
+            runtimeRetryUsed: true,
+          });
+          return;
+        }
+        if (fallback) {
           playbackLog(
             "warn",
             `原生流中断：index=${eventIndex} 质量=${failedSource.activeQuality}，从当前进度尝试 ${fallback} kbps`,
@@ -1672,6 +1759,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             initialQuality: fallback,
             attemptedQualities,
             diagnostics,
+            runtimeRetryUsed: true,
           });
           return;
         }
@@ -1722,9 +1810,15 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         // engine, otherwise the seamless PCM transition would be interrupted.
         const handedOffTrack = queueRef.current[payload.index];
         const pendingSource = pendingNativeSourceRef.current;
+        if (!handedOffTrack || handedOffTrack.queueInstanceId !== payload.occurrenceId) {
+          playbackLog("warn", "已忽略过期的原生无缝交接事件");
+          return;
+        }
         activeNativeSourceRef.current = pendingSource
           && pendingSource.index === payload.index
           && pendingSource.ratingKey === handedOffTrack?.ratingKey
+          && pendingSource.queueInstanceId === payload.occurrenceId
+          && pendingSource.queueInstanceId === handedOffTrack?.queueInstanceId
           ? pendingSource
           : undefined;
         pendingNativeSourceRef.current = undefined;
@@ -1811,10 +1905,12 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             pendingNativeSourceRef.current = {
               index: nextIndex,
               ratingKey: nextTrack.ratingKey,
+              queueInstanceId: nextTrack.queueInstanceId || "",
               activeQuality,
               source: url,
               attemptedQualities: successfulQualities,
               diagnostics: [...diagnostics],
+              runtimeRetryUsed: false,
             };
             if (!nextTrack.imageUrl) {
               void artworkTicketPromise.then((artworkTicket) => {
@@ -1822,6 +1918,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
                 return nativeAudioSetArtwork(
                   nextIndex,
                   nextTrack.ratingKey,
+                  nextTrack.queueInstanceId || "",
                   artworkTicket,
                 ).catch(() => undefined);
               });

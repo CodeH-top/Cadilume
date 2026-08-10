@@ -73,6 +73,8 @@ export interface PlexContributor {
 
 export interface PlexItem {
   ratingKey: string;
+  /** Stable identity for one occurrence inside Cadilume's playback queue. */
+  queueInstanceId?: string;
   key: string;
   type: "artist" | "album" | "track" | string;
   title: string;

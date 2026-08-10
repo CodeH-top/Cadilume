@@ -15,6 +15,7 @@ import {
   getManualPreviousIndex,
   getSequentialNextIndex,
   insertQueueBatchNext,
+  ensureQueueInstanceIds,
   mergeFreshTrackMetadata,
   moveShufflePrevious,
   nativeAudioCacheQuality,
@@ -308,6 +309,18 @@ describe("persisted playback session", () => {
 });
 
 describe("queue transition rules", () => {
+  it("assigns stable, distinct identities to duplicate queue occurrences", () => {
+    const duplicate = { ...track(1) };
+    const queue = ensureQueueInstanceIds([track(1), duplicate]);
+
+    expect(queue[0].queueInstanceId).toBeTruthy();
+    expect(queue[1].queueInstanceId).toBeTruthy();
+    expect(queue[0].queueInstanceId).not.toBe(queue[1].queueInstanceId);
+    expect(ensureQueueInstanceIds(queue).map((item) => item.queueInstanceId)).toEqual(
+      queue.map((item) => item.queueInstanceId),
+    );
+  });
+
   it("keeps a full artist batch ordered, unique, and separate from existing queue entries", () => {
     const incoming = [track(2), track(3), track(2), { ...track(4), type: "album" }];
     expect(normalizeQueueBatch(incoming).map((item) => item.ratingKey)).toEqual(["track-2", "track-3"]);

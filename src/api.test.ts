@@ -835,11 +835,12 @@ describe("artworkUrl dimensions and runtime boundary", () => {
     invokeMock.mockResolvedValue(undefined);
     const ticket = `http://127.0.0.1:49152/artwork/${"b".repeat(64)}`;
 
-    await nativeAudioSetArtwork(3, "track-42", ticket);
+    await nativeAudioSetArtwork(3, "track-42", "queue-42", ticket);
 
     expect(invokeMock).toHaveBeenCalledWith("native_audio_set_artwork", {
       index: 3,
       ratingKey: "track-42",
+      occurrenceId: "queue-42",
       artworkUrl: ticket,
     });
   });

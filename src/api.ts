@@ -849,10 +849,11 @@ export async function nativeAudioSetVolume(volume: number): Promise<void> {
 export async function nativeAudioSetArtwork(
   index: number,
   ratingKey: string,
+  occurrenceId: string,
   artworkUrl: string,
 ): Promise<void> {
   if (!isDesktopRuntime()) return;
-  await invoke("native_audio_set_artwork", { index, ratingKey, artworkUrl });
+  await invoke("native_audio_set_artwork", { index, ratingKey, occurrenceId, artworkUrl });
 }
 
 export async function nativeAudioQueueNextSource(
@@ -914,6 +915,7 @@ export async function nativeAudioSetOutputDevice(deviceId: string): Promise<void
 
 export interface NativeQueueTrack {
   rating_key: string;
+  occurrence_id: string;
   title: string;
   artist: string;
   album: string;

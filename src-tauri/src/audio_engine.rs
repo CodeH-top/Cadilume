@@ -740,6 +740,7 @@ pub struct NativeAudioEngine {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct QueueTrack {
     pub rating_key: String,
+    pub occurrence_id: String,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -955,7 +956,7 @@ impl QueueState {
                 .tracks
                 .iter()
                 .zip(&tracks)
-                .any(|(current, next)| current.rating_key != next.rating_key);
+                .any(|(current, next)| current.occurrence_id != next.occurrence_id);
         let shuffle_changed = self.shuffle != shuffle;
         self.tracks = tracks;
         self.current_index = current_index;
@@ -995,6 +996,7 @@ type NowPlayingSignature = (
 struct PendingTrack {
     index: usize,
     rating_key: String,
+    occurrence_id: String,
     duration_seconds: Option<f64>,
     source: String,
     cache_key: Option<String>,
@@ -1013,7 +1015,7 @@ fn reconcile_pending_track(pending: &mut Option<PendingTrack>, queue: &mut Queue
     let new_index = queue
         .tracks
         .iter()
-        .position(|track| track.rating_key == queued.rating_key);
+        .position(|track| track.occurrence_id == queued.occurrence_id);
     if let Some(index) = new_index {
         if queue.peek_next_index(true) == Some(index) {
             queued.index = index;
@@ -1370,21 +1372,25 @@ fn sanitize_playback_error_reason(reason: &str) -> String {
     compact.chars().take(240).collect()
 }
 
-fn current_queue_identity(queue: &Arc<Mutex<QueueState>>) -> Option<(usize, String)> {
+fn current_queue_identity(queue: &Arc<Mutex<QueueState>>) -> Option<(usize, String, String)> {
     let queue = queue.lock().ok()?;
     let index = queue.current()?;
-    Some((index, queue.tracks.get(index)?.rating_key.clone()))
+    let track = queue.tracks.get(index)?;
+    Some((index, track.rating_key.clone(), track.occurrence_id.clone()))
 }
 
 fn publish_playback_error(
     engine: &NativeAudioEngine,
-    item: Option<(usize, String)>,
+    item: Option<(usize, String, String)>,
     reason: &str,
     app: &AppHandle,
 ) {
     let reason = sanitize_playback_error_reason(reason);
-    let index = item.as_ref().map(|(index, _)| *index);
-    let rating_key = item.as_ref().map(|(_, rating_key)| rating_key.as_str());
+    let index = item.as_ref().map(|(index, _, _)| *index);
+    let rating_key = item.as_ref().map(|(_, rating_key, _)| rating_key.as_str());
+    let occurrence_id = item
+        .as_ref()
+        .map(|(_, _, occurrence_id)| occurrence_id.as_str());
     engine.stop_immediately();
     eprintln!("[原生] 播放流读取失败：{reason}");
     let _ = app.emit(
@@ -1393,6 +1399,7 @@ fn publish_playback_error(
             "type": "playback-error",
             "index": index,
             "ratingKey": rating_key,
+            "occurrenceId": occurrence_id,
             "reason": reason,
         }),
     );
@@ -1404,6 +1411,7 @@ fn publish_started_handoff(engine: &NativeAudioEngine, queued: &PendingTrack, ap
         serde_json::json!({
             "type": "track",
             "index": queued.index,
+            "occurrenceId": queued.occurrence_id.as_str(),
             "duration": queued.duration_seconds,
             "position": engine.playback_position_seconds(),
         }),
@@ -1781,6 +1789,7 @@ impl NativeAudioEngine {
         &self,
         index: i64,
         rating_key: &str,
+        occurrence_id: &str,
         artwork_url: String,
     ) -> Result<(), String> {
         self.ensure_accepting_work()?;
@@ -1791,7 +1800,9 @@ impl NativeAudioEngine {
             .map_err(|_| "队列状态锁失败".to_string())?
             .tracks
             .get(index)
-            .is_some_and(|track| track.rating_key == rating_key);
+            .is_some_and(|track| {
+                track.rating_key == rating_key && track.occurrence_id == occurrence_id
+            });
         if !track_matches {
             return Err("封面对应的曲目已不在当前队列".to_string());
         }
@@ -1801,10 +1812,11 @@ impl NativeAudioEngine {
                 .pending
                 .lock()
                 .map_err(|_| "预排状态锁失败".to_string())?;
-            if let Some(queued) = pending
-                .as_mut()
-                .filter(|queued| queued.index == index && queued.rating_key == rating_key)
-            {
+            if let Some(queued) = pending.as_mut().filter(|queued| {
+                queued.index == index
+                    && queued.rating_key == rating_key
+                    && queued.occurrence_id == occurrence_id
+            }) {
                 queued.metadata.artwork_url = Some(artwork_url.clone());
                 drop(pending);
                 self.prime_artwork_ticket(
@@ -2266,17 +2278,38 @@ impl NativeAudioEngine {
         if !self.playback_is_current(generation) || !self.loaded.load(Ordering::SeqCst) {
             return Err("当前播放已切换".to_string());
         }
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| "预排状态锁失败".to_string())?;
+        if pending.is_some() {
+            decode_state.cancel_worker();
+            return Err("下一首已经由其他操作预排".to_string());
+        }
+        let queue_matches = {
+            let mut queue = self
+                .queue
+                .lock()
+                .map_err(|_| "队列状态锁失败".to_string())?;
+            queue.peek_next_index(true) == Some(index)
+                && queue
+                    .tracks
+                    .get(index)
+                    .is_some_and(|candidate| candidate.occurrence_id == track.occurrence_id)
+        };
+        if !queue_matches {
+            decode_state.cancel_worker();
+            return Err("预排顺序已被队列更新替代".to_string());
+        }
         let player = self
             .player
             .lock()
             .map_err(|_| "播放器状态锁失败".to_string())?;
         player.append(marker);
-        *self
-            .pending
-            .lock()
-            .map_err(|_| "预排状态锁失败".to_string())? = Some(PendingTrack {
+        *pending = Some(PendingTrack {
             index,
             rating_key: track.rating_key,
+            occurrence_id: track.occurrence_id,
             duration_seconds: total,
             source: source.to_string(),
             cache_key,
@@ -2530,7 +2563,7 @@ impl NativeAudioEngine {
                 if let Some(index) = queue
                     .tracks
                     .iter()
-                    .position(|track| track.rating_key == queued.rating_key)
+                    .position(|track| track.occurrence_id == queued.occurrence_id)
                 {
                     queued.index = index;
                     queue.commit_index(index);
@@ -2660,7 +2693,11 @@ impl NativeAudioEngine {
                         if let Some(reason) = queued.decode_state.reader_failure() {
                             publish_playback_error(
                                 &engine,
-                                Some((queued.index, queued.rating_key.clone())),
+                                Some((
+                                    queued.index,
+                                    queued.rating_key.clone(),
+                                    queued.occurrence_id.clone(),
+                                )),
                                 &reason,
                                 &app_for_task,
                             );
@@ -3081,8 +3118,10 @@ pub async fn native_audio_queue_next_source(
         return Err("音频地址不是当前 Cadilume 本机票据".to_string());
     }
     let metadata = validate_now_playing_metadata(&stream_proxy, metadata)?;
-    let _operation = audio_state.output_switch_lock.lock().await;
-    let engine = audio_state.ensure(&app)?;
+    let engine = {
+        let _operation = audio_state.output_switch_lock.lock().await;
+        audio_state.ensure(&app)?
+    };
     engine
         .queue_next_source_replacing(index, &source, cache_key, metadata)
         .await
@@ -3192,6 +3231,7 @@ pub fn native_audio_set_artwork(
     stream_proxy: tauri::State<'_, crate::stream_proxy::StreamProxy>,
     index: i64,
     rating_key: String,
+    occurrence_id: String,
     artwork_url: String,
 ) -> Result<(), String> {
     if artwork_url.is_empty() || !stream_proxy.owns_artwork_url(&artwork_url) {
@@ -3200,7 +3240,7 @@ pub fn native_audio_set_artwork(
     state
         .current()
         .ok_or_else(|| "当前没有可更新的播放".to_string())?
-        .set_artwork_for_track(index, &rating_key, artwork_url)
+        .set_artwork_for_track(index, &rating_key, &occurrence_id, artwork_url)
 }
 
 #[tauri::command]
@@ -4056,6 +4096,7 @@ mod tests {
     fn queue_track(key: &str) -> QueueTrack {
         QueueTrack {
             rating_key: key.to_string(),
+            occurrence_id: format!("occurrence-{key}"),
             title: key.to_string(),
             artist: String::new(),
             album: String::new(),
@@ -4066,6 +4107,7 @@ mod tests {
         PendingTrack {
             index,
             rating_key: rating_key.to_string(),
+            occurrence_id: format!("occurrence-{rating_key}"),
             duration_seconds: Some(3.0),
             source: format!("source-{rating_key}"),
             cache_key: Some(format!("cache-{rating_key}")),
@@ -4184,7 +4226,7 @@ mod tests {
         assert_eq!(queue.previous_index(), Some(0), "队列重同步后上一首仍可用");
         // 队列内容真正变化时才清空历史。
         let mut changed = queue.tracks.clone();
-        changed[3].rating_key = "z".to_string();
+        changed[3].occurrence_id = "occurrence-z".to_string();
         queue.resync(changed, queue.current_index, NativeRepeatMode::All, true);
         assert!(
             queue.bag.is_empty()
@@ -4244,6 +4286,40 @@ mod tests {
         );
         assert!(reconcile_pending_track(&mut pending, &mut queue));
         assert!(pending.is_none(), "已不是下一首的底层 Source 必须失效");
+    }
+
+    #[test]
+    fn pending_gapless_source_tracks_the_exact_duplicate_occurrence() {
+        let mut first = queue_track("a");
+        first.occurrence_id = "occurrence-a-first".to_string();
+        let mut duplicate = queue_track("a");
+        duplicate.occurrence_id = "occurrence-a-second".to_string();
+        let mut pending = Some(pending_track(2, "a"));
+        pending.as_mut().unwrap().occurrence_id = duplicate.occurrence_id.clone();
+        let mut queue = QueueState {
+            tracks: vec![
+                queue_track("removed-before"),
+                first.clone(),
+                duplicate.clone(),
+            ],
+            current_index: 1,
+            repeat: NativeRepeatMode::All,
+            ..QueueState::default()
+        };
+
+        queue.resync(
+            vec![first, duplicate, queue_track("c")],
+            0,
+            NativeRepeatMode::All,
+            false,
+        );
+
+        assert!(!reconcile_pending_track(&mut pending, &mut queue));
+        assert_eq!(pending.as_ref().map(|track| track.index), Some(1));
+        assert_eq!(
+            pending.as_ref().map(|track| track.occurrence_id.as_str()),
+            Some("occurrence-a-second")
+        );
     }
 
     #[test]
@@ -4907,12 +4983,14 @@ mod tests {
             queue.tracks = vec![
                 QueueTrack {
                     rating_key: track_a.2.clone(),
+                    occurrence_id: "occurrence-a".to_string(),
                     title: track_a.3.clone(),
                     artist: String::new(),
                     album: String::new(),
                 },
                 QueueTrack {
                     rating_key: track_b.2.clone(),
+                    occurrence_id: "occurrence-b".to_string(),
                     title: track_b.3.clone(),
                     artist: String::new(),
                     album: String::new(),
