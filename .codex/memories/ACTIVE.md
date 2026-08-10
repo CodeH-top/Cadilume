@@ -75,7 +75,7 @@
   臂杆之下，不能遮挡轴心处的连接段。
   唱片底座只保留黑胶外的一圈，不叠加第二层扩散圆环；展开播放器和底部小黑胶统一使用 `30s`
   一圈的旋转速度。
-  Source: explicit user correction on 2026-08-09.
+  Source: explicit user correction on 2026-08-09; active-playback transition and persistent artwork acceptance on 2026-08-10.
 
 - [ACT-029] 展开播放器的黑胶与封面模式必须共用当前专辑封面采样出的全局四色主题背景，主题覆盖
   整个弹窗的标题区、视觉区、右侧歌词区和底部完整播放器控制区，不得退化成单色、模糊封面，
@@ -84,8 +84,20 @@
   保留上一组有效颜色，确保主题稳定且文字对比度可靠。可以参考公开依赖的 API 与算法语义，
   但不得复制 Plexamp 私有模块或压缩源码。
   封面模式只在左侧显示一张独立方形专辑图：无外边距式衬层和描边，使用小圆角与克制阴影；
-  歌词列保持透明，不在文字下增加不透明卡片。
+  歌词列保持透明，不在文字下增加不透明卡片。黑胶与封面模式必须复用同一持续挂载的封面节点；
+  播放、加载或缓冲期间切换主题须直接原子应用颜色，不克隆整页 DOM 或栅格化媒体快照。
   Source: explicit user correction on 2026-08-09.
+
+- [ACT-030] 播放队列中的同一歌曲重复实例必须以稳定且唯一的 `queueInstanceId` 端到端识别；
+  持久化恢复、原生队列 IPC、预排、封面、无缝交接和播放错误事件都必须校验该实例身份，不能只用
+  `ratingKey` 或易变化的索引。运行中媒体读取失败先为当前实例刷新票据并从受限进度静默恢复一次，
+  再尝试兼容质量；只有恢复路径耗尽后才显示播放失败。
+  Source: duplicate queue handoff and runtime recovery hardening on 2026-08-10.
+
+- [ACT-031] 普通可写歌单的手动排序必须使用 PMS 返回的 `playlistItemID` 定位具体重复实例，并通过
+  Rust/Tauri `move` 命令提交 `after` 目标；智能或只读歌单不提供拖拽，继续保留列表排序能力。
+  乐观更新失败时重新读取 PMS 顺序，键盘方向键排序在异步保存解除 busy 后把焦点恢复到移动项。
+  Source: playlist ordering implementation and browser acceptance on 2026-08-10.
 
 ## Validation
 
