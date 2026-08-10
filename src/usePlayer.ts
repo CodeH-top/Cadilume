@@ -640,6 +640,22 @@ export function getSequentialNextIndex(currentIndex: number, queueLength: number
   return repeat === "all" ? 0 : null;
 }
 
+export function queueNavigationAvailability(
+  currentIndex: number,
+  queueLength: number,
+  repeat: RepeatMode,
+  shuffle: boolean,
+): { canPrevious: boolean; canNext: boolean } {
+  if (!Number.isInteger(currentIndex) || currentIndex < 0 || currentIndex >= queueLength || queueLength <= 1) {
+    return { canPrevious: false, canNext: false };
+  }
+  const canWrap = repeat !== "off" || shuffle;
+  return {
+    canPrevious: canWrap || currentIndex > 0,
+    canNext: canWrap || currentIndex < queueLength - 1,
+  };
+}
+
 /** Manual Next always advances within the current queue, wrapping at its end. */
 export function getManualNextIndex(currentIndex: number, queueLength: number): number | null {
   if (!Number.isInteger(queueLength) || queueLength <= 0) return null;
@@ -1871,11 +1887,17 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         handlers.schedulePersistedSession(true);
       } else if (payload.type === "remote") {
         const command = typeof payload.command === "string" ? payload.command : "";
+        const navigation = queueNavigationAvailability(
+          indexRef.current,
+          queueRef.current.length,
+          repeatRef.current,
+          shuffleRef.current,
+        );
         if (command === "play") { if (!playingRef.current) handlers.toggle(); }
         else if (command === "toggle") handlers.toggle();
         else if (command === "pause") { if (playingRef.current) handlers.toggle(); }
-        else if (command === "next") handlers.next();
-        else if (command === "previous") handlers.previous();
+        else if (command === "next" && navigation.canNext) handlers.next();
+        else if (command === "previous" && navigation.canPrevious) handlers.previous();
         else if (command === "seek" && typeof payload.position === "number") handlers.seek(payload.position);
       }
     }).then((disposeFn) => {
@@ -2028,11 +2050,12 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
 
   useEffect(() => {
     if (isDesktopRuntime() || !("mediaSession" in navigator)) return;
+    const navigation = queueNavigationAvailability(currentIndex, queue.length, repeat, shuffle);
     const actions: Array<[MediaSessionAction, MediaSessionActionHandler | null]> = [
       ["play", () => { if (!playing) toggle(); }],
       ["pause", () => { if (playing) toggle(); }],
-      ["previoustrack", previous],
-      ["nexttrack", next],
+      ["previoustrack", navigation.canPrevious ? previous : null],
+      ["nexttrack", navigation.canNext ? next : null],
       ["seekto", (details) => details.seekTime != null && seek(details.seekTime)],
     ];
     for (const [action, handler] of actions) {
@@ -2043,7 +2066,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         try { navigator.mediaSession.setActionHandler(action, null); } catch { /* No-op. */ }
       }
     };
-  }, [next, playing, previous, seek, toggle]);
+  }, [currentIndex, next, playing, previous, queue.length, repeat, seek, shuffle, toggle]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;

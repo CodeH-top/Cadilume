@@ -55,8 +55,7 @@ export async function loadInitialLibraryData(
   source: InitialLibrarySource = defaultSource,
 ): Promise<InitialLibraryData> {
   const servers = await source.discoverServers();
-  const selectedServer = servers.find((server) => server.id === preferredServerId) || servers[0];
-  if (!selectedServer) {
+  if (!servers.length) {
     return {
       servers,
       sections: [],
@@ -66,50 +65,66 @@ export async function loadInitialLibraryData(
     };
   }
 
-  const [sections, playlistCatalog] = await Promise.all([
-    source.getSections(selectedServer.id),
-    source.getPlaylists(selectedServer.id),
-  ]);
-  const selectedSection = sections[0];
-  const playlists = orderPlaylistsByRecency(playlistCatalog);
-  if (!selectedSection) {
-    return {
-      servers,
-      serverId: selectedServer.id,
-      sections,
-      playlists,
-      libraryArtists: [],
-      home: { recentAlbums: [], hubs: [] },
-    };
+  const preferredServer = servers.find((server) => server.id === preferredServerId);
+  const orderedServers = preferredServer
+    ? [preferredServer, ...servers.filter((server) => server.id !== preferredServer.id)]
+    : servers;
+  let lastError: unknown;
+
+  for (const selectedServer of orderedServers) {
+    try {
+      const [sections, playlistCatalog] = await Promise.all([
+        source.getSections(selectedServer.id),
+        source.getPlaylists(selectedServer.id),
+      ]);
+      const selectedSection = sections[0];
+      const playlists = orderPlaylistsByRecency(playlistCatalog);
+      if (!selectedSection) {
+        return {
+          servers,
+          serverId: selectedServer.id,
+          sections,
+          playlists,
+          libraryArtists: [],
+          home: { recentAlbums: [], hubs: [] },
+        };
+      }
+
+      const [libraryArtists, recommendationHubs, recentAlbums] = await Promise.all([
+        source.getLibraryItems(selectedServer.id, selectedSection.key, 8),
+        source.getRecommendationHubs(selectedServer.id, selectedSection.key),
+        source.getRecentAlbums(selectedServer.id, selectedSection.key),
+      ]);
+      const completeHubs = recommendationHubs.some(isRecentlyAddedHub) || !recentAlbums.length
+        ? recommendationHubs
+        : [
+            ...recommendationHubs,
+            {
+              title: "最近加入的音乐",
+              type: "album",
+              identifier: "cadilume.recentlyadded",
+              items: recentAlbums,
+            },
+          ];
+
+      return {
+        servers,
+        serverId: selectedServer.id,
+        sections,
+        sectionKey: selectedSection.key,
+        playlists,
+        libraryArtists,
+        home: {
+          recentAlbums,
+          hubs: homeRecommendationHubs(completeHubs),
+        },
+      };
+    } catch (reason) {
+      lastError = reason;
+    }
   }
 
-  const [libraryArtists, recommendationHubs, recentAlbums] = await Promise.all([
-    source.getLibraryItems(selectedServer.id, selectedSection.key, 8),
-    source.getRecommendationHubs(selectedServer.id, selectedSection.key),
-    source.getRecentAlbums(selectedServer.id, selectedSection.key),
-  ]);
-  const completeHubs = recommendationHubs.some(isRecentlyAddedHub) || !recentAlbums.length
-    ? recommendationHubs
-    : [
-        ...recommendationHubs,
-        {
-          title: "最近加入的音乐",
-          type: "album",
-          identifier: "cadilume.recentlyadded",
-          items: recentAlbums,
-        },
-      ];
-
-  return {
-    servers,
-    serverId: selectedServer.id,
-    sections,
-    sectionKey: selectedSection.key,
-    playlists,
-    libraryArtists,
-    home: {
-      recentAlbums,
-      hubs: homeRecommendationHubs(completeHubs),
-    },
-  };
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(lastError ? String(lastError) : "无法加载 Plex 资料库。");
 }

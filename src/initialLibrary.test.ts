@@ -107,4 +107,36 @@ describe("initial library loading", () => {
     expect(librarySource.getLibraryItems).not.toHaveBeenCalled();
     expect(librarySource.getRecommendationHubs).not.toHaveBeenCalled();
   });
+
+  it("falls back to another discovered server when the preferred server cannot load", async () => {
+    const getSections = vi.fn(async (serverId: string) => {
+      if (serverId === "server-offline") throw new Error("首选服务器离线");
+      return [section("music-online")];
+    });
+    const getPlaylists = vi.fn(async (serverId: string) => (
+      serverId === "server-online" ? [playlist("available", 1)] : []
+    ));
+    const librarySource = source({
+      discoverServers: vi.fn(async () => [server("server-online"), server("server-offline")]),
+      getSections,
+      getPlaylists,
+    });
+
+    await expect(loadInitialLibraryData("server-offline", librarySource)).resolves.toMatchObject({
+      serverId: "server-online",
+      sectionKey: "music-online",
+      playlists: [{ ratingKey: "available" }],
+    });
+    expect(getSections.mock.calls.map(([serverId]) => serverId)).toEqual(["server-offline", "server-online"]);
+    expect(getPlaylists.mock.calls.map(([serverId]) => serverId)).toEqual(["server-offline", "server-online"]);
+  });
+
+  it("keeps the initialization error when every discovered server fails", async () => {
+    const librarySource = source({
+      discoverServers: vi.fn(async () => [server("server-a"), server("server-b")]),
+      getSections: vi.fn(async (serverId: string) => { throw new Error(`${serverId} 不可用`); }),
+    });
+
+    await expect(loadInitialLibraryData("server-b", librarySource)).rejects.toThrow("server-a 不可用");
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { playlistDropIndex, playlistMoveAfterId, playlistPointerTarget, reorderPlaylistItems } from "./playlistOrder";
+import { playlistAutoScrollDelta, playlistDropIndex, playlistMoveAfterId, playlistPointerTarget, reorderPlaylistItems } from "./playlistOrder";
 import type { PlexItem } from "./types";
 
 const item = (id: string): PlexItem => ({
@@ -11,6 +11,14 @@ const item = (id: string): PlexItem => ({
 });
 
 describe("playlist order", () => {
+  it("scrolls toward a drag pointer near an available viewport edge", () => {
+    expect(playlistAutoScrollDelta(300, 100, 500, 200, 1_000, 400)).toBe(0);
+    expect(playlistAutoScrollDelta(110, 100, 500, 200, 1_000, 400)).toBeLessThan(0);
+    expect(playlistAutoScrollDelta(490, 100, 500, 200, 1_000, 400)).toBeGreaterThan(0);
+    expect(playlistAutoScrollDelta(100, 100, 500, 0, 1_000, 400)).toBe(0);
+    expect(playlistAutoScrollDelta(500, 100, 500, 600, 1_000, 400)).toBe(0);
+  });
+
   it("maps a captured pointer to the visible row half used as the drop edge", () => {
     const rows = [
       { top: 100, bottom: 140 },

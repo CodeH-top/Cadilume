@@ -66,6 +66,14 @@ mod macos {
         }
     }
 
+    fn set_navigation_enabled(can_previous: bool, can_next: bool) {
+        let center = unsafe { MPRemoteCommandCenter::sharedCommandCenter() };
+        unsafe {
+            center.previousTrackCommand().setEnabled(can_previous);
+            center.nextTrackCommand().setEnabled(can_next);
+        }
+    }
+
     pub fn install(app: AppHandle) {
         *COMMAND_APP.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(app);
         let center = unsafe { MPRemoteCommandCenter::sharedCommandCenter() };
@@ -102,6 +110,7 @@ mod macos {
                 MPRemoteCommandHandlerStatus::Success
             },
         );
+        set_navigation_enabled(false, false);
     }
 
     /// Build an `MPMediaItemArtwork` from image bytes. AppKit classes are
@@ -214,6 +223,8 @@ mod macos {
         duration_seconds: Option<f64>,
         position_seconds: f64,
         playback_state: PlaybackState,
+        can_previous: bool,
+        can_next: bool,
         artwork: Option<Arc<Vec<u8>>>,
     ) {
         let Some(app) = app_handle() else {
@@ -223,6 +234,7 @@ mod macos {
         let artist = artist.to_string();
         let album = album.to_string();
         if let Err(error) = app.run_on_main_thread(move || {
+            set_navigation_enabled(can_previous, can_next);
             build_and_set_now_playing(
                 &title,
                 &artist,
@@ -243,6 +255,7 @@ mod macos {
         };
         let _ = app.run_on_main_thread(|| {
             let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
+            set_navigation_enabled(false, false);
             unsafe {
                 center.setPlaybackState(MPNowPlayingPlaybackState::Stopped);
                 center.setNowPlayingInfo(None);
@@ -445,8 +458,8 @@ mod windows {
         };
         let _ = controls.SetIsPlayEnabled(true);
         let _ = controls.SetIsPauseEnabled(true);
-        let _ = controls.SetIsNextEnabled(true);
-        let _ = controls.SetIsPreviousEnabled(true);
+        let _ = controls.SetIsNextEnabled(false);
+        let _ = controls.SetIsPreviousEnabled(false);
         let _ = controls.SetIsEnabled(true);
         let _ = CONTROLS.set(controls.clone());
 
@@ -491,11 +504,15 @@ mod windows {
         duration_seconds: Option<f64>,
         position_seconds: f64,
         playback_state: PlaybackState,
+        can_previous: bool,
+        can_next: bool,
         artwork: Option<Arc<Vec<u8>>>,
     ) {
         let Some(controls) = CONTROLS.get() else {
             return;
         };
+        let _ = controls.SetIsPreviousEnabled(can_previous);
+        let _ = controls.SetIsNextEnabled(can_next);
         let Ok(updater) = controls.DisplayUpdater() else {
             return;
         };
@@ -543,6 +560,8 @@ mod windows {
         let Some(controls) = CONTROLS.get() else {
             return;
         };
+        let _ = controls.SetIsPreviousEnabled(false);
+        let _ = controls.SetIsNextEnabled(false);
         let _ = controls.SetPlaybackStatus(MediaPlaybackStatus::Stopped);
         if let Ok(updater) = controls.DisplayUpdater() {
             let _ = updater.ClearAll();

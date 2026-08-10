@@ -25,6 +25,7 @@ import {
   parsePersistedPlaybackSession,
   playbackFallbackQualities,
   previewShuffleNext,
+  queueNavigationAvailability,
   readPersistedPlaybackSession,
   sourceStreamQuality,
   shouldScrobblePlayback,
@@ -357,6 +358,15 @@ describe("queue transition rules", () => {
     expect(getManualNextIndex(0, 3)).toBe(1);
     expect(getManualNextIndex(2, 3)).toBe(0);
     expect(getSequentialNextIndex(1, 3, "one")).toBe(1);
+  });
+
+  it("exposes remote navigation only within the same visible queue boundaries", () => {
+    expect(queueNavigationAvailability(-1, 3, "off", false)).toEqual({ canPrevious: false, canNext: false });
+    expect(queueNavigationAvailability(0, 3, "off", false)).toEqual({ canPrevious: false, canNext: true });
+    expect(queueNavigationAvailability(2, 3, "off", false)).toEqual({ canPrevious: true, canNext: false });
+    expect(queueNavigationAvailability(2, 3, "all", false)).toEqual({ canPrevious: true, canNext: true });
+    expect(queueNavigationAvailability(2, 3, "off", true)).toEqual({ canPrevious: true, canNext: true });
+    expect(queueNavigationAvailability(0, 1, "all", false)).toEqual({ canPrevious: false, canNext: false });
   });
 
   it("moves Previous backward and wraps only when repeat permits it", () => {

@@ -10,6 +10,44 @@ export interface PlaylistPointerTarget {
   afterTarget: boolean;
 }
 
+const PLAYLIST_AUTO_SCROLL_EDGE_PX = 56;
+const PLAYLIST_AUTO_SCROLL_MAX_STEP_PX = 18;
+
+export function playlistAutoScrollDelta(
+  pointerY: number,
+  containerTop: number,
+  containerBottom: number,
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+): number {
+  if (![pointerY, containerTop, containerBottom, scrollTop, scrollHeight, clientHeight].every(Number.isFinite)) return 0;
+  if (containerBottom <= containerTop || clientHeight <= 0) return 0;
+
+  const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
+  const currentScrollTop = Math.min(maxScrollTop, Math.max(0, scrollTop));
+  const edge = Math.min(PLAYLIST_AUTO_SCROLL_EDGE_PX, (containerBottom - containerTop) / 2);
+  const upperEdge = containerTop + edge;
+  const lowerEdge = containerBottom - edge;
+  let direction = 0;
+  let intensity = 0;
+
+  if (pointerY < upperEdge) {
+    direction = -1;
+    intensity = Math.min(1, (upperEdge - pointerY) / edge);
+  } else if (pointerY > lowerEdge) {
+    direction = 1;
+    intensity = Math.min(1, (pointerY - lowerEdge) / edge);
+  } else {
+    return 0;
+  }
+
+  const requested = Math.max(1, Math.round(PLAYLIST_AUTO_SCROLL_MAX_STEP_PX * intensity));
+  const available = direction < 0 ? currentScrollTop : maxScrollTop - currentScrollTop;
+  if (available <= 0) return 0;
+  return direction * Math.min(requested, available);
+}
+
 export function playlistPointerTarget(
   pointerY: number,
   rows: readonly PlaylistRowBounds[],

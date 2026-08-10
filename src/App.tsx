@@ -108,7 +108,7 @@ import { useActiveLyricsScroll } from "./lyricsScroll";
 import { getLyricsActionPresentation } from "./playerActions";
 import { playbackControlLabel, rangeFillPercent, usableDurationSeconds } from "./playerUi";
 import { calculatePopconfirmLayout } from "./popconfirmPosition";
-import { playlistDropIndex, playlistMoveAfterId, playlistPointerTarget, reorderPlaylistItems } from "./playlistOrder";
+import { playlistAutoScrollDelta, playlistDropIndex, playlistMoveAfterId, playlistPointerTarget, reorderPlaylistItems } from "./playlistOrder";
 import { homeRecommendationHubs, isRecentlyAddedHub, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
 import { createArtistLookup, resolveTrackArtists, type ArtistLookup } from "./trackArtists";
 import { nextTrackSort, sortTracks, type TrackSortKey, type TrackSortState } from "./trackSort";
@@ -128,7 +128,7 @@ import type {
   ThemeMode,
 } from "./types";
 import { formatDuration, trackAlbum, trackArtist } from "./types";
-import { readPersistedPlaybackSession, usePlayer, type PlaybackFailure } from "./usePlayer";
+import { queueNavigationAvailability, readPersistedPlaybackSession, usePlayer, type PlaybackFailure } from "./usePlayer";
 import { detectOutputPlatform, useOutputDevices } from "./useOutputDevices";
 import { useLyrics } from "./useLyrics";
 import { usePlexLogin } from "./usePlexLogin";
@@ -333,6 +333,7 @@ function MainApplication({
 
   const load = useCallback(async () => {
     setError(undefined);
+    let authenticatedSession: BootstrapResponse | undefined;
     try {
       const nextSession = await bootstrap();
       if (!nextSession.authenticated || !nextSession.account) {
@@ -340,11 +341,13 @@ function MainApplication({
         setSession(nextSession);
         return;
       }
+      authenticatedSession = nextSession;
       const nextLibrary = await loadInitialLibraryData(readPersistedPlaybackSession()?.serverId);
       setInitialLibrary(nextLibrary);
       setSession(nextSession);
     } catch (reason) {
       const nextError = reason instanceof Error ? reason : new Error(String(reason));
+      if (authenticatedSession) setSession(authenticatedSession);
       setError(nextError.message);
       throw nextError;
     }
@@ -576,17 +579,12 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   };
   const hasCurrentTrack = Boolean(player.current);
   const hasQueue = hasCurrentTrack && player.queue.length > 0;
-  const queueNavigation = (() => {
-    const length = player.queue.length;
-    const atFirst = player.currentIndex <= 0;
-    const atLast = player.currentIndex >= length - 1;
-    // 循环开启或随机模式下首尾始终可切；顺序且未循环时首曲禁上一首、末曲禁下一首。
-    const anyWrap = player.repeat !== "off" || player.shuffle;
-    return {
-      canPrevious: length > 1 && (anyWrap || !atFirst),
-      canNext: length > 1 && (anyWrap || !atLast),
-    };
-  })();
+  const queueNavigation = queueNavigationAvailability(
+    player.currentIndex,
+    player.queue.length,
+    player.repeat,
+    player.shuffle,
+  );
   const hasLyrics = hasDisplayableLyrics(nowPlayingLyrics.document);
   const lyricsUnavailable = hasCurrentTrack
     && !nowPlayingLyrics.loading
@@ -3139,6 +3137,8 @@ interface PlaylistPointerDragSession {
   fromIndex: number;
   startX: number;
   startY: number;
+  clientX: number;
+  clientY: number;
   targetIndex: number;
   afterTarget: boolean;
   active: boolean;
@@ -3147,9 +3147,13 @@ interface PlaylistPointerDragSession {
   previewLeft?: number;
   previewOffsetY?: number;
   previewHeight?: number;
+  scrollContainer?: HTMLElement;
+  autoScrollFrame?: number;
+  lastAutoScrollAt?: number;
 }
 
 function removePlaylistPointerVisuals(session?: PlaylistPointerDragSession): void {
+  if (session?.autoScrollFrame !== undefined) window.cancelAnimationFrame(session.autoScrollFrame);
   session?.previewElement?.remove();
   session?.indicatorElement?.remove();
 }
@@ -3275,27 +3279,61 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
     return { left, top };
   })() : undefined;
 
-  const updatePointerReorder = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  function schedulePointerAutoScroll(): void {
     const session = pointerDragRef.current;
-    if (!session || session.pointerId !== event.pointerId || reorderBusy) return;
-    if (!session.active && Math.hypot(event.clientX - session.startX, event.clientY - session.startY) < 4) return;
+    if (!session?.active || session.autoScrollFrame !== undefined) return;
+    session.autoScrollFrame = window.requestAnimationFrame((timestamp) => {
+      const current = pointerDragRef.current;
+      if (!current) return;
+      current.autoScrollFrame = undefined;
+      if (!current.active || reorderBusy) return;
+      const frameDuration = current.lastAutoScrollAt === undefined
+        ? 1000 / 60
+        : Math.min(32, Math.max(1, timestamp - current.lastAutoScrollAt));
+      current.lastAutoScrollAt = timestamp;
+
+      const scrollContainer = current.scrollContainer;
+      if (scrollContainer?.isConnected) {
+        const bounds = scrollContainer.getBoundingClientRect();
+        const delta = playlistAutoScrollDelta(
+          current.clientY,
+          bounds.top,
+          bounds.bottom,
+          scrollContainer.scrollTop,
+          scrollContainer.scrollHeight,
+          scrollContainer.clientHeight,
+        );
+        if (delta) scrollContainer.scrollTop += delta * frameDuration / (1000 / 60);
+      }
+
+      updatePointerReorderAt(current.pointerId, current.clientX, current.clientY);
+      schedulePointerAutoScroll();
+    });
+  }
+
+  function updatePointerReorderAt(pointerId: number, clientX: number, clientY: number): boolean {
+    const session = pointerDragRef.current;
+    if (!session || session.pointerId !== pointerId || reorderBusy) return false;
+    session.clientX = clientX;
+    session.clientY = clientY;
+    if (!session.active && Math.hypot(clientX - session.startX, clientY - session.startY) < 4) return false;
 
     const rows = Array.from(tableRef.current?.querySelectorAll<HTMLElement>(".track-data-row") || []);
     const rowBounds = rows.map((row) => row.getBoundingClientRect());
-    const target = playlistPointerTarget(event.clientY, rowBounds);
-    if (!target) return;
+    const target = playlistPointerTarget(clientY, rowBounds);
+    if (!target) return false;
 
-    event.preventDefault();
     let previewElement = session.previewElement;
     let indicatorElement = session.indicatorElement;
     let previewLeft = session.previewLeft;
     let previewOffsetY = session.previewOffsetY;
     let previewHeight = session.previewHeight;
+    let scrollContainer = session.scrollContainer;
 
     if (!session.active) {
       const sourceRow = rows[session.fromIndex];
       const sourceBounds = rowBounds[session.fromIndex];
-      if (!sourceRow || !sourceBounds) return;
+      if (!sourceRow || !sourceBounds) return false;
 
       previewElement = sourceRow.cloneNode(true) as HTMLDivElement;
       previewElement.classList.remove("is-current", "is-remove-confirm-open", "is-dragging");
@@ -3315,14 +3353,15 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
       previewLeft = sourceBounds.left;
       previewOffsetY = Math.max(0, Math.min(sourceBounds.height, session.startY - sourceBounds.top));
       previewHeight = sourceBounds.height;
+      scrollContainer = tableRef.current?.closest<HTMLElement>("[data-route-scroll-container], .route-page-scroll") || undefined;
       document.body.append(previewElement, indicatorElement);
     }
 
-    if (!previewElement || !indicatorElement || previewLeft === undefined || previewOffsetY === undefined || previewHeight === undefined) return;
+    if (!previewElement || !indicatorElement || previewLeft === undefined || previewOffsetY === undefined || previewHeight === undefined) return false;
 
     const previewTop = Math.max(
       8,
-      Math.min(Math.max(8, window.innerHeight - previewHeight - 8), event.clientY - previewOffsetY),
+      Math.min(Math.max(8, window.innerHeight - previewHeight - 8), clientY - previewOffsetY),
     );
     previewElement.style.transform = `translate3d(${Math.round(previewLeft)}px, ${Math.round(previewTop)}px, 0)`;
 
@@ -3334,28 +3373,36 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
     indicatorElement.dataset.dropTargetIndex = String(target.targetIndex);
     indicatorElement.dataset.dropEdge = target.afterTarget ? "after" : "before";
 
+    const targetChanged = !session.active
+      || session.targetIndex !== target.targetIndex
+      || session.afterTarget !== target.afterTarget;
     const nextSession: PlaylistPointerDragSession = {
       ...session,
       ...target,
+      clientX,
+      clientY,
       active: true,
       previewElement,
       indicatorElement,
       previewLeft,
       previewOffsetY,
       previewHeight,
+      scrollContainer,
     };
     pointerDragRef.current = nextSession;
-    setDragState((current) => (
-      current?.fromIndex === nextSession.fromIndex
-      && current.targetIndex === nextSession.targetIndex
-      && current.afterTarget === nextSession.afterTarget
-        ? current
-        : {
-            fromIndex: nextSession.fromIndex,
-            targetIndex: nextSession.targetIndex,
-            afterTarget: nextSession.afterTarget,
-          }
-    ));
+    if (targetChanged) {
+      setDragState({
+        fromIndex: nextSession.fromIndex,
+        targetIndex: nextSession.targetIndex,
+        afterTarget: nextSession.afterTarget,
+      });
+    }
+    schedulePointerAutoScroll();
+    return true;
+  }
+
+  const updatePointerReorder = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (updatePointerReorderAt(event.pointerId, event.clientX, event.clientY)) event.preventDefault();
   };
 
   const finishPointerReorder = (event: ReactPointerEvent<HTMLButtonElement>, cancelled = false) => {
@@ -3430,6 +3477,8 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
                         fromIndex: index,
                         startX: event.clientX,
                         startY: event.clientY,
+                        clientX: event.clientX,
+                        clientY: event.clientY,
                         targetIndex: index,
                         afterTarget: false,
                         active: false,

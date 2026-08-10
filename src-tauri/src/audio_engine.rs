@@ -909,6 +909,20 @@ impl QueueState {
         }
     }
 
+    fn remote_navigation_availability(&self) -> (bool, bool) {
+        let Some(current) = self.current() else {
+            return (false, false);
+        };
+        if self.tracks.len() <= 1 {
+            return (false, false);
+        }
+        let can_wrap = self.repeat != NativeRepeatMode::Off || self.shuffle;
+        (
+            can_wrap || current > 0,
+            can_wrap || current + 1 < self.tracks.len(),
+        )
+    }
+
     /// Commit an already-queued source as the current track. The index was
     /// validated against `peek_next_index` when it was queued, so no further
     /// decision is needed here; keep the shuffle bag in sync with reality.
@@ -989,6 +1003,7 @@ type NowPlayingSignature = (
     Option<u64>,
     crate::now_playing::PlaybackState,
     Option<(usize, usize)>,
+    (bool, bool),
 );
 
 /// A decoded and buffered next track already appended to the rodio queue.
@@ -2779,11 +2794,17 @@ impl NativeAudioEngine {
                         let artwork_identity = artwork
                             .as_ref()
                             .map(|bytes| (Arc::as_ptr(bytes) as usize, bytes.len()));
+                        let navigation = engine
+                            .queue
+                            .lock()
+                            .map(|queue| queue.remote_navigation_availability())
+                            .unwrap_or((false, false));
                         let signature = (
                             meta.clone(),
                             duration_value.map(f64::to_bits),
                             playback_state,
                             artwork_identity,
+                            navigation,
                         );
                         let periodic_refresh_due = last_now_playing_at
                             .map(|at| at.elapsed() >= Duration::from_secs(2))
@@ -2798,6 +2819,8 @@ impl NativeAudioEngine {
                                 duration_value,
                                 position,
                                 playback_state,
+                                navigation.0,
+                                navigation.1,
                                 artwork,
                             );
                             last_now_playing_signature = Some(signature);
@@ -4177,6 +4200,27 @@ mod tests {
         assert_eq!(queue.peek_next_index(true), None);
         assert_eq!(queue.next_index(false), Some(0));
         assert_eq!(queue.current_index, 0);
+    }
+
+    #[test]
+    fn remote_navigation_matches_the_visible_queue_boundaries() {
+        let mut queue = QueueState {
+            tracks: vec![queue_track("a"), queue_track("b"), queue_track("c")],
+            current_index: 0,
+            repeat: NativeRepeatMode::Off,
+            ..QueueState::default()
+        };
+        assert_eq!(queue.remote_navigation_availability(), (false, true));
+        queue.current_index = 2;
+        assert_eq!(queue.remote_navigation_availability(), (true, false));
+        queue.repeat = NativeRepeatMode::All;
+        assert_eq!(queue.remote_navigation_availability(), (true, true));
+        queue.repeat = NativeRepeatMode::Off;
+        queue.shuffle = true;
+        assert_eq!(queue.remote_navigation_availability(), (true, true));
+        queue.tracks.truncate(1);
+        queue.current_index = 0;
+        assert_eq!(queue.remote_navigation_availability(), (false, false));
     }
 
     #[test]
