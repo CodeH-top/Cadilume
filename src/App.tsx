@@ -14,7 +14,6 @@ import {
   Database,
   EllipsisVertical,
   Globe2,
-  GripVertical,
   Headphones,
   History,
   Laptop,
@@ -24,6 +23,7 @@ import {
   LockKeyhole,
   LoaderCircle,
   LogOut,
+  Menu,
   Mic2,
   Moon,
   Music2,
@@ -55,7 +55,7 @@ import {
 import * as Select from "@radix-ui/react-select";
 import { KeepAlive, type KeepAliveRef, useKeepAliveContext, useKeepAliveRef } from "keepalive-for-react";
 import { createHashRouter, Navigate, RouterProvider, useLocation, useNavigate, useOutlet } from "react-router-dom";
-import { createContext, FormEvent, memo, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import { createContext, FormEvent, memo, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { TooltipLayer } from "./TooltipLayer";
 import {
@@ -97,6 +97,7 @@ import "./App.css";
 import { ARTIST_BIOGRAPHY_COLLAPSE_LINES, normalizeArtistBiography, previewArtistBiography, shouldCollapseArtistBiography } from "./artistBiography";
 import { appendUniqueArtistTracks, collectAllArtistTracks, isArtistTrackCollectionCancelled } from "./artistTracks";
 import { selectRandomContextPlayback } from "./contextPlayback";
+import { loadInitialLibraryData, orderPlaylistsByRecency, type InitialLibraryData } from "./initialLibrary";
 import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
 import { isCurrentLibraryDetailRoute, libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryRoute, type LibraryDetailType, type LibraryRoute } from "./libraryRoute";
 import { createCadilumeEntryState, historyEntryCacheKey, routeEntryId, routeParentEntryId } from "./routeEntry";
@@ -107,7 +108,7 @@ import { useActiveLyricsScroll } from "./lyricsScroll";
 import { getLyricsActionPresentation } from "./playerActions";
 import { playbackControlLabel, rangeFillPercent, usableDurationSeconds } from "./playerUi";
 import { calculatePopconfirmLayout } from "./popconfirmPosition";
-import { playlistDropIndex, playlistMoveAfterId, reorderPlaylistItems } from "./playlistOrder";
+import { playlistDropIndex, playlistMoveAfterId, playlistPointerTarget, reorderPlaylistItems } from "./playlistOrder";
 import { homeRecommendationHubs, isRecentlyAddedHub, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
 import { createArtistLookup, resolveTrackArtists, type ArtistLookup } from "./trackArtists";
 import { nextTrackSort, sortTracks, type TrackSortKey, type TrackSortState } from "./trackSort";
@@ -176,6 +177,7 @@ type PlaylistSelection = { tracks: PlexItem[]; label: string };
 
 interface MusicShellRuntime {
   initialSession: BootstrapResponse;
+  initialLibrary: InitialLibraryData;
   account: PlexAccount;
   themeMode: ThemeMode;
   resolvedTheme: ResolvedTheme;
@@ -319,6 +321,7 @@ function MainApplication({
   syncBrandPreset: (preset: BrandPreset) => void;
 }) {
   const [session, setSession] = useState<BootstrapResponse>();
+  const [initialLibrary, setInitialLibrary] = useState<InitialLibraryData>();
   const [error, setError] = useState<string>();
   const syncedBrandSessionRef = useRef<BootstrapResponse | undefined>(undefined);
   const requestedUiPreview = import.meta.env.DEV
@@ -331,15 +334,28 @@ function MainApplication({
   const load = useCallback(async () => {
     setError(undefined);
     try {
-      setSession(await bootstrap());
+      const nextSession = await bootstrap();
+      if (!nextSession.authenticated || !nextSession.account) {
+        setInitialLibrary(undefined);
+        setSession(nextSession);
+        return;
+      }
+      const nextLibrary = await loadInitialLibraryData(readPersistedPlaybackSession()?.serverId);
+      setInitialLibrary(nextLibrary);
+      setSession(nextSession);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      const nextError = reason instanceof Error ? reason : new Error(String(reason));
+      setError(nextError.message);
+      throw nextError;
     }
   }, []);
+  const retryLoad = useCallback(() => {
+    void load().catch(() => undefined);
+  }, [load]);
 
   useEffect(() => {
-    if (!uiPreview) void load();
-  }, [load, uiPreview]);
+    if (!uiPreview) retryLoad();
+  }, [retryLoad, uiPreview]);
 
   useLayoutEffect(() => {
     // `syncBrandPreset` changes identity when the user chooses a new preset.
@@ -356,11 +372,13 @@ function MainApplication({
   }
   if (uiPreview === "notifications") return <AppFrame><NotificationFixture /></AppFrame>;
   if (!session && !error) return <AppFrame fullBleed><SplashScreen /></AppFrame>;
-  if (!session || error) return <AppFrame><FatalError message={error || "无法启动 Cadilume"} retry={load} /></AppFrame>;
+  if (!session) return <AppFrame><FatalError message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>;
   if (!session.authenticated || !session.account) {
     return <AppFrame><LoginScreen clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>;
   }
-  return <AppFrame integrated><MusicShell initialSession={session} themeMode={themeMode} resolvedTheme={resolvedTheme} brandPreset={brandPreset} onThemeMode={onThemeMode} onBrandPreset={onBrandPreset} /></AppFrame>;
+  if (error) return <AppFrame><FatalError message={error} retry={retryLoad} /></AppFrame>;
+  if (!initialLibrary) return <AppFrame fullBleed><SplashScreen /></AppFrame>;
+  return <AppFrame integrated><MusicShell initialSession={session} initialLibrary={initialLibrary} themeMode={themeMode} resolvedTheme={resolvedTheme} brandPreset={brandPreset} onThemeMode={onThemeMode} onBrandPreset={onBrandPreset} /></AppFrame>;
 }
 
 function AppFrame({ children, integrated = false, fullBleed = false }: {
@@ -459,8 +477,9 @@ function AppTitlebar({ children, inactive = false }: { children?: ReactNode; ina
   );
 }
 
-function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onThemeMode, onBrandPreset }: {
+function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, brandPreset, onThemeMode, onBrandPreset }: {
   initialSession: BootstrapResponse;
+  initialLibrary: InitialLibraryData;
   themeMode: ThemeMode;
   resolvedTheme: ResolvedTheme;
   brandPreset: BrandPreset;
@@ -469,11 +488,11 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 }) {
   const account = initialSession.account as PlexAccount;
   const [initialPlaybackSession] = useState(() => readPersistedPlaybackSession());
-  const [servers, setServers] = useState<PlexServer[]>([]);
-  const [serverId, setServerId] = useState<string>();
-  const [sections, setSections] = useState<LibrarySection[]>([]);
-  const [sectionKey, setSectionKey] = useState<string>();
-  const [libraryArtists, setLibraryArtists] = useState<PlexItem[]>([]);
+  const [servers, setServers] = useState<PlexServer[]>(initialLibrary.servers);
+  const [serverId, setServerId] = useState<string | undefined>(initialLibrary.serverId);
+  const [sections, setSections] = useState<LibrarySection[]>(initialLibrary.sections);
+  const [sectionKey, setSectionKey] = useState<string | undefined>(initialLibrary.sectionKey);
+  const [libraryArtists, setLibraryArtists] = useState<PlexItem[]>(initialLibrary.libraryArtists);
   const [, setLoading] = useState(true);
   const {
     notices,
@@ -486,7 +505,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const [playlistSelection, setPlaylistSelection] = useState<PlaylistSelection>();
   const [playlistCreationOpen, setPlaylistCreationOpen] = useState(false);
   const [deviceNameDialogOpen, setDeviceNameDialogOpen] = useState(false);
-  const [playlists, setPlaylists] = useState<PlexPlaylist[]>([]);
+  const [playlists, setPlaylists] = useState<PlexPlaylist[]>(initialLibrary.playlists);
   const [playlistListLoading, setPlaylistListLoading] = useState(false);
   const [playlistListError, setPlaylistListError] = useState<string>();
   const [statusIconEnabled, setStatusIconEnabled] = useState(initialSession.statusIconEnabled);
@@ -506,7 +525,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   const bumpPlaylistMutation = useCallback(() => {
     setPlaylistMutationRevision((revision) => revision + 1);
   }, []);
-  const [connectionAvailable, setConnectionAvailable] = useState(false);
+  const [connectionAvailable, setConnectionAvailable] = useState(Boolean(initialLibrary.serverId));
   const [playbackSettingsRequest, setPlaybackSettingsRequest] = useState(0);
   const [playbackFailurePreview, setPlaybackFailurePreview] = useState<PlaybackFailure>();
   const nowPlayingTriggerRef = useRef<HTMLButtonElement>(null);
@@ -603,6 +622,11 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   }, [routeAliveRef, sectionKey, serverId]);
 
   useEffect(() => {
+    if (
+      sourceRevision === 0
+      && serverId === initialLibrary.serverId
+      && sectionKey === initialLibrary.sectionKey
+    ) return;
     const requestId = ++artistDirectoryRequestRef.current;
     if (!serverId || !sectionKey) {
       setLibraryArtists([]);
@@ -618,7 +642,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     return () => {
       if (artistDirectoryRequestRef.current === requestId) artistDirectoryRequestRef.current += 1;
     };
-  }, [sectionKey, serverId, sourceRevision]);
+  }, [initialLibrary.sectionKey, initialLibrary.serverId, sectionKey, serverId, sourceRevision]);
 
   useEffect(() => {
     if (!previewPlaybackFailure || !player.current) {
@@ -692,9 +716,8 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     }
   }, [notify, preferredPlaybackServerId]);
 
-  useEffect(() => { void loadServers(); }, [loadServers]);
-
   useEffect(() => {
+    if (sourceRevision === 0 && serverId === initialLibrary.serverId) return;
     if (!serverId) return;
     let cancelled = false;
     setLoading(true);
@@ -713,7 +736,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       })
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
-  }, [notify, serverId, sourceRevision]);
+  }, [initialLibrary.serverId, notify, serverId, sourceRevision]);
 
   const loadPlaylistList = useCallback(async (announce = false) => {
     const requestId = ++playlistListRequestRef.current;
@@ -729,12 +752,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     try {
       const result = await getPlaylists(serverId);
       if (playlistListRequestRef.current === requestId) {
-        const ordered = [...result].sort((left, right) => {
-          const leftTime = left.addedAt ?? left.updatedAt ?? 0;
-          const rightTime = right.addedAt ?? right.updatedAt ?? 0;
-          return rightTime - leftTime;
-        });
-        setPlaylists(ordered);
+        setPlaylists(orderPlaylistsByRecency(result));
         if (announce) notify(result.length ? `歌单已刷新，共 ${result.length} 个。` : "歌单已刷新，当前没有可显示的音乐歌单。", "success");
       }
     } catch (reason) {
@@ -786,8 +804,9 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   }, [bumpPlaylistMutation, loadPlaylistList, notify, serverId]);
 
   useEffect(() => {
+    if (sourceRevision === 0 && serverId === initialLibrary.serverId) return;
     void loadPlaylistList();
-  }, [loadPlaylistList, sourceRevision]);
+  }, [initialLibrary.serverId, loadPlaylistList, serverId, sourceRevision]);
 
   const syncSources = async () => {
     setSourcesSyncing(true);
@@ -818,7 +837,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
       setServerId(refreshedServer.id);
       setSections(refreshedSections);
       setSectionKey(refreshedSection?.key);
-      setPlaylists(refreshedPlaylists);
+      setPlaylists(orderPlaylistsByRecency(refreshedPlaylists));
       artistDirectoryRequestRef.current += 1;
       setLibraryArtists(refreshedArtists);
       setSourceRevision((revision) => revision + 1);
@@ -1102,6 +1121,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
 
   const runtime: MusicShellRuntime = {
     initialSession,
+    initialLibrary,
     account,
     themeMode,
     resolvedTheme,
@@ -1724,8 +1744,15 @@ function RoutePage() {
   // the first route that happened to mount this component.
   const { route, entryLocation, onNavigate, onBack } = useRouteEntry();
   const runtime = useMusicShellRuntime();
-  const [items, setItems] = useState<PlexItem[]>([]);
-  const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
+  const preparedHome = !route.detail
+    && route.view === "home"
+    && runtime.sourceRevision === 0
+    && runtime.serverId === runtime.initialLibrary.serverId
+    && runtime.sectionKey === runtime.initialLibrary.sectionKey
+      ? runtime.initialLibrary.home
+      : undefined;
+  const [items, setItems] = useState<PlexItem[]>(() => preparedHome?.recentAlbums || []);
+  const [homeHubs, setHomeHubs] = useState<PlexHub[]>(() => preparedHome?.hubs || []);
   const [searchHubs, setSearchHubs] = useState<PlexHub[]>([]);
   const [detail, setDetail] = useState<{ source: PlexItem; children: PlexItem[] }>();
   const [playlist, setPlaylist] = useState<PlexPlaylist>();
@@ -1734,7 +1761,7 @@ function RoutePage() {
   const [playlistError, setPlaylistError] = useState<string>();
   const [playlistReorderBusy, setPlaylistReorderBusy] = useState(false);
   const [playlistRetryRequest, setPlaylistRetryRequest] = useState(0);
-  const [loading, setLoading] = useState(route.view !== "settings" && route.view !== "tracks");
+  const [loading, setLoading] = useState(route.view !== "settings" && route.view !== "tracks" && !preparedHome);
   const requestRef = useRef(0);
   const query = route.query || "";
   const view = route.view;
@@ -1868,7 +1895,7 @@ function RoutePage() {
 
   useEffect(() => {
     const requestId = ++requestRef.current;
-    setLoading(view !== "settings" && view !== "tracks");
+    setLoading(view !== "settings" && view !== "tracks" && !preparedHome);
     setPlaylist(undefined);
     setPlaylistItems([]);
     setPlaylistError(undefined);
@@ -1881,6 +1908,12 @@ function RoutePage() {
     }
     if (view === "tracks") {
       setLoading(false);
+      return;
+    }
+    if (preparedHome) {
+      setItems(preparedHome.recentAlbums);
+      setHomeHubs(preparedHome.hubs);
+      setSearchHubs([]);
       return;
     }
     if (!runtime.serverId || !runtime.sectionKey) {
@@ -1962,7 +1995,7 @@ function RoutePage() {
     };
     void load();
     return () => { requestRef.current += 1; };
-  }, [onNavigate, playlistRetryRequest, query, route.detail, runtime.notify, runtime.playlistMutationRevision, runtime.refreshCacheStatus, runtime.sectionKey, runtime.serverId, runtime.sourceRevision, view]);
+  }, [onNavigate, playlistRetryRequest, preparedHome, query, route.detail, runtime.notify, runtime.playlistMutationRevision, runtime.refreshCacheStatus, runtime.sectionKey, runtime.serverId, runtime.sourceRevision, view]);
 
   const content = playlist ? (
     <PlaylistDetailView
@@ -3134,6 +3167,15 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
   const actionMenuRef = useRef<HTMLDivElement>(null);
   const removeAnchorRef = useRef<HTMLButtonElement | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
+  const pointerDragRef = useRef<{
+    pointerId: number;
+    fromIndex: number;
+    startX: number;
+    startY: number;
+    targetIndex: number;
+    afterTarget: boolean;
+    active: boolean;
+  } | undefined>(undefined);
 
   useEffect(() => {
     if (!reorderFocusId || reorderBusy) return;
@@ -3211,9 +3253,57 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
     return { left, top };
   })() : undefined;
 
+  const updatePointerReorder = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const session = pointerDragRef.current;
+    if (!session || session.pointerId !== event.pointerId || reorderBusy) return;
+    if (!session.active && Math.hypot(event.clientX - session.startX, event.clientY - session.startY) < 4) return;
+
+    const rowBounds = Array.from(tableRef.current?.querySelectorAll<HTMLElement>(".track-data-row") || [])
+      .map((row) => row.getBoundingClientRect());
+    const target = playlistPointerTarget(event.clientY, rowBounds);
+    if (!target) return;
+
+    event.preventDefault();
+    const nextSession = { ...session, ...target, active: true };
+    pointerDragRef.current = nextSession;
+    setDragState((current) => (
+      current?.fromIndex === nextSession.fromIndex
+      && current.targetIndex === nextSession.targetIndex
+      && current.afterTarget === nextSession.afterTarget
+        ? current
+        : {
+            fromIndex: nextSession.fromIndex,
+            targetIndex: nextSession.targetIndex,
+            afterTarget: nextSession.afterTarget,
+          }
+    ));
+  };
+
+  const finishPointerReorder = (event: ReactPointerEvent<HTMLButtonElement>, cancelled = false) => {
+    const session = pointerDragRef.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    pointerDragRef.current = undefined;
+    setDragState(undefined);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (cancelled || !session.active || reorderBusy || !onMoveTrack) return;
+
+    const toIndex = playlistDropIndex(
+      session.fromIndex,
+      session.targetIndex,
+      session.afterTarget,
+      tracks.length,
+    );
+    if (session.fromIndex === toIndex) return;
+    const movedTrack = tracks[session.fromIndex];
+    if (movedTrack) setReorderFocusId(movedTrack.playlistItemID || movedTrack.ratingKey);
+    void onMoveTrack(session.fromIndex, toIndex);
+  };
+
   return (
     <>
-      <div ref={tableRef} className={`track-table ${selection ? "has-selection" : ""} ${onMoveTrack ? "has-reorder" : ""}`.trim()} role="table" aria-label={label} aria-rowcount={(totalSize ?? tracks.length) + 1}>
+      <div ref={tableRef} className={`track-table ${selection ? "has-selection" : ""} ${onMoveTrack ? "has-reorder" : ""} ${dragState ? "is-reordering" : ""}`.trim()} role="table" aria-label={label} aria-rowcount={(totalSize ?? tracks.length) + 1}>
         <div className="track-row table-head" role="row">
           {selection && <span className="track-selection-heading" role="columnheader"><SelectionCheckbox checked={allPageSelected} indeterminate={selectedOnPage > 0 && !allPageSelected} label="选择当前页全部歌曲" onChange={(checked) => selection.onTogglePage(checked)} /></span>}
           {onMoveTrack && <span className="track-reorder-heading" role="columnheader" aria-label="排序" />}
@@ -3240,31 +3330,6 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
               role="row"
               aria-rowindex={index + 2}
               key={track.playlistItemID || `${track.ratingKey}-${index}`}
-              onDragOver={onMoveTrack ? (event) => {
-                if (!dragState || reorderBusy) return;
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "move";
-                const rect = event.currentTarget.getBoundingClientRect();
-                const afterTarget = event.clientY >= rect.top + rect.height / 2;
-                if (dragState.targetIndex !== index || dragState.afterTarget !== afterTarget) {
-                  setDragState({ ...dragState, targetIndex: index, afterTarget });
-                }
-              } : undefined}
-              onDrop={onMoveTrack ? (event) => {
-                event.preventDefault();
-                if (!dragState || reorderBusy) return;
-                const rect = event.currentTarget.getBoundingClientRect();
-                const afterTarget = event.clientY >= rect.top + rect.height / 2;
-                const toIndex = playlistDropIndex(
-                  dragState.fromIndex,
-                  index,
-                  afterTarget,
-                  tracks.length,
-                );
-                const fromIndex = dragState.fromIndex;
-                setDragState(undefined);
-                if (fromIndex !== toIndex) void onMoveTrack(fromIndex, toIndex);
-              } : undefined}
             >
               {selection && <span className="track-selection-cell" role="cell"><SelectionCheckbox checked={selection.selectedRatingKeys.has(track.ratingKey)} label={`选择《${track.title}》`} onChange={(checked) => selection.onToggleTrack(track.ratingKey, checked)} /></span>}
               {onMoveTrack && (
@@ -3272,18 +3337,42 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
                   <button
                     className="track-reorder-handle"
                     type="button"
-                    draggable={!reorderBusy}
                     disabled={reorderBusy}
                     aria-label={`调整《${track.title}》的顺序`}
                     data-playlist-item-id={track.playlistItemID || track.ratingKey}
-                    data-tooltip="拖拽排序"
-                    onDragStart={(event: ReactDragEvent<HTMLButtonElement>) => {
-                      event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("text/plain", track.playlistItemID || String(index));
-                      setDragState({ fromIndex: index, targetIndex: index, afterTarget: false });
+                    data-tooltip="拖动调整顺序"
+                    onPointerDown={(event) => {
+                      if (reorderBusy || event.button !== 0 || !event.isPrimary) return;
+                      event.preventDefault();
+                      event.currentTarget.focus();
+                      event.currentTarget.setPointerCapture(event.pointerId);
+                      pointerDragRef.current = {
+                        pointerId: event.pointerId,
+                        fromIndex: index,
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        targetIndex: index,
+                        afterTarget: false,
+                        active: false,
+                      };
                     }}
-                    onDragEnd={() => setDragState(undefined)}
+                    onPointerMove={updatePointerReorder}
+                    onPointerUp={(event) => finishPointerReorder(event)}
+                    onPointerCancel={(event) => finishPointerReorder(event, true)}
+                    onLostPointerCapture={(event) => {
+                      if (pointerDragRef.current?.pointerId !== event.pointerId) return;
+                      pointerDragRef.current = undefined;
+                      setDragState(undefined);
+                    }}
                     onKeyDown={(event) => {
+                      if (event.key === "Escape" && pointerDragRef.current) {
+                        event.preventDefault();
+                        const { pointerId } = pointerDragRef.current;
+                        pointerDragRef.current = undefined;
+                        setDragState(undefined);
+                        if (event.currentTarget.hasPointerCapture(pointerId)) event.currentTarget.releasePointerCapture(pointerId);
+                        return;
+                      }
                       if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
                       event.preventDefault();
                       const toIndex = event.key === "ArrowUp" ? index - 1 : index + 1;
@@ -3293,7 +3382,7 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
                       void onMoveTrack(index, toIndex);
                     }}
                   >
-                    {reorderBusy ? <LoaderCircle className="spin" size={14} /> : <GripVertical size={15} />}
+                    {reorderBusy ? <LoaderCircle className="spin" size={14} /> : <Menu size={17} strokeWidth={2.1} />}
                   </button>
                 </span>
               )}

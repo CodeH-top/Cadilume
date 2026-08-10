@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { playlistDropIndex, playlistMoveAfterId, reorderPlaylistItems } from "./playlistOrder";
+import { playlistDropIndex, playlistMoveAfterId, playlistPointerTarget, reorderPlaylistItems } from "./playlistOrder";
 import type { PlexItem } from "./types";
 
 const item = (id: string): PlexItem => ({
@@ -11,6 +11,22 @@ const item = (id: string): PlexItem => ({
 });
 
 describe("playlist order", () => {
+  it("maps a captured pointer to the visible row half used as the drop edge", () => {
+    const rows = [
+      { top: 100, bottom: 140 },
+      { top: 140, bottom: 180 },
+      { top: 180, bottom: 220 },
+    ];
+
+    expect(playlistPointerTarget(80, rows)).toEqual({ targetIndex: 0, afterTarget: false });
+    expect(playlistPointerTarget(119, rows)).toEqual({ targetIndex: 0, afterTarget: false });
+    expect(playlistPointerTarget(120, rows)).toEqual({ targetIndex: 0, afterTarget: true });
+    expect(playlistPointerTarget(141, rows)).toEqual({ targetIndex: 1, afterTarget: false });
+    expect(playlistPointerTarget(240, rows)).toEqual({ targetIndex: 2, afterTarget: true });
+    expect(playlistPointerTarget(Number.NaN, rows)).toBeUndefined();
+    expect(playlistPointerTarget(120, [])).toBeUndefined();
+  });
+
   it("resolves before and after drops after removing the dragged row", () => {
     expect(playlistDropIndex(0, 2, false, 4)).toBe(1);
     expect(playlistDropIndex(0, 2, true, 4)).toBe(2);

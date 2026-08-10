@@ -1,5 +1,35 @@
 import type { PlexItem } from "./types";
 
+export interface PlaylistRowBounds {
+  top: number;
+  bottom: number;
+}
+
+export interface PlaylistPointerTarget {
+  targetIndex: number;
+  afterTarget: boolean;
+}
+
+export function playlistPointerTarget(
+  pointerY: number,
+  rows: readonly PlaylistRowBounds[],
+): PlaylistPointerTarget | undefined {
+  if (!Number.isFinite(pointerY) || !rows.length) return undefined;
+  if (pointerY <= rows[0].top) return { targetIndex: 0, afterTarget: false };
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (pointerY < row.bottom) {
+      return {
+        targetIndex: index,
+        afterTarget: pointerY >= row.top + Math.max(0, row.bottom - row.top) / 2,
+      };
+    }
+  }
+
+  return { targetIndex: rows.length - 1, afterTarget: true };
+}
+
 export function playlistDropIndex(
   fromIndex: number,
   targetIndex: number,
