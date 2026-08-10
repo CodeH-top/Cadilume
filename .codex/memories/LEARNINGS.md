@@ -6,6 +6,10 @@
   WebView 或物理自动化链路中完全不触发，表现为手柄能按下但顺序毫无变化。对于行排序，更稳定的
   方案是在三横线手柄上使用 Pointer Events：按下后 `setPointerCapture()`，超过小幅移动阈值才进入
   拖动，再按指针所在行的上下半区计算 before / after 落点，释放时提交一次移动。
+- 自定义 Pointer 拖拽不会自动产生 HTML5 drag image。只降低原行透明度、再给目标行加上下边框并不
+  是完整拖拽反馈：应克隆已渲染行并固化其 computed grid 列宽，作为 `inert`、`pointer-events:none`
+  的 fixed 行虚影随指针移动；落点另建唯一的 fixed 2px 定位线。目标行本身不添加 before/after
+  边框类，虚影和定位线在 pointer up/cancel、lost capture、Escape 与组件卸载时统一清理。
 - 此类交互不能只验证落点纯函数或合成事件；至少要以真实物理指针把一首歌跨行移动，确认 DOM 顺序和
   PMS 成功提示都变化，再拖回原位避免污染用户歌单。智能和只读歌单同时确认不渲染排序列或手柄。
 

@@ -3134,6 +3134,26 @@ function TrackAlbumCell({ track, onOpenAlbum }: { track: PlexItem; onOpenAlbum: 
   );
 }
 
+interface PlaylistPointerDragSession {
+  pointerId: number;
+  fromIndex: number;
+  startX: number;
+  startY: number;
+  targetIndex: number;
+  afterTarget: boolean;
+  active: boolean;
+  previewElement?: HTMLDivElement;
+  indicatorElement?: HTMLDivElement;
+  previewLeft?: number;
+  previewOffsetY?: number;
+  previewHeight?: number;
+}
+
+function removePlaylistPointerVisuals(session?: PlaylistPointerDragSession): void {
+  session?.previewElement?.remove();
+  session?.indicatorElement?.remove();
+}
+
 function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = true, onSort, onOpenArtist, onOpenAlbum, onPlay, onRemoveTrack, onMoveTrack, reorderBusy = false, startIndex = 0, selection }: {
   label: string;
   tracks: PlexItem[];
@@ -3167,15 +3187,12 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
   const actionMenuRef = useRef<HTMLDivElement>(null);
   const removeAnchorRef = useRef<HTMLButtonElement | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
-  const pointerDragRef = useRef<{
-    pointerId: number;
-    fromIndex: number;
-    startX: number;
-    startY: number;
-    targetIndex: number;
-    afterTarget: boolean;
-    active: boolean;
-  } | undefined>(undefined);
+  const pointerDragRef = useRef<PlaylistPointerDragSession | undefined>(undefined);
+
+  useEffect(() => () => {
+    removePlaylistPointerVisuals(pointerDragRef.current);
+    pointerDragRef.current = undefined;
+  }, []);
 
   useEffect(() => {
     if (!reorderFocusId || reorderBusy) return;
@@ -3258,13 +3275,70 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
     if (!session || session.pointerId !== event.pointerId || reorderBusy) return;
     if (!session.active && Math.hypot(event.clientX - session.startX, event.clientY - session.startY) < 4) return;
 
-    const rowBounds = Array.from(tableRef.current?.querySelectorAll<HTMLElement>(".track-data-row") || [])
-      .map((row) => row.getBoundingClientRect());
+    const rows = Array.from(tableRef.current?.querySelectorAll<HTMLElement>(".track-data-row") || []);
+    const rowBounds = rows.map((row) => row.getBoundingClientRect());
     const target = playlistPointerTarget(event.clientY, rowBounds);
     if (!target) return;
 
     event.preventDefault();
-    const nextSession = { ...session, ...target, active: true };
+    let previewElement = session.previewElement;
+    let indicatorElement = session.indicatorElement;
+    let previewLeft = session.previewLeft;
+    let previewOffsetY = session.previewOffsetY;
+    let previewHeight = session.previewHeight;
+
+    if (!session.active) {
+      const sourceRow = rows[session.fromIndex];
+      const sourceBounds = rowBounds[session.fromIndex];
+      if (!sourceRow || !sourceBounds) return;
+
+      previewElement = sourceRow.cloneNode(true) as HTMLDivElement;
+      previewElement.classList.remove("is-current", "is-remove-confirm-open", "is-dragging");
+      previewElement.classList.add("track-drag-preview");
+      previewElement.setAttribute("aria-hidden", "true");
+      previewElement.inert = true;
+      previewElement.querySelectorAll<HTMLElement>("[id]").forEach((element) => element.removeAttribute("id"));
+      previewElement.querySelectorAll<HTMLElement>("[data-tooltip]").forEach((element) => element.removeAttribute("data-tooltip"));
+      previewElement.style.width = `${sourceBounds.width}px`;
+      previewElement.style.height = `${sourceBounds.height}px`;
+      previewElement.style.gridTemplateColumns = window.getComputedStyle(sourceRow).gridTemplateColumns;
+
+      indicatorElement = document.createElement("div");
+      indicatorElement.className = "track-drop-indicator";
+      indicatorElement.setAttribute("aria-hidden", "true");
+
+      previewLeft = sourceBounds.left;
+      previewOffsetY = Math.max(0, Math.min(sourceBounds.height, session.startY - sourceBounds.top));
+      previewHeight = sourceBounds.height;
+      document.body.append(previewElement, indicatorElement);
+    }
+
+    if (!previewElement || !indicatorElement || previewLeft === undefined || previewOffsetY === undefined || previewHeight === undefined) return;
+
+    const previewTop = Math.max(
+      8,
+      Math.min(Math.max(8, window.innerHeight - previewHeight - 8), event.clientY - previewOffsetY),
+    );
+    previewElement.style.transform = `translate3d(${Math.round(previewLeft)}px, ${Math.round(previewTop)}px, 0)`;
+
+    const targetBounds = rowBounds[target.targetIndex];
+    const indicatorInset = 10;
+    const indicatorTop = (target.afterTarget ? targetBounds.bottom : targetBounds.top) - 1;
+    indicatorElement.style.width = `${Math.max(0, targetBounds.width - indicatorInset * 2)}px`;
+    indicatorElement.style.transform = `translate3d(${Math.round(targetBounds.left + indicatorInset)}px, ${Math.round(indicatorTop)}px, 0)`;
+    indicatorElement.dataset.dropTargetIndex = String(target.targetIndex);
+    indicatorElement.dataset.dropEdge = target.afterTarget ? "after" : "before";
+
+    const nextSession: PlaylistPointerDragSession = {
+      ...session,
+      ...target,
+      active: true,
+      previewElement,
+      indicatorElement,
+      previewLeft,
+      previewOffsetY,
+      previewHeight,
+    };
     pointerDragRef.current = nextSession;
     setDragState((current) => (
       current?.fromIndex === nextSession.fromIndex
@@ -3282,6 +3356,7 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
   const finishPointerReorder = (event: ReactPointerEvent<HTMLButtonElement>, cancelled = false) => {
     const session = pointerDragRef.current;
     if (!session || session.pointerId !== event.pointerId) return;
+    removePlaylistPointerVisuals(session);
     pointerDragRef.current = undefined;
     setDragState(undefined);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -3323,10 +3398,9 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
         </div>
         {tracks.map((track, index) => {
           const current = runtime.player.current?.ratingKey === track.ratingKey;
-          const dropTarget = dragState?.targetIndex === index;
           return (
             <div
-              className={`track-row track-data-row ${current ? "is-current" : ""} ${pendingRemove === track ? "is-remove-confirm-open" : ""} ${dragState?.fromIndex === index ? "is-dragging" : ""} ${dropTarget ? dragState?.afterTarget ? "is-drop-after" : "is-drop-before" : ""}`.trim()}
+              className={`track-row track-data-row ${current ? "is-current" : ""} ${pendingRemove === track ? "is-remove-confirm-open" : ""} ${dragState?.fromIndex === index ? "is-dragging" : ""}`.trim()}
               role="row"
               aria-rowindex={index + 2}
               key={track.playlistItemID || `${track.ratingKey}-${index}`}
@@ -3360,14 +3434,18 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
                     onPointerUp={(event) => finishPointerReorder(event)}
                     onPointerCancel={(event) => finishPointerReorder(event, true)}
                     onLostPointerCapture={(event) => {
-                      if (pointerDragRef.current?.pointerId !== event.pointerId) return;
+                      const session = pointerDragRef.current;
+                      if (session?.pointerId !== event.pointerId) return;
+                      removePlaylistPointerVisuals(session);
                       pointerDragRef.current = undefined;
                       setDragState(undefined);
                     }}
                     onKeyDown={(event) => {
                       if (event.key === "Escape" && pointerDragRef.current) {
                         event.preventDefault();
-                        const { pointerId } = pointerDragRef.current;
+                        const session = pointerDragRef.current;
+                        const { pointerId } = session;
+                        removePlaylistPointerVisuals(session);
                         pointerDragRef.current = undefined;
                         setDragState(undefined);
                         if (event.currentTarget.hasPointerCapture(pointerId)) event.currentTarget.releasePointerCapture(pointerId);

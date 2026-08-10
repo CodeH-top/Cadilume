@@ -97,8 +97,10 @@
 - [ACT-031] 普通可写歌单的手动排序必须使用 PMS 返回的 `playlistItemID` 定位具体重复实例，并通过
   Rust/Tauri `move` 命令提交 `after` 目标；智能或只读歌单不提供拖拽，继续保留列表排序能力。
   排序入口使用三条等长横线手柄，通过 Pointer Events、`setPointerCapture()` 和移动阈值覆盖真实
-  WebView 指针拖动；乐观更新失败时重新读取 PMS 顺序，键盘方向键排序在异步保存解除 busy 后把
-  焦点恢复到移动项。验收必须包含真实物理指针拖动并确认顺序写入，纯函数测试不能替代。
+  WebView 指针拖动。拖动中保留原行占位并显示随指针移动的完整行虚影；落点只能由脱离目标行盒子的
+  独立单条定位线表示，禁止用目标行上下边框或 inset shadow 模拟。乐观更新失败时重新读取 PMS 顺序，
+  键盘方向键排序在异步保存解除 busy 后把焦点恢复到移动项。验收必须包含真实物理指针拖动并确认顺序
+  写入，纯函数测试不能替代。
   Source: playlist ordering implementation, Plex Web comparison and physical pointer acceptance on 2026-08-10.
 
 - [ACT-032] 已认证启动与新登录都必须在初始化页或登录页内完成首屏资料快照加载，再一次性挂载主界面；

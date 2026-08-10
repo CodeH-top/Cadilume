@@ -1,5 +1,14 @@
 # ERRORS
 
+## 2026-08-10 — 内部浏览器 CUA drag 可能不释放 Pointer Capture
+
+- Cadilume 行排序使用 `setPointerCapture()` 后，内部浏览器 `tab.cua.drag()` 本轮能触发 pointer down
+  与 move，页面也会出现正确的行虚影和独立定位线，但工具没有送达可被页面接收的 pointer up；调用
+  返回后拖动浮层仍存在、顺序未提交。追加 `cua.click()` 也不能补出这次释放。
+- 遇到该状态先向已聚焦手柄发送 Escape，确认虚影、定位线和 `is-reordering` 全部清理；不能把这次
+  CUA 调用当成成功拖放。内部浏览器可继续验收拖动中的 DOM/样式，完整 down/move/up 与顺序变更用
+  Playwright 原生鼠标链路覆盖，最终真实 WebView 物理指针验收仍单独保留。
+
 ## 2026-08-09 — 可取消缓存网络读取要区分 Range 总超时与连续流空闲超时
 
 - Range 请求响应最多 2 MiB，可使用 async reqwest client 的 30 秒请求总超时；无 Range 的
