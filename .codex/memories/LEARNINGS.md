@@ -1,5 +1,14 @@
 # LEARNINGS
 
+## 2026-08-10 — React Portal 锚点不能从延迟状态更新里读取 currentTarget
+
+- React 合成事件的 `event.currentTarget` 只在事件回调同步阶段可靠；把它直接写进 functional state
+  updater，更新函数稍后执行时可能得到 `null`。浮层点击处理器必须先执行
+  `const anchor = event.currentTarget`，再把这个稳定 DOM 引用传给状态更新。
+- 依赖 DOM 锚点定位的 Portal 还要处理列表换序、路由切换和 HMR：render 计算位置前先确认
+  `anchor?.isConnected`，effect 再主动清理失联锚点。否则一次 `getBoundingClientRect()` 就会让整条
+  React Router 路由落入默认错误页，而不是只关闭已经无效的菜单。
+
 ## 2026-08-10 — 歌单拖拽要以真实 WebView 指针链路验收
 
 - HTML5 `draggable` 的 `dragstart / dragover / drop` 在浏览器级测试可成立，却可能在 macOS

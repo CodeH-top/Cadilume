@@ -3208,14 +3208,18 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
 
   useEffect(() => {
     if (!actionMenu) return;
+    const anchor = actionMenu.anchor;
+    if (!anchor?.isConnected) {
+      setActionMenu(undefined);
+      return;
+    }
     const close = (restoreFocus = false) => {
-      const anchor = actionMenu.anchor;
       setActionMenu(undefined);
       if (restoreFocus) window.requestAnimationFrame(() => anchor.isConnected && anchor.focus());
     };
     const onMouseDown = (event: MouseEvent) => {
       const target = event.target as Node | null;
-      if (actionMenuRef.current?.contains(target) || actionMenu.anchor.contains(target)) return;
+      if (actionMenuRef.current?.contains(target) || anchor.contains(target)) return;
       close();
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -3258,8 +3262,9 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
     );
   };
 
-  const actionMenuPosition = actionMenu ? (() => {
-    const rect = actionMenu.anchor.getBoundingClientRect();
+  const actionMenuAnchor = actionMenu?.anchor;
+  const actionMenuPosition = actionMenuAnchor?.isConnected ? (() => {
+    const rect = actionMenuAnchor.getBoundingClientRect();
     const width = 198;
     const height = onRemoveTrack ? 150 : 116;
     const left = Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width));
@@ -3488,12 +3493,13 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = tr
                   type="button"
                   aria-label={`打开《${track.title}》的操作菜单`}
                   aria-haspopup="menu"
-                  aria-expanded={actionMenu?.anchor === undefined ? false : actionMenu.track === track}
+                  aria-expanded={Boolean(actionMenuAnchor) && actionMenu?.track === track}
                   data-tooltip="更多操作"
                   onClick={(event) => {
-                    setActionMenu((currentMenu) => currentMenu?.anchor === event.currentTarget
+                    const anchor = event.currentTarget;
+                    setActionMenu((currentMenu) => currentMenu?.anchor === anchor
                       ? undefined
-                      : { track, anchor: event.currentTarget });
+                      : { track, anchor });
                   }}
                 >
                   <EllipsisVertical size={16} strokeWidth={2} aria-hidden="true" />
