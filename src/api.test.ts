@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, nativeAudioSetArtwork, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setBrandPreset, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
+import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, movePlaylistItem, nativeAudioClearQueue, nativeAudioSetArtwork, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setBrandPreset, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -660,6 +660,33 @@ describe("Plex audio playlists", () => {
     });
   });
 
+  it("moves one concrete playlist occurrence through the scoped Rust command", async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await movePlaylistItem("server-a", "playlist-99", "item-3", "item-1");
+    await movePlaylistItem("server-a", "playlist-99", "item-3");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "move_playlist_item", {
+      serverId: "server-a",
+      playlistId: "playlist-99",
+      playlistItemId: "item-3",
+      afterPlaylistItemId: "item-1",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "move_playlist_item", {
+      serverId: "server-a",
+      playlistId: "playlist-99",
+      playlistItemId: "item-3",
+      afterPlaylistItemId: undefined,
+    });
+  });
+
+  it("rejects malformed or self-referential playlist moves before invoking Tauri", async () => {
+    await expect(movePlaylistItem("server-a", "playlist-99", "../item", "item-1")).rejects.toThrow("无效的 Plex 歌单排序标识");
+    await expect(movePlaylistItem("server-a", "playlist-99", "item-1", "../item")).rejects.toThrow("无效的 Plex 歌单排序标识");
+    await expect(movePlaylistItem("server-a", "playlist-99", "item-1", "item-1")).rejects.toThrow("无效的 Plex 歌单排序标识");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
   it("updates playlist title and summary through the scoped Rust command", async () => {
     invokeMock.mockResolvedValueOnce(undefined);
 
@@ -843,5 +870,16 @@ describe("artworkUrl dimensions and runtime boundary", () => {
       occurrenceId: "queue-42",
       artworkUrl: ticket,
     });
+  });
+});
+
+describe("native playback queue boundary", () => {
+  it("clears the playback queue without touching the audio cache command", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await nativeAudioClearQueue();
+
+    expect(invokeMock).toHaveBeenCalledOnce();
+    expect(invokeMock).toHaveBeenCalledWith("native_audio_clear_queue");
   });
 });

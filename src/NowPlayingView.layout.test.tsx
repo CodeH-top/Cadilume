@@ -96,15 +96,19 @@ describe("expanded player controller layout", () => {
     expect(playingMarkup).toContain('transform="translate(270 180) rotate(46)"');
   });
 
-  it("renders artwork mode as one independent square cover surface", () => {
-    const markup = renderExpandedPlayer(false, "artwork");
+  it("keeps one persistent artwork node for both visual modes", () => {
+    const vinylMarkup = renderExpandedPlayer(false, "vinyl");
+    const artworkMarkup = renderExpandedPlayer(false, "artwork");
 
-    expect(markup).toContain("is-artwork-mode");
-    expect(markup).toContain("now-playing-cover-stage");
-    expect(markup).toContain("now-playing-cover-artwork");
-    expect(markup).toContain("布局验证封面");
-    expect(markup).not.toContain("now-playing-background-artwork");
-    expect(markup).not.toContain("now-playing-record-stage");
+    expect(artworkMarkup).toContain("is-artwork-mode");
+    expect(artworkMarkup).toContain('data-display-mode="artwork"');
+    expect(artworkMarkup).toContain("布局验证封面");
+    expect(artworkMarkup).not.toContain("now-playing-background-artwork");
+    expect(artworkMarkup).not.toContain("now-playing-cover-artwork");
+    expect(vinylMarkup.match(/data-testid="now-playing-artwork-node"/g)).toHaveLength(1);
+    expect(artworkMarkup.match(/data-testid="now-playing-artwork-node"/g)).toHaveLength(1);
+    expect(vinylMarkup).toContain("now-playing-visual-stage now-playing-record-stage");
+    expect(artworkMarkup).toContain("now-playing-visual-stage now-playing-record-stage");
   });
 
   it("keeps transport controls tooltip-free while auxiliary icon actions remain described", () => {

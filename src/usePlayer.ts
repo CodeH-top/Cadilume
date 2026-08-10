@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { isBlurhashValid } from "blurhash";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioClearCache, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
+import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioClearCache, nativeAudioClearQueue, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { readOutputDevicePreference, writeOutputDevicePreference } from "./outputDevicePreference";
 import { playbackLog } from "./playbackLog";
@@ -1294,6 +1294,58 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     return stop;
   }, []);
 
+  const resetEmptyQueueMirror = useCallback((resetModes: boolean) => {
+    playbackSessionDiscardedRef.current = false;
+    clearPersistedPlaybackSession();
+    queueRef.current = [];
+    queueServerIdRef.current = undefined;
+    indexRef.current = -1;
+    progressRef.current = 0;
+    resumeProgressRef.current = null;
+    shuffleNavigationRef.current = createShuffleNavigationState(0, -1);
+    scrobbledRef.current.clear();
+    setQueue([]);
+    setCurrentIndex(-1);
+    setProgress(0);
+    setDuration(0);
+    setPlaying(false);
+    setPlaybackLoading(false);
+    setBuffering(false);
+    if (resetModes) {
+      shuffleRef.current = false;
+      repeatRef.current = "all";
+      setShuffleState(false);
+      setRepeatState("all");
+    }
+    setError(undefined);
+    setPlaybackFailure(undefined);
+  }, [setPlaybackLoading]);
+
+  const clearQueue = useCallback(async (): Promise<void> => {
+    const activeSource = activeNativeSourceRef.current;
+    const pendingSource = pendingNativeSourceRef.current;
+    loadRequestRef.current += 1;
+    nextSourceRequestRef.current += 1;
+    activeNativeSourceRef.current = undefined;
+    pendingNativeSourceRef.current = undefined;
+    const timer = persistedSessionTimerRef.current;
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      persistedSessionTimerRef.current = undefined;
+    }
+    try {
+      await (isDesktopRuntime()
+        ? nativeQueueBarrierRef.current!.enqueue(nativeAudioClearQueue)
+        : Promise.resolve());
+    } catch (reason) {
+      activeNativeSourceRef.current = activeSource;
+      pendingNativeSourceRef.current = pendingSource;
+      schedulePersistedSession(true);
+      throw reason;
+    }
+    resetEmptyQueueMirror(false);
+  }, [resetEmptyQueueMirror, schedulePersistedSession]);
+
   const clearPlaybackAndCache = useCallback(async (): Promise<void> => {
     // Invalidate queued load/prefetch continuations before asking Rust to stop
     // and delete files; otherwise a stale WebView promise can recreate a cache
@@ -1315,28 +1367,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       // Rust stops and detaches the engine before deleting its files. Keep the
       // WebView mirror consistent even when a locked file makes deletion fail;
       // the original error still propagates after this finally block.
-      playbackSessionDiscardedRef.current = false;
-      clearPersistedPlaybackSession();
-      queueRef.current = [];
-      queueServerIdRef.current = undefined;
-      indexRef.current = -1;
-      progressRef.current = 0;
-      resumeProgressRef.current = null;
-      shuffleNavigationRef.current = createShuffleNavigationState(0, -1);
-      scrobbledRef.current.clear();
-      setQueue([]);
-      setCurrentIndex(-1);
-      setProgress(0);
-      setDuration(0);
-      setPlaying(false);
-      setPlaybackLoading(false);
-      setBuffering(false);
-      setShuffleState(false);
-      setRepeatState("all");
-      setError(undefined);
-      setPlaybackFailure(undefined);
+      resetEmptyQueueMirror(true);
     }
-  }, [setPlaybackLoading]);
+  }, [resetEmptyQueueMirror]);
 
   const next = useCallback(() => {
     // 先停旧歌 + 进度归 0，避免 nativeQueueNext IPC 往返期间旧歌继续出声/进度残留。
@@ -2077,8 +2110,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     setPrebufferNext,
     setOutputSinkId,
     removeFromQueue,
+    clearQueue,
     flushPlaybackSession,
     discardPlaybackSession,
     clearPlaybackAndCache,
-    }), [appendTracks, buffering, clearPlaybackAndCache, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, insertTracksNext, loading, muted, next, outputSinkId, playContext, playTracks, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setMuted, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
+    }), [appendTracks, buffering, clearPlaybackAndCache, clearQueue, current, currentIndex, discardPlaybackSession, dismissPlaybackFailure, duration, error, flushPlaybackSession, insertTracksNext, loading, muted, next, outputSinkId, playContext, playTracks, playbackFailure, playing, prebufferNext, previous, progress, queue, removeFromQueue, repeat, retryCurrent, seek, setMuted, setOutputSinkId, setPrebufferNext, setVolume, shuffle, toggle, volume]);
 }

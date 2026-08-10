@@ -448,6 +448,7 @@
   border-radius: 50%;
   background: color-mix(in srgb, var(--now-playing-surface-strong) 88%, var(--now-playing-text) 12%);
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+  transition: opacity 180ms ease, visibility 180ms ease;
 }
 
 .now-playing-record-stage::after {
@@ -461,17 +462,7 @@
   -webkit-mask: radial-gradient(circle, transparent 0 34%, #000 35% 100%);
   mask: radial-gradient(circle, transparent 0 34%, #000 35% 100%);
   mix-blend-mode: screen;
-}
-
-.now-playing-cover-stage {
-  position: relative;
-  width: min(100%, 520px, calc(100vh - var(--now-playing-header-height) - var(--now-playing-controller-height) - 150px));
-  aspect-ratio: 1;
-  overflow: hidden;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  box-shadow: var(--now-playing-cover-shadow);
+  transition: opacity 180ms ease, visibility 180ms ease;
 }
 
 .now-playing-view.is-artwork-mode .now-playing-art-column {
@@ -479,33 +470,6 @@
   align-content: stretch;
   align-items: center;
   justify-items: center;
-}
-
-.now-playing-cover-artwork {
-  width: 100%;
-  height: 100%;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  border-radius: 8px;
-  color: var(--now-playing-muted);
-  background: var(--now-playing-surface-strong);
-}
-
-.now-playing-cover-artwork > img,
-.now-playing-cover-artwork > picture,
-.now-playing-cover-artwork > video,
-.now-playing-cover-artwork > svg,
-.now-playing-cover-artwork > .artwork,
-.now-playing-cover-artwork > div {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.now-playing-cover-artwork > svg {
-  width: 22%;
-  height: 22%;
 }
 
 .now-playing-panel {
@@ -635,6 +599,7 @@
   transform: rotate(-5deg);
   animation: now-playing-record-spin 30s linear infinite;
   animation-play-state: paused;
+  transition: width 220ms ease, border-radius 220ms ease, background-color 180ms ease, box-shadow 180ms ease;
 }
 
 .now-playing-record-stage.is-playing .now-playing-record {
@@ -651,6 +616,7 @@
     conic-gradient(from 32deg, transparent 0 17%, rgba(255, 255, 255, 0.035) 21%, transparent 28% 64%, rgba(255, 255, 255, 0.026) 70%, transparent 78% 100%);
   opacity: 0.62;
   pointer-events: none;
+  transition: opacity 160ms ease, visibility 160ms ease;
 }
 
 .now-playing-record-label {
@@ -663,6 +629,7 @@
   border: 0;
   border-radius: 50%;
   box-shadow: none;
+  transition: inset 220ms ease, border-radius 220ms ease;
 }
 
 .now-playing-artwork {
@@ -673,6 +640,7 @@
   overflow: hidden;
   color: var(--now-playing-muted);
   background: linear-gradient(145deg, #363c46, #1a1f27);
+  transition: border-radius 220ms ease, background-color 180ms ease;
 }
 
 .now-playing-artwork > img,
@@ -700,6 +668,40 @@
   overflow: visible;
   pointer-events: none;
   opacity: 0.98;
+  transition: opacity 160ms ease, visibility 160ms ease;
+}
+
+.now-playing-view.is-artwork-mode .now-playing-record-stage::before,
+.now-playing-view.is-artwork-mode .now-playing-record-stage::after,
+.now-playing-view.is-artwork-mode .now-playing-record-grooves,
+.now-playing-view.is-artwork-mode .now-playing-tonearm {
+  visibility: hidden;
+  opacity: 0;
+}
+
+.now-playing-view.is-artwork-mode .now-playing-record {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: var(--now-playing-cover-shadow);
+  transform: none;
+  animation: none;
+}
+
+.now-playing-view.is-artwork-mode .now-playing-record-label {
+  inset: 0;
+  border-radius: 8px;
+}
+
+.now-playing-view.is-artwork-mode .now-playing-artwork {
+  border-radius: 8px;
+  background: var(--now-playing-surface-strong);
+}
+
+.now-playing-view.is-artwork-mode .now-playing-artwork > svg {
+  width: 22%;
+  height: 22%;
 }
 
 .now-playing-tonearm-base-ring {

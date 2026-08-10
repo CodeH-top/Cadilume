@@ -1,5 +1,6 @@
 import {
   Album,
+  AudioLines,
   ArrowDown,
   ArrowLeft,
   ArrowUp,
@@ -11,7 +12,9 @@ import {
   CircleUserRound,
   Cloud,
   Database,
+  EllipsisVertical,
   Globe2,
+  GripVertical,
   Headphones,
   History,
   Laptop,
@@ -52,7 +55,7 @@ import {
 import * as Select from "@radix-ui/react-select";
 import { KeepAlive, type KeepAliveRef, useKeepAliveContext, useKeepAliveRef } from "keepalive-for-react";
 import { createHashRouter, Navigate, RouterProvider, useLocation, useNavigate, useOutlet } from "react-router-dom";
-import { createContext, FormEvent, memo, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import { createContext, FormEvent, memo, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { TooltipLayer } from "./TooltipLayer";
 import {
@@ -77,6 +80,7 @@ import {
   getSections,
   isDesktopRuntime,
   logout,
+  movePlaylistItem,
   nativeAudioCacheStatus,
   normalizeDeviceName,
   openWindowsAudioSettings,
@@ -103,6 +107,7 @@ import { useActiveLyricsScroll } from "./lyricsScroll";
 import { getLyricsActionPresentation } from "./playerActions";
 import { playbackControlLabel, rangeFillPercent, usableDurationSeconds } from "./playerUi";
 import { calculatePopconfirmLayout } from "./popconfirmPosition";
+import { playlistDropIndex, playlistMoveAfterId, reorderPlaylistItems } from "./playlistOrder";
 import { homeRecommendationHubs, isRecentlyAddedHub, recommendationHubTitle, recentlyPlayedPlaylists } from "./recommendations";
 import { createArtistLookup, resolveTrackArtists, type ArtistLookup } from "./trackArtists";
 import { nextTrackSort, sortTracks, type TrackSortKey, type TrackSortState } from "./trackSort";
@@ -132,7 +137,7 @@ import { GlobalNotificationQueue, useGlobalNotificationQueue } from "./Notificat
 import type { GlobalNotificationLevel } from "./notifications";
 import { applyThemeMode, readInitialThemeMode } from "./theme";
 import { SharedVolumeControl } from "./VolumeControl";
-import { rasterizeAppearanceSnapshotImages } from "./appearanceTransition";
+import { rasterizeAppearanceSnapshotImages, shouldAnimateAppearanceReveal } from "./appearanceTransition";
 
 type Icon = typeof Album;
 
@@ -1048,6 +1053,15 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
     player.removeFromQueue(index);
   }, [player.removeFromQueue]);
 
+  const clearPlaybackQueue = useCallback(async () => {
+    try {
+      await player.clearQueue();
+      notify("播放队列已清空。", "success");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : String(reason), "error");
+    }
+  }, [notify, player.clearQueue]);
+
   const dismissPlaybackFailure = useCallback(() => {
     setPlaybackFailurePreview(undefined);
     player.dismissPlaybackFailure();
@@ -1161,7 +1175,10 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
   return (
     <ArtworkServerContext.Provider value={serverId}>
     <MusicShellContext.Provider value={runtime}>
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      data-playback-active={player.playing || playbackLoading || player.buffering ? "true" : undefined}
+    >
       <RouterProvider key={`route-cache-${routeCacheEpoch}`} router={router} />
 
       {queuePanelMounted && (
@@ -1173,6 +1190,7 @@ function MusicShell({ initialSession, themeMode, resolvedTheme, brandPreset, onT
             currentIndex={player.currentIndex}
             onSelect={playQueuedTrack}
             onRemove={removeQueuedTrack}
+            onClear={clearPlaybackQueue}
           />
         </div>
       )}
@@ -1714,6 +1732,7 @@ function RoutePage() {
   const [playlistItems, setPlaylistItems] = useState<PlexItem[]>([]);
   const [playlistLoading, setPlaylistLoading] = useState(false);
   const [playlistError, setPlaylistError] = useState<string>();
+  const [playlistReorderBusy, setPlaylistReorderBusy] = useState(false);
   const [playlistRetryRequest, setPlaylistRetryRequest] = useState(0);
   const [loading, setLoading] = useState(route.view !== "settings" && route.view !== "tracks");
   const requestRef = useRef(0);
@@ -1808,6 +1827,41 @@ function RoutePage() {
     }
   }, [playlist, runtime]);
 
+  const reorderPlaylistTrack = useCallback(async (fromIndex: number, toIndex: number) => {
+    if (playlistReorderBusy || !runtime.serverId || !playlist || !canWritePlaylist(playlist)) return;
+    const previous = playlistItems;
+    const reordered = reorderPlaylistItems(previous, fromIndex, toIndex);
+    const moved = reordered[toIndex];
+    const playlistItemId = moved?.playlistItemID || (!isDesktopRuntime() ? moved?.ratingKey : undefined);
+    const afterPlaylistItemId = playlistMoveAfterId(reordered, toIndex)
+      || (!isDesktopRuntime() && toIndex > 0 ? reordered[toIndex - 1]?.ratingKey : undefined);
+    if (!moved || !playlistItemId || (toIndex > 0 && !afterPlaylistItemId)) {
+      runtime.notify("这首歌曲缺少歌单项标识，无法调整顺序。", "error");
+      return;
+    }
+    setPlaylistItems(reordered);
+    setPlaylistReorderBusy(true);
+    try {
+      await movePlaylistItem(
+        runtime.serverId,
+        playlist.ratingKey,
+        playlistItemId,
+        afterPlaylistItemId,
+      );
+      runtime.notify("歌单顺序已更新。", "success");
+      void runtime.loadPlaylistList();
+    } catch (reason) {
+      try {
+        setPlaylistItems(await getPlaylistItems(runtime.serverId, playlist.ratingKey));
+      } catch {
+        setPlaylistItems(previous);
+      }
+      runtime.notify(reason instanceof Error ? reason.message : String(reason), "error");
+    } finally {
+      setPlaylistReorderBusy(false);
+    }
+  }, [playlist, playlistItems, playlistReorderBusy, runtime]);
+
   const handleRouteChange = useCallback((nextRoute: LibraryRoute) => {
     onNavigate(nextRoute);
   }, [onNavigate]);
@@ -1818,6 +1872,7 @@ function RoutePage() {
     setPlaylist(undefined);
     setPlaylistItems([]);
     setPlaylistError(undefined);
+    setPlaylistReorderBusy(false);
     setDetail(undefined);
     if (view === "settings") {
       void runtime.refreshCacheStatus();
@@ -1921,6 +1976,8 @@ function RoutePage() {
       onShuffle={() => shuffleContext(playlistItems)}
       onPlayTrack={(track, context) => runtime.player.playContext(track, context)}
       onRemoveTrack={removePlaylistTrack}
+      reorderBusy={playlistReorderBusy}
+      onMoveTrack={reorderPlaylistTrack}
       onOpenArtist={openTrackArtist}
       onOpenAlbum={openTrackAlbum}
     />
@@ -2424,7 +2481,7 @@ function RecommendationsView({
   );
 }
 
-function PlaylistDetailView({ playlist, tracks, artists, loading, error, onRetry, onPlay, onShuffle, onPlayTrack, onRemoveTrack, onOpenArtist, onOpenAlbum }: {
+function PlaylistDetailView({ playlist, tracks, artists, loading, error, onRetry, onPlay, onShuffle, onPlayTrack, onRemoveTrack, reorderBusy, onMoveTrack, onOpenArtist, onOpenAlbum }: {
   playlist: PlexPlaylist;
   tracks: PlexItem[];
   artists: PlexItem[];
@@ -2434,7 +2491,9 @@ function PlaylistDetailView({ playlist, tracks, artists, loading, error, onRetry
   onPlay: () => void;
   onShuffle: () => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
-  onRemoveTrack: (track: PlexItem) => void;
+  onRemoveTrack: (track: PlexItem) => void | Promise<void>;
+  reorderBusy: boolean;
+  onMoveTrack: (fromIndex: number, toIndex: number) => void | Promise<void>;
   onOpenArtist: (artist: PlexItem) => void;
   onOpenAlbum: (track: PlexItem) => void;
 }) {
@@ -2459,7 +2518,18 @@ function PlaylistDetailView({ playlist, tracks, artists, loading, error, onRetry
       ) : error ? (
         <div className="playlist-detail-state is-error" role="alert"><TriangleAlert size={24} /><strong>无法读取这个歌单</strong><span>{error}</span><button className="secondary-button" type="button" onClick={onRetry}><RefreshCw size={15} />重试</button></div>
       ) : tracks.length ? (
-        <TrackTable title="曲目" tracks={tracks} artists={artists} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlayTrack} onRemoveTrack={removable ? onRemoveTrack : undefined} />
+        <TrackTable
+          title="曲目"
+          tracks={tracks}
+          artists={artists}
+          sortable={!removable}
+          onOpenArtist={onOpenArtist}
+          onOpenAlbum={onOpenAlbum}
+          onPlay={onPlayTrack}
+          onRemoveTrack={removable ? onRemoveTrack : undefined}
+          reorderBusy={reorderBusy}
+          onMoveTrack={removable ? onMoveTrack : undefined}
+        />
       ) : <EmptyState title="这个歌单还没有歌曲" description={playlist.smart ? "Plex 当前没有返回符合条件的曲目。" : "可以稍后从歌曲菜单向可写歌单添加内容。"} icon={<ListMusic size={28} />} />}
     </section>
   );
@@ -2588,6 +2658,12 @@ function DetailView({ detail, serverId, artists, onBack, onPlay, onShuffle, onOp
             <div className="detail-actions">
               <button className="primary-button" type="button" onClick={onPlay}><Play size={17} fill="currentColor" aria-hidden="true" />播放</button>
               <IconButton className="album-action-button" label="随机播放" onClick={onShuffle}><Shuffle size={18} aria-hidden="true" /></IconButton>
+              <IconButton className="album-action-button" label="添加到播放队列" onClick={() => {
+                if (runtime.player.appendTracks(tracks)) runtime.notify(`已将 ${tracks.length} 首歌曲添加到播放队列。`, "success");
+              }}><ListEnd size={18} aria-hidden="true" /></IconButton>
+              <IconButton className="album-action-button" label="播放下一个" onClick={() => {
+                if (runtime.player.insertTracksNext(tracks)) runtime.notify(`已安排 ${tracks.length} 首歌曲接下来播放。`, "success");
+              }}><SkipForward size={18} aria-hidden="true" /></IconButton>
               <IconButton className="album-action-button" label="添加到歌单" disabled={!serverId} onClick={() => runtime.openPlaylistPicker(tracks, `${detail.source.title} · ${tracks.length} 首歌曲`)}><ListPlus size={18} /></IconButton>
             </div>
           )}
@@ -2831,7 +2907,7 @@ function ArtistDetailView({ detail, serverId, artists, onBack, onOpen, onOpenArt
         runtime.notify(`已将 ${collection.tracks.length} 首歌曲添加到播放队列。`, "success");
       } else if (action === "next") {
         runtime.player.insertTracksNext(collection.tracks);
-        runtime.notify(`已安排 ${collection.tracks.length} 首歌曲在下一首后播放。`, "success");
+        runtime.notify(`已安排 ${collection.tracks.length} 首歌曲接下来播放。`, "success");
       } else {
         runtime.openPlaylistPicker(collection.tracks, `${detail.source.title} · ${collection.tracks.length} 首歌曲`);
       }
@@ -3025,17 +3101,20 @@ function TrackAlbumCell({ track, onOpenAlbum }: { track: PlexItem; onOpenAlbum: 
   );
 }
 
-function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpenArtist, onOpenAlbum, onPlay, onRemoveTrack, startIndex = 0, selection }: {
+function TrackTableGrid({ label, tracks, artists, totalSize, sort, sortable = true, onSort, onOpenArtist, onOpenAlbum, onPlay, onRemoveTrack, onMoveTrack, reorderBusy = false, startIndex = 0, selection }: {
   label: string;
   tracks: PlexItem[];
   artists: PlexItem[];
   totalSize?: number;
   sort?: TrackSortState;
+  sortable?: boolean;
   onSort: (sort: TrackSortState | undefined) => void;
   onOpenArtist: (artist: PlexItem) => void;
   onOpenAlbum: (track: PlexItem) => void;
   onPlay: (track: PlexItem, context: PlexItem[]) => void;
-  onRemoveTrack?: (track: PlexItem) => void;
+  onRemoveTrack?: (track: PlexItem) => void | Promise<void>;
+  onMoveTrack?: (fromIndex: number, toIndex: number) => void | Promise<void>;
+  reorderBusy?: boolean;
   startIndex?: number;
   selection?: {
     selectedRatingKeys: ReadonlySet<string>;
@@ -3043,66 +3122,243 @@ function TrackTableGrid({ label, tracks, artists, totalSize, sort, onSort, onOpe
     onTogglePage: (selected: boolean) => void;
   };
 }) {
+  const runtime = useMusicShellRuntime();
   const artistLookup = useMemo(() => createArtistLookup(artists), [artists]);
   const selectedOnPage = tracks.filter((track) => selection?.selectedRatingKeys.has(track.ratingKey)).length;
   const allPageSelected = tracks.length > 0 && selectedOnPage === tracks.length;
+  const [actionMenu, setActionMenu] = useState<{ track: PlexItem; anchor: HTMLButtonElement }>();
   const [pendingRemove, setPendingRemove] = useState<PlexItem>();
   const [removeBusy, setRemoveBusy] = useState(false);
+  const [dragState, setDragState] = useState<{ fromIndex: number; targetIndex: number; afterTarget: boolean }>();
+  const [reorderFocusId, setReorderFocusId] = useState<string>();
+  const actionMenuRef = useRef<HTMLDivElement>(null);
   const removeAnchorRef = useRef<HTMLButtonElement | null>(null);
+  const tableRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!reorderFocusId || reorderBusy) return;
+    const frame = window.requestAnimationFrame(() => {
+      const handle = Array.from(tableRef.current?.querySelectorAll<HTMLButtonElement>(".track-reorder-handle") || [])
+        .find((candidate) => candidate.dataset.playlistItemId === reorderFocusId);
+      if (!handle || handle.disabled) return;
+      handle.focus();
+      setReorderFocusId(undefined);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [reorderBusy, reorderFocusId, tracks]);
+
+  useEffect(() => {
+    if (!actionMenu) return;
+    const close = (restoreFocus = false) => {
+      const anchor = actionMenu.anchor;
+      setActionMenu(undefined);
+      if (restoreFocus) window.requestAnimationFrame(() => anchor.isConnected && anchor.focus());
+    };
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (actionMenuRef.current?.contains(target) || actionMenu.anchor.contains(target)) return;
+      close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close(true);
+    };
+    const onScroll = () => close();
+    const focusFrame = window.requestAnimationFrame(() => {
+      actionMenuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+    });
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("scroll", onScroll, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("scroll", onScroll, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [actionMenu]);
+
   const closeRemoveConfirm = useCallback(() => {
     if (removeBusy) return;
     setPendingRemove(undefined);
     removeAnchorRef.current = null;
   }, [removeBusy]);
+
+  const runQueueAction = (track: PlexItem, mode: "append" | "next") => {
+    const changed = mode === "append"
+      ? runtime.player.appendTracks([track])
+      : runtime.player.insertTracksNext([track]);
+    setActionMenu(undefined);
+    if (!changed) return;
+    runtime.notify(
+      mode === "append"
+        ? `已将《${track.title}》添加到播放队列。`
+        : `已将《${track.title}》设为下一首播放。`,
+      "success",
+    );
+  };
+
+  const actionMenuPosition = actionMenu ? (() => {
+    const rect = actionMenu.anchor.getBoundingClientRect();
+    const width = 198;
+    const height = onRemoveTrack ? 150 : 116;
+    const left = Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width));
+    const below = rect.bottom + 5;
+    const top = below + height <= window.innerHeight - 8
+      ? below
+      : Math.max(8, rect.top - height - 5);
+    return { left, top };
+  })() : undefined;
+
   return (
     <>
-      <div className={`track-table ${selection ? "has-selection" : ""}`} role="table" aria-label={label} aria-rowcount={(totalSize ?? tracks.length) + 1}>
+      <div ref={tableRef} className={`track-table ${selection ? "has-selection" : ""} ${onMoveTrack ? "has-reorder" : ""}`.trim()} role="table" aria-label={label} aria-rowcount={(totalSize ?? tracks.length) + 1}>
         <div className="track-row table-head" role="row">
           {selection && <span className="track-selection-heading" role="columnheader"><SelectionCheckbox checked={allPageSelected} indeterminate={selectedOnPage > 0 && !allPageSelected} label="选择当前页全部歌曲" onChange={(checked) => selection.onTogglePage(checked)} /></span>}
+          {onMoveTrack && <span className="track-reorder-heading" role="columnheader" aria-label="排序" />}
           <span className="track-number-heading" role="columnheader">#</span>
           <span className="track-artwork-heading" role="columnheader">封面</span>
-          <TrackSortHeader label="标题" accessibleLabel="歌曲名称" sortKey="title" sort={sort} onSort={onSort} />
+          {sortable
+            ? <TrackSortHeader label="标题" accessibleLabel="歌曲名称" sortKey="title" sort={sort} onSort={onSort} />
+            : <span className="track-title-heading" role="columnheader">标题</span>}
           <span className="track-artist-heading" role="columnheader">歌手</span>
-          <TrackSortHeader label="专辑" sortKey="album" sort={sort} onSort={onSort} />
-          <TrackSortHeader className="duration-sort-header" label="时长" sortKey="duration" sort={sort} onSort={onSort} />
+          {sortable
+            ? <TrackSortHeader className="track-album-heading" label="专辑" sortKey="album" sort={sort} onSort={onSort} />
+            : <span className="track-album-heading" role="columnheader">专辑</span>}
+          {sortable
+            ? <TrackSortHeader className="duration-sort-header" label="时长" sortKey="duration" sort={sort} onSort={onSort} />
+            : <span className="track-duration-heading" role="columnheader">时长</span>}
+          <span className="track-action-heading" role="columnheader" aria-label="歌曲操作" />
         </div>
-        {tracks.map((track, index) => (
-          <div
-            className={`track-row track-data-row ${onRemoveTrack ? "has-remove" : ""} ${pendingRemove?.ratingKey === track.ratingKey ? "is-remove-confirm-open" : ""}`.trim()}
-            role="row"
-            aria-rowindex={index + 2}
-            key={`${track.ratingKey}-${index}`}
-          >
-            {selection && <span className="track-selection-cell" role="cell"><SelectionCheckbox checked={selection.selectedRatingKeys.has(track.ratingKey)} label={`选择《${track.title}》`} onChange={(checked) => selection.onToggleTrack(track.ratingKey, checked)} /></span>}
-            <span className="track-index" role="cell">
-              <button className="track-play-button" type="button" aria-label={`播放《${track.title}》`} onClick={() => onPlay(track, tracks)}>
-                <span>{startIndex + index + 1}</span><Play size={13} fill="currentColor" aria-hidden="true" />
-              </button>
-            </span>
-            <span className="track-artwork-cell" role="cell"><Artwork item={track} size="small" /></span>
-            <span className="track-title" role="cell" title={track.title}><strong>{track.title}</strong></span>
-            <TrackArtistsCell track={track} artistLookup={artistLookup} onOpenArtist={onOpenArtist} />
-            <TrackAlbumCell track={track} onOpenAlbum={onOpenAlbum} />
-            <span className="duration-cell" role="cell">
-              <span className="duration-label">{formatDuration(track.duration)}</span>
-              {onRemoveTrack && (
+        {tracks.map((track, index) => {
+          const current = runtime.player.current?.ratingKey === track.ratingKey;
+          const dropTarget = dragState?.targetIndex === index;
+          return (
+            <div
+              className={`track-row track-data-row ${current ? "is-current" : ""} ${pendingRemove === track ? "is-remove-confirm-open" : ""} ${dragState?.fromIndex === index ? "is-dragging" : ""} ${dropTarget ? dragState?.afterTarget ? "is-drop-after" : "is-drop-before" : ""}`.trim()}
+              role="row"
+              aria-rowindex={index + 2}
+              key={track.playlistItemID || `${track.ratingKey}-${index}`}
+              onDragOver={onMoveTrack ? (event) => {
+                if (!dragState || reorderBusy) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                const rect = event.currentTarget.getBoundingClientRect();
+                const afterTarget = event.clientY >= rect.top + rect.height / 2;
+                if (dragState.targetIndex !== index || dragState.afterTarget !== afterTarget) {
+                  setDragState({ ...dragState, targetIndex: index, afterTarget });
+                }
+              } : undefined}
+              onDrop={onMoveTrack ? (event) => {
+                event.preventDefault();
+                if (!dragState || reorderBusy) return;
+                const rect = event.currentTarget.getBoundingClientRect();
+                const afterTarget = event.clientY >= rect.top + rect.height / 2;
+                const toIndex = playlistDropIndex(
+                  dragState.fromIndex,
+                  index,
+                  afterTarget,
+                  tracks.length,
+                );
+                const fromIndex = dragState.fromIndex;
+                setDragState(undefined);
+                if (fromIndex !== toIndex) void onMoveTrack(fromIndex, toIndex);
+              } : undefined}
+            >
+              {selection && <span className="track-selection-cell" role="cell"><SelectionCheckbox checked={selection.selectedRatingKeys.has(track.ratingKey)} label={`选择《${track.title}》`} onChange={(checked) => selection.onToggleTrack(track.ratingKey, checked)} /></span>}
+              {onMoveTrack && (
+                <span className="track-reorder-cell" role="cell">
+                  <button
+                    className="track-reorder-handle"
+                    type="button"
+                    draggable={!reorderBusy}
+                    disabled={reorderBusy}
+                    aria-label={`调整《${track.title}》的顺序`}
+                    data-playlist-item-id={track.playlistItemID || track.ratingKey}
+                    data-tooltip="拖拽排序"
+                    onDragStart={(event: ReactDragEvent<HTMLButtonElement>) => {
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", track.playlistItemID || String(index));
+                      setDragState({ fromIndex: index, targetIndex: index, afterTarget: false });
+                    }}
+                    onDragEnd={() => setDragState(undefined)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                      event.preventDefault();
+                      const toIndex = event.key === "ArrowUp" ? index - 1 : index + 1;
+                      if (toIndex < 0 || toIndex >= tracks.length) return;
+                      const playlistItemId = track.playlistItemID || track.ratingKey;
+                      setReorderFocusId(playlistItemId);
+                      void onMoveTrack(index, toIndex);
+                    }}
+                  >
+                    {reorderBusy ? <LoaderCircle className="spin" size={14} /> : <GripVertical size={15} />}
+                  </button>
+                </span>
+              )}
+              <span className="track-index" role="cell">
                 <button
-                  className="track-remove-button"
+                  className={`track-play-button ${current ? "is-current" : ""} ${current && runtime.player.playing ? "is-playing" : ""}`.trim()}
                   type="button"
-                  aria-label={`从歌单移除《${track.title}》`}
-                  data-tooltip="从歌单移除"
+                  disabled={current}
+                  aria-label={current ? `正在播放《${track.title}》` : `播放《${track.title}》`}
+                  onClick={() => onPlay(track, tracks)}
+                >
+                  {current
+                    ? <AudioLines size={15} strokeWidth={2.1} aria-hidden="true" />
+                    : <><span>{startIndex + index + 1}</span><Play size={13} fill="currentColor" aria-hidden="true" /></>}
+                </button>
+              </span>
+              <span className="track-artwork-cell" role="cell"><Artwork item={track} size="small" /></span>
+              <span className="track-title" role="cell" title={track.title}><strong>{track.title}</strong></span>
+              <TrackArtistsCell track={track} artistLookup={artistLookup} onOpenArtist={onOpenArtist} />
+              <TrackAlbumCell track={track} onOpenAlbum={onOpenAlbum} />
+              <span className="duration-cell" role="cell"><span className="duration-label">{formatDuration(track.duration)}</span></span>
+              <span className="track-action-cell" role="cell">
+                <button
+                  className="track-action-button"
+                  type="button"
+                  aria-label={`打开《${track.title}》的操作菜单`}
+                  aria-haspopup="menu"
+                  aria-expanded={actionMenu?.anchor === undefined ? false : actionMenu.track === track}
+                  data-tooltip="更多操作"
                   onClick={(event) => {
-                    removeAnchorRef.current = event.currentTarget;
-                    setPendingRemove(track);
+                    setActionMenu((currentMenu) => currentMenu?.anchor === event.currentTarget
+                      ? undefined
+                      : { track, anchor: event.currentTarget });
                   }}
                 >
-                  <Trash2 size={14} strokeWidth={1.9} aria-hidden="true" />
+                  <EllipsisVertical size={16} strokeWidth={2} aria-hidden="true" />
                 </button>
-              )}
-            </span>
-          </div>
-        ))}
+              </span>
+            </div>
+          );
+        })}
       </div>
+      {actionMenu && actionMenuPosition && createPortal(
+        <div
+          ref={actionMenuRef}
+          className="playlist-context-menu track-action-menu"
+          style={actionMenuPosition}
+          role="menu"
+          aria-label={`${actionMenu.track.title} 歌曲操作`}
+        >
+          <button type="button" role="menuitem" disabled={!runtime.serverId} onClick={() => {
+            const track = actionMenu.track;
+            setActionMenu(undefined);
+            runtime.openPlaylistPicker([track]);
+          }}><ListPlus size={15} />添加到歌单</button>
+          <button type="button" role="menuitem" onClick={() => runQueueAction(actionMenu.track, "append")}><ListEnd size={15} />添加到播放队列</button>
+          <button type="button" role="menuitem" onClick={() => runQueueAction(actionMenu.track, "next")}><SkipForward size={15} />播放下一个</button>
+          {onRemoveTrack && <button type="button" role="menuitem" className="is-danger" onClick={() => {
+            removeAnchorRef.current = actionMenu.anchor;
+            setPendingRemove(actionMenu.track);
+            setActionMenu(undefined);
+          }}><Trash2 size={15} />从歌单移除</button>}
+        </div>,
+        document.body,
+      )}
       {onRemoveTrack && pendingRemove && (
         <Popconfirm
           title={`从歌单移除《${pendingRemove.title}》？`}
@@ -3399,13 +3655,13 @@ function PaginatedTracksView({ serverId, sectionKey, route, artists, onRouteChan
   );
 }
 
-function TrackTable({ title, tracks, artists, accentHeading = false, onOpenArtist, onOpenAlbum, onPlay, onRemoveTrack }: { title: string; tracks: PlexItem[]; artists: PlexItem[]; accentHeading?: boolean; onOpenArtist: (artist: PlexItem) => void; onOpenAlbum: (track: PlexItem) => void; onPlay: (track: PlexItem, context: PlexItem[]) => void; onRemoveTrack?: (track: PlexItem) => void }) {
+function TrackTable({ title, tracks, artists, accentHeading = false, sortable = true, onOpenArtist, onOpenAlbum, onPlay, onRemoveTrack, onMoveTrack, reorderBusy = false }: { title: string; tracks: PlexItem[]; artists: PlexItem[]; accentHeading?: boolean; sortable?: boolean; onOpenArtist: (artist: PlexItem) => void; onOpenAlbum: (track: PlexItem) => void; onPlay: (track: PlexItem, context: PlexItem[]) => void; onRemoveTrack?: (track: PlexItem) => void | Promise<void>; onMoveTrack?: (fromIndex: number, toIndex: number) => void | Promise<void>; reorderBusy?: boolean }) {
   const [sort, setSort] = useState<TrackSortState>();
-  const displayedTracks = useMemo(() => sortTracks(tracks, sort), [sort, tracks]);
+  const displayedTracks = useMemo(() => sortable ? sortTracks(tracks, sort) : tracks, [sort, sortable, tracks]);
   return (
     <section className={`track-section ${accentHeading ? "has-accent-heading" : ""}`.trim()}>
       <div className="section-heading"><h1>{title}</h1></div>
-      <TrackTableGrid label={title} tracks={displayedTracks} artists={artists} sort={sort} onSort={setSort} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlay} onRemoveTrack={onRemoveTrack} />
+      <TrackTableGrid label={title} tracks={displayedTracks} artists={artists} sort={sort} sortable={sortable} onSort={setSort} onOpenArtist={onOpenArtist} onOpenAlbum={onOpenAlbum} onPlay={onPlay} onRemoveTrack={onRemoveTrack} onMoveTrack={onMoveTrack} reorderBusy={reorderBusy} />
     </section>
   );
 }
@@ -3765,10 +4021,13 @@ const QueueItem = memo(function QueueItem({ track, index, active, onSelect, onRe
           <button
             type="button"
             className="queue-item-play-indicator"
-            aria-label={`播放${track.title}`}
+            aria-label={active ? `正在播放${track.title}` : `播放${track.title}`}
+            disabled={active}
             onClick={() => onSelect(track)}
           >
-            <Play size={14} fill="currentColor" strokeWidth={2.2} aria-hidden="true" />
+            {active
+              ? <AudioLines size={15} strokeWidth={2.2} aria-hidden="true" />
+              : <Play size={14} fill="currentColor" strokeWidth={2.2} aria-hidden="true" />}
           </button>
         </span>
         <span><strong>{track.title}</strong><small>{trackArtist(track)}</small></span>
@@ -3778,14 +4037,29 @@ const QueueItem = memo(function QueueItem({ track, index, active, onSelect, onRe
   );
 });
 
-const QueuePanel = memo(function QueuePanel({ open, queue, currentIndex, onSelect, onRemove }: { open: boolean; queue: PlexItem[]; currentIndex: number; onSelect: (track: PlexItem) => void; onRemove: (index: number) => void }) {
+const QueuePanel = memo(function QueuePanel({ open, queue, currentIndex, onSelect, onRemove, onClear }: { open: boolean; queue: PlexItem[]; currentIndex: number; onSelect: (track: PlexItem) => void; onRemove: (index: number) => void; onClear: () => Promise<void> }) {
+  const [clearing, setClearing] = useState(false);
+  const clear = async () => {
+    if (clearing) return;
+    setClearing(true);
+    try {
+      await onClear();
+    } finally {
+      setClearing(false);
+    }
+  };
   return (
     <aside className="queue-panel" data-panel-state={open ? "open" : "closing"} role="dialog" aria-modal="true" aria-hidden={!open || undefined} inert={!open || undefined} aria-label="播放队列">
-      <header><h2>{`播放队列(${queue.length})`}</h2></header>
+      <header>
+        <h2>{`播放队列(${queue.length})`}</h2>
+        <IconButton label="清空播放队列" disabled={clearing || !queue.length} onClick={() => void clear()}>
+          {clearing ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}
+        </IconButton>
+      </header>
       <div className="queue-list">
         {queue.length ? queue.map((track, index) => (
           <QueueItem
-            key={`${track.ratingKey}-${index}`}
+            key={track.queueInstanceId || `${track.ratingKey}-${index}`}
             track={track}
             index={index}
             active={index === currentIndex}
@@ -4820,8 +5094,7 @@ const APPEARANCE_MEDIA_GEOMETRY_SELECTOR = [
   ".artwork",
   ".avatar",
   ".now-playing-background-artwork",
-  ".now-playing-cover-stage",
-  ".now-playing-cover-artwork",
+  ".now-playing-visual-stage",
   ".now-playing-artwork",
 ].join(", ");
 
@@ -5022,7 +5295,8 @@ function useAppearance() {
       setThemeMode(next);
     };
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (!origin || reducedMotion) {
+    const playbackActive = document.querySelector('.app-shell[data-playback-active="true"]') !== null;
+    if (!origin || !shouldAnimateAppearanceReveal(true, reducedMotion, playbackActive)) {
       applyAtomically();
       return;
     }

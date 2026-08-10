@@ -343,13 +343,7 @@ export function getArtworkThemeFromPalette(palette: readonly ArtworkThemeColor[]
   const themed = selected.map(setThemeLightness);
   stretchColorPair(themed, 0, 1);
   stretchColorPair(themed, 2, 3);
-  const [sourceTopLeft, sourceTopRight, sourceBottomRight, sourceBottomLeft] = themed.map(hslToRgb);
-  // Canvas scanlines and the reference image analyzer use opposite Y origins.
-  // Flip the two rows once so the public fields describe rendered CSS corners.
-  const topLeft = sourceBottomLeft;
-  const topRight = sourceBottomRight;
-  const bottomRight = sourceTopRight;
-  const bottomLeft = sourceTopLeft;
+  const [topLeft, topRight, bottomRight, bottomLeft] = themed.map(hslToRgb);
   return {
     primary: averageColors([topLeft, topRight, bottomRight, bottomLeft]),
     topLeft,

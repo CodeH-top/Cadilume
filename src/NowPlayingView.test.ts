@@ -89,10 +89,14 @@ describe("expanded player artwork theme", () => {
     }
 
     const theme = getArtworkThemeFromPixels(pixels, width, height);
+    expect(theme?.topLeft.red).toBeGreaterThan(theme?.topLeft.green ?? 255);
     expect(theme?.topLeft.red).toBeGreaterThan(theme?.topLeft.blue ?? 255);
-    expect(theme?.topRight.blue).toBeGreaterThan(theme?.topRight.red ?? 255);
-    expect(theme?.bottomRight.green).toBeGreaterThan(theme?.bottomRight.red ?? 255);
-    expect(theme?.bottomLeft.red).toBeGreaterThan(theme?.bottomLeft.green ?? 255);
+    expect(theme?.topRight.green).toBeGreaterThan(theme?.topRight.red ?? 255);
+    expect(theme?.topRight.green).toBeGreaterThan(theme?.topRight.blue ?? 255);
+    expect(theme?.bottomRight.blue).toBeGreaterThan(theme?.bottomRight.red ?? 255);
+    expect(theme?.bottomRight.blue).toBeGreaterThan(theme?.bottomRight.green ?? 255);
+    expect(theme?.bottomLeft.red).toBeGreaterThan(theme?.bottomLeft.blue ?? 255);
+    expect(theme?.bottomLeft.green).toBeGreaterThan(theme?.bottomLeft.blue ?? 255);
   });
 
   it("selects spatially diverse mid-tones from a 20-color palette", () => {
@@ -117,10 +121,10 @@ describe("expanded player artwork theme", () => {
     };
 
     expect(theme?.primary).toEqual(hex("#655840"));
-    expectColorNear(theme?.topLeft, hex("#9C623F"));
-    expectColorNear(theme?.topRight, hex("#5F4516"));
-    expectColorNear(theme?.bottomRight, hex("#945514"));
-    expectColorNear(theme?.bottomLeft, hex("#026697"));
+    expectColorNear(theme?.topLeft, hex("#026697"));
+    expectColorNear(theme?.topRight, hex("#945514"));
+    expectColorNear(theme?.bottomRight, hex("#5F4516"));
+    expectColorNear(theme?.bottomLeft, hex("#9C623F"));
   });
 
   it("keeps all four gradient stops readable in dark and light appearances", () => {

@@ -9,6 +9,14 @@ export interface ImageDrawPlan {
   destinationHeight: number;
 }
 
+export function shouldAnimateAppearanceReveal(
+  hasOrigin: boolean,
+  reducedMotion: boolean,
+  playbackActive: boolean,
+): boolean {
+  return hasOrigin && !reducedMotion && !playbackActive;
+}
+
 function centeredDestination(
   sourceWidth: number,
   sourceHeight: number,

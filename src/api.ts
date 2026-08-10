@@ -769,6 +769,44 @@ export async function removeTracksFromPlaylist(
   return invoke("remove_playlist_items", { serverId, playlistId, playlistItemIds: uniqueItemIds });
 }
 
+/** Move one concrete playlist occurrence after another; no `after` means first. */
+export async function movePlaylistItem(
+  serverId: string,
+  playlistId: string,
+  playlistItemId: string,
+  afterPlaylistItemId?: string,
+): Promise<void> {
+  if (
+    !isCleanPlexIdentifier(serverId)
+    || !isCleanPlexIdentifier(playlistId)
+    || !isCleanPlexIdentifier(playlistItemId)
+    || (afterPlaylistItemId !== undefined && !isCleanPlexIdentifier(afterPlaylistItemId))
+    || playlistItemId === afterPlaylistItemId
+  ) throw new Error("无效的 Plex 歌单排序标识");
+  if (!isDesktopRuntime()) {
+    const source = demoCreatedPlaylistItems.get(playlistId) ?? demoPlaylistItems[playlistId];
+    if (!source) throw new Error("演示歌单不存在");
+    const fromIndex = source.findIndex((item) => (item.playlistItemID ?? item.ratingKey) === playlistItemId);
+    if (fromIndex < 0) throw new Error("演示歌单中找不到这首歌曲");
+    const [moved] = source.splice(fromIndex, 1);
+    const afterIndex = afterPlaylistItemId === undefined
+      ? -1
+      : source.findIndex((item) => (item.playlistItemID ?? item.ratingKey) === afterPlaylistItemId);
+    if (afterPlaylistItemId !== undefined && afterIndex < 0) {
+      source.splice(fromIndex, 0, moved);
+      throw new Error("演示歌单中找不到排序目标");
+    }
+    source.splice(afterIndex + 1, 0, moved);
+    return;
+  }
+  await invoke("move_playlist_item", {
+    serverId,
+    playlistId,
+    playlistItemId,
+    afterPlaylistItemId,
+  });
+}
+
 export interface PlaylistChanges {
   title?: string;
   summary?: string;
@@ -890,6 +928,11 @@ export async function nativeAudioCacheStatus(): Promise<NativeAudioCacheStatus> 
 export async function nativeAudioClearCache(): Promise<void> {
   if (!isDesktopRuntime()) return;
   await invoke("native_audio_clear_cache");
+}
+
+export async function nativeAudioClearQueue(): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_clear_queue");
 }
 
 export async function nativeQueuePeekNext(naturalEnded = true): Promise<number | null> {

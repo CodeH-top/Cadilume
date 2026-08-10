@@ -161,7 +161,7 @@ function formatSeconds(value: number): string {
 function isThemeArtworkImage(target: EventTarget | null): target is HTMLImageElement {
   return target instanceof HTMLImageElement
     && !target.classList.contains("artwork-candidate")
-    && Boolean(target.closest(".now-playing-artwork, .now-playing-cover-artwork"));
+    && Boolean(target.closest(".now-playing-artwork"));
 }
 
 function artworkSampleMatches(
@@ -432,39 +432,44 @@ export function NowPlayingView({
 
         <div className="now-playing-content">
           <section className="now-playing-art-column" aria-label="播放视觉">
-            {displayMode === "vinyl" ? (
-              <div className={`now-playing-record-stage ${activelyPlaying ? "is-playing" : "is-paused"}`}>
-                <svg className="now-playing-tonearm" viewBox="0 0 300 260" aria-hidden="true">
-                  <g className="now-playing-tonearm-base" data-testid="tonearm-pivot">
-                    <circle className="now-playing-tonearm-base-ring" cx="150" cy="20" r="14" />
-                    <circle className="now-playing-tonearm-base-bearing" cx="150" cy="20" r="8" />
-                    <circle className="now-playing-tonearm-base-cap" cx="150" cy="20" r="3" />
-                    <g className="now-playing-tonearm-swing" data-testid="tonearm-swing">
-                      <g className="now-playing-tonearm-armature" data-testid="tonearm-connection">
-                        <path className="now-playing-tonearm-rail-shadow" d="M150 20 C184 78 224 132 270 180" />
-                        <path className="now-playing-tonearm-arm" data-testid="tonearm-arm" d="M150 20 C184 78 224 132 270 180" />
-                        <g className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge" transform="translate(270 180) rotate(46)">
-                          <path className="now-playing-tonearm-cartridge-neck" d="M-5 0 H7" />
-                          <rect className="now-playing-tonearm-cartridge-body" x="5" y="-5" width="24" height="10" rx="2" />
-                          <rect className="now-playing-tonearm-cartridge-face" x="25" y="-6" width="8" height="12" rx="2" />
-                          <path className="now-playing-tonearm-stylus" d="M1 0 H5" />
-                        </g>
+            <div
+              className={`now-playing-visual-stage now-playing-record-stage ${activelyPlaying ? "is-playing" : "is-paused"}`}
+              data-display-mode={displayMode}
+            >
+              <svg className="now-playing-tonearm" viewBox="0 0 300 260" aria-hidden="true">
+                <g className="now-playing-tonearm-base" data-testid="tonearm-pivot">
+                  <circle className="now-playing-tonearm-base-ring" cx="150" cy="20" r="14" />
+                  <circle className="now-playing-tonearm-base-bearing" cx="150" cy="20" r="8" />
+                  <circle className="now-playing-tonearm-base-cap" cx="150" cy="20" r="3" />
+                  <g className="now-playing-tonearm-swing" data-testid="tonearm-swing">
+                    <g className="now-playing-tonearm-armature" data-testid="tonearm-connection">
+                      <path className="now-playing-tonearm-rail-shadow" d="M150 20 C184 78 224 132 270 180" />
+                      <path className="now-playing-tonearm-arm" data-testid="tonearm-arm" d="M150 20 C184 78 224 132 270 180" />
+                      <g className="now-playing-tonearm-cartridge" data-testid="tonearm-cartridge" transform="translate(270 180) rotate(46)">
+                        <path className="now-playing-tonearm-cartridge-neck" d="M-5 0 H7" />
+                        <rect className="now-playing-tonearm-cartridge-body" x="5" y="-5" width="24" height="10" rx="2" />
+                        <rect className="now-playing-tonearm-cartridge-face" x="25" y="-6" width="8" height="12" rx="2" />
+                        <path className="now-playing-tonearm-stylus" d="M1 0 H5" />
                       </g>
                     </g>
                   </g>
-                </svg>
-                <div className="now-playing-record" aria-label={`${track?.title || "尚未播放"} 黑胶唱片`} role="img">
-                  <div className="now-playing-record-grooves" aria-hidden="true" />
-                  <div className="now-playing-record-label">
-                    <div className="now-playing-artwork">{artwork || <Disc3 size={38} strokeWidth={1.4} aria-hidden="true" />}</div>
+                </g>
+              </svg>
+              <div
+                className="now-playing-record"
+                aria-label={displayMode === "vinyl"
+                  ? `${track?.title || "尚未播放"} 黑胶唱片`
+                  : `${track?.title || "尚未播放"} 专辑封面`}
+                role="img"
+              >
+                <div className="now-playing-record-grooves" aria-hidden="true" />
+                <div className="now-playing-record-label">
+                  <div className="now-playing-artwork" data-testid="now-playing-artwork-node">
+                    {artwork || <Music2 size={64} strokeWidth={1.2} aria-hidden="true" />}
                   </div>
                 </div>
               </div>
-            ) : (
-              <div className="now-playing-cover-stage">
-                <div className="now-playing-cover-artwork">{artwork || <Music2 size={64} strokeWidth={1.2} aria-hidden="true" />}</div>
-              </div>
-            )}
+            </div>
           </section>
           <ExpandedLyricsPanel track={track} lyrics={lyrics} onSeek={onSeek} />
         </div>

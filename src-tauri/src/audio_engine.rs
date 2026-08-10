@@ -3084,6 +3084,24 @@ pub async fn native_audio_clear_cache(
 }
 
 #[tauri::command]
+pub async fn native_audio_clear_queue(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+) -> Result<(), String> {
+    let _operation = state.output_switch_lock.lock().await;
+    if let Some(engine) = state.current() {
+        engine.clear_session_state_and_wait().await;
+        let _ = app.emit(
+            "native-audio://event",
+            serde_json::json!({ "type": "buffering", "buffering": false }),
+        );
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    crate::now_playing::clear();
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn native_audio_load(
     app: AppHandle,
     audio_state: tauri::State<'_, NativeAudioEngineSlot>,

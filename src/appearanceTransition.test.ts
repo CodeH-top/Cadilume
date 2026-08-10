@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { getCenteredImageDrawPlan } from "./appearanceTransition";
+import { getCenteredImageDrawPlan, shouldAnimateAppearanceReveal } from "./appearanceTransition";
+
+describe("appearance transition policy", () => {
+  it("uses the expensive reveal only for an idle, motion-enabled app", () => {
+    expect(shouldAnimateAppearanceReveal(true, false, false)).toBe(true);
+    expect(shouldAnimateAppearanceReveal(false, false, false)).toBe(false);
+    expect(shouldAnimateAppearanceReveal(true, true, false)).toBe(false);
+    expect(shouldAnimateAppearanceReveal(true, false, true)).toBe(false);
+  });
+});
 
 describe("appearance transition artwork rasterization", () => {
   it("center-crops a wide image for object-fit cover", () => {

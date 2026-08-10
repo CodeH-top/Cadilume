@@ -1183,6 +1183,32 @@ pub async fn remove_playlist_items(
 }
 
 #[tauri::command]
+pub async fn move_playlist_item(
+    server_id: String,
+    playlist_id: String,
+    playlist_item_id: String,
+    after_playlist_item_id: Option<String>,
+    state: State<'_, PlexState>,
+) -> Result<(), String> {
+    if !valid_plex_identifier(&server_id) {
+        return Err("无效的 Plex 服务器标识".to_string());
+    }
+    let path = playlist_item_move_path(&playlist_id, &playlist_item_id).map_err(display_error)?;
+    let mut query = HashMap::new();
+    if let Some(after) = after_playlist_item_id {
+        if !valid_plex_identifier(&after) || after == playlist_item_id {
+            return Err("无效的歌单排序目标".to_string());
+        }
+        query.insert("after".to_string(), after);
+    }
+    state
+        .server_request_response(&server_id, Method::PUT, &path, &query)
+        .await
+        .map_err(display_error)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn update_playlist(
     server_id: String,
     playlist_id: String,
@@ -2573,6 +2599,13 @@ fn playlist_item_path(playlist_id: &str, playlist_item_id: &str) -> Result<Strin
     ))
 }
 
+fn playlist_item_move_path(playlist_id: &str, playlist_item_id: &str) -> Result<String> {
+    Ok(format!(
+        "{}/move",
+        playlist_item_path(playlist_id, playlist_item_id)?
+    ))
+}
+
 fn playlist_item_uri(server_id: &str, rating_key: &str) -> Result<String> {
     if !valid_plex_identifier(server_id) || !valid_plex_identifier(rating_key) {
         return Err(anyhow!("无效的 Plex 歌单项目标识"));
@@ -3038,6 +3071,10 @@ mod tests {
         assert_eq!(
             playlist_item_path("playlist_A-42", "item-7").unwrap(),
             "/playlists/playlist_A-42/items/item-7"
+        );
+        assert_eq!(
+            playlist_item_move_path("playlist_A-42", "item-7").unwrap(),
+            "/playlists/playlist_A-42/items/item-7/move"
         );
         for invalid in ["", "../7", "7/items", "7?x=1", "7#items", "7 items"] {
             assert!(playlist_item_path("playlist_A-42", invalid).is_err());
