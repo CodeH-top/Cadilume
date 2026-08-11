@@ -61,6 +61,7 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 - Light and dark themes with Amber Gold, Rainforest Green, and Ocean Blue visual styles.
 - In-app output-device selection on Windows; macOS output routing remains in Control Center.
 - Artwork caching, a fixed 1 GiB audio cache, and next-track prebuffering, with separate cache status and clear actions in Settings.
+- Release builds can check GitHub Releases from Settings, download a signed update, and restart into the new version. Automatic checks are configurable and disabled in development builds.
 
 ### Account and privacy
 
@@ -89,6 +90,16 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 - macOS: Xcode Command Line Tools; Xcode 26 or later is required only when regenerating the macOS 26 layered icon
 - Windows: Git, CMake, MSVC C++ Build Tools, Windows 10/11 SDK, and WebView2 Runtime
 
+## Downloads and updates
+
+The manually triggered `Release macOS` GitHub Actions workflow builds macOS arm64 only. Its default mode stores DMG and updater files as workflow artifacts. A maintainer must explicitly enable the publish input and provide a matching tag such as `v0.1.2` to create a public [GitHub Release](https://github.com/CodeH-top/Cadilume/releases) with the signed updater manifest. Pushes, merges, and tag creation do not run this workflow automatically.
+
+Release builds check that manifest through **Settings → App Update**. Automatic checking is enabled by default and can be turned off. Downloading and installing still requires an explicit user action because Cadilume restarts after installation. Debug and browser-preview builds cannot call the updater or change its preference.
+
+> Current macOS CI builds are ad-hoc signed and are not notarized. macOS may require manual approval in Privacy & Security. Normal public distribution still requires an Apple Developer ID Application certificate, hardened runtime, notarization, and stapling.
+
+Windows x64 NSIS and portable ZIP releases are planned but are not published yet. The installer and portable updater have different replacement semantics; see [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md) for the implementation and real-device acceptance gates. Maintainer key roles, GitHub secrets, and the release procedure are documented in [`docs/RELEASING.md`](docs/RELEASING.md).
+
 ## Deploy and run
 
 ```bash
@@ -114,6 +125,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build --debug --no-bundle
 ```
 
+Before tagging a release, verify that all three application version sources agree:
+
+```bash
+pnpm verify:release-version
+```
+
 ### macOS DMG
 
 ```bash
@@ -137,6 +154,8 @@ pnpm verify:windows:cross
 ```
 
 The cross-platform gate compiles the Windows code paths and test binaries, then links a debug Windows PE executable. It does not run those binaries or validate Windows runtime integrations and the installer. `verify:windows:bundle` produces an unsigned debug NSIS installer for local acceptance on Windows. Public distribution should use Apple Developer ID signing, notarization, and stapling on macOS, or code signing on Windows.
+
+The GitHub macOS release workflow is defined in [`.github/workflows/release-macos.yml`](.github/workflows/release-macos.yml). Publishing is manual, is restricted to `main`, and rejects a `vX.Y.Z` tag when the tag and application version differ.
 
 ## Main dependencies
 

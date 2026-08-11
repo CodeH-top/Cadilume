@@ -1,10 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, movePlaylistItem, nativeAudioClearQueue, nativeAudioSetArtwork, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setBrandPreset, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
+import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, checkAppUpdate, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, installAppUpdate, movePlaylistItem, nativeAudioClearQueue, nativeAudioSetArtwork, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setAutoUpdateEnabled, setBrandPreset, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
+  Channel: class<T> {
+    onmessage: (message: T) => void;
+
+    constructor(onmessage: (message: T) => void) {
+      this.onmessage = onmessage;
+    }
+  },
+}));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -806,6 +815,37 @@ describe("Cadilume 系统状态图标", () => {
     await expect(setStatusIconEnabled(false)).resolves.toBe(false);
 
     expect(invokeMock).toHaveBeenCalledWith("set_status_icon_enabled", { enabled: false });
+  });
+});
+
+describe("Cadilume 应用更新", () => {
+  it("checks GitHub release metadata through the dedicated native command", async () => {
+    const update = { version: "0.2.0", currentVersion: "0.1.2", notes: "更新说明" };
+    invokeMock.mockResolvedValueOnce(update);
+
+    await expect(checkAppUpdate()).resolves.toEqual(update);
+
+    expect(invokeMock).toHaveBeenCalledWith("check_app_update");
+  });
+
+  it("passes updater progress through an ordered Tauri channel", async () => {
+    const onEvent = vi.fn();
+    invokeMock.mockImplementationOnce(async (_command, payload: { onEvent: { onmessage: (message: unknown) => void } }) => {
+      payload.onEvent.onmessage({ event: "progress", downloaded: 512, contentLength: 1_024 });
+    });
+
+    await installAppUpdate(onEvent);
+
+    expect(invokeMock).toHaveBeenCalledWith("install_app_update", { onEvent: expect.any(Object) });
+    expect(onEvent).toHaveBeenCalledWith({ event: "progress", downloaded: 512, contentLength: 1_024 });
+  });
+
+  it("persists the automatic update preference in Rust", async () => {
+    invokeMock.mockResolvedValueOnce(false);
+
+    await expect(setAutoUpdateEnabled(false)).resolves.toBe(false);
+
+    expect(invokeMock).toHaveBeenCalledWith("set_auto_update_enabled", { enabled: false });
   });
 });
 

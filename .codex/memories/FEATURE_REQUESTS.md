@@ -1,5 +1,16 @@
 # FEATURE_REQUESTS
 
+## Windows x64 安装版、便携版与更新（计划中，2026-08-11）
+
+- 目标固定为 `x86_64-pc-windows-msvc`：安装版生成支持中英文选择的 NSIS EXE，便携版生成 ZIP。
+  当前 macOS `cargo-xwin` 已验证共享 Rust、测试 EXE 和 Debug Tauri PE 可编译，但不能替代真实
+  Windows 10 / 11 对 WASAPI、SMTC、Credential Manager、通知区域、WebView2 和安装器的验收。
+- NSIS 后续可接 Tauri updater 与共享 minisign 信任链；便携 ZIP 不能消费 NSIS manifest，需独立
+  签名 manifest、下载目录内临时文件、新版本自身等待旧进程退出后原子替换，并覆盖中文/空格路径、
+  U 盘、非管理员、只读目录、杀毒占用、磁盘不足和失败回退。
+- 公开 Windows 制品仍需 Authenticode 代码签名。完整实施与发布门禁以
+  `docs/WINDOWS_RELEASE_PLAN.md` 为准；真机通过前 README 不得宣称 Windows 发行已可用。
+
 ## 分段/稀疏音频缓存 v2（已完成，2026-08-09）
 
 - 已按用户确认的“固定 1 GiB + 稀疏分段 v2”完成：首段 256 KiB、后续对齐 2 MiB Range、

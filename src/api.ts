@@ -1,8 +1,8 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { demoAlbums, demoArtists, demoBootstrap, demoPlaylistItems, demoPlaylists, demoRecommendationHubs, demoSections, demoServers, demoTracks } from "./demo";
 import { plexLibraryTrackSort, plexSingerTrackSort, sortTracks, type TrackSortState } from "./trackSort";
-import type { BootstrapResponse, BrandPreset, CacheStatus, LibrarySection, PlexContributor, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
+import type { AppUpdateEvent, AppUpdateInfo, BootstrapResponse, BrandPreset, CacheStatus, LibrarySection, PlexContributor, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
 
 const artworkQueue: Array<() => void> = [];
 let activeArtworkRequests = 0;
@@ -1075,6 +1075,22 @@ export async function getCacheStatus(): Promise<CacheStatus> {
 
 export async function clearArtworkCache(): Promise<CacheStatus> {
   return isDesktopRuntime() ? invoke("clear_cache") : { sizeBytes: 0, fileCount: 0 };
+}
+
+export async function checkAppUpdate(): Promise<AppUpdateInfo | undefined> {
+  if (!isDesktopRuntime()) return undefined;
+  return (await invoke<AppUpdateInfo | null>("check_app_update")) ?? undefined;
+}
+
+export async function installAppUpdate(onEvent: (event: AppUpdateEvent) => void): Promise<void> {
+  if (!isDesktopRuntime()) throw new Error("浏览器预览不支持应用更新");
+  const onEventChannel = new Channel<AppUpdateEvent>(onEvent);
+  await invoke("install_app_update", { onEvent: onEventChannel });
+}
+
+export async function setAutoUpdateEnabled(enabled: boolean): Promise<boolean> {
+  if (!isDesktopRuntime()) return enabled;
+  return invoke("set_auto_update_enabled", { enabled });
 }
 
 export async function setStatusIconEnabled(enabled: boolean): Promise<boolean> {

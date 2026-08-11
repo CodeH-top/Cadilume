@@ -14,6 +14,7 @@
     "test": "vitest run",
     "preview": "vite preview",
     "bundle:macos:dmg": "sh scripts/build-macos-dmg.sh",
+    "verify:release-version": "node scripts/verify-release-version.mjs",
     "icons:macos": "sh scripts/generate-macos-icons.sh",
     "windows:doctor": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-env.ps1",
     "verify:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows.ps1",

@@ -50,5 +50,13 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYwQzNCMkI1NDYzQTA0N0YKUldSL0JEcEd0YkxEWUhNMjc1SHFCVmFqakdlOTQ1Q0ZjU0JJbm02YTNIRFR3SnV2bkN3YkJNNFQK",
+      "endpoints": [
+        "https://github.com/CodeH-top/Cadilume/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

@@ -66,6 +66,8 @@ struct PersistedConfig {
     client_identifier: String,
     #[serde(default = "default_status_icon_enabled")]
     status_icon_enabled: bool,
+    #[serde(default = "default_auto_update_enabled")]
+    auto_update_enabled: bool,
     #[serde(default)]
     device_name: String,
     #[serde(default)]
@@ -77,6 +79,7 @@ impl Default for PersistedConfig {
         Self {
             client_identifier: Uuid::new_v4().to_string(),
             status_icon_enabled: default_status_icon_enabled(),
+            auto_update_enabled: default_auto_update_enabled(),
             device_name: default_device_name(),
             brand_preset: BrandPreset::Amber,
         }
@@ -84,6 +87,10 @@ impl Default for PersistedConfig {
 }
 
 const fn default_status_icon_enabled() -> bool {
+    true
+}
+
+const fn default_auto_update_enabled() -> bool {
     true
 }
 
@@ -247,6 +254,7 @@ pub struct PlexState {
     config: Mutex<PersistedConfig>,
     client_identifier: String,
     status_icon_enabled: AtomicBool,
+    auto_update_enabled: AtomicBool,
     token: RwLock<Option<String>>,
     servers: RwLock<HashMap<String, CachedServer>>,
 }
@@ -294,6 +302,7 @@ impl PlexState {
             config: Mutex::new(config.clone()),
             client_identifier: config.client_identifier.clone(),
             status_icon_enabled: AtomicBool::new(config.status_icon_enabled),
+            auto_update_enabled: AtomicBool::new(config.auto_update_enabled),
             token: RwLock::new(token),
             servers: RwLock::new(HashMap::new()),
         })
@@ -301,6 +310,10 @@ impl PlexState {
 
     pub fn status_icon_enabled(&self) -> bool {
         self.status_icon_enabled.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn auto_update_enabled(&self) -> bool {
+        self.auto_update_enabled.load(Ordering::SeqCst)
     }
 
     fn token(&self) -> Result<String> {
@@ -313,6 +326,10 @@ impl PlexState {
 
     fn save_status_icon_enabled(&self, enabled: bool) -> Result<()> {
         self.update_preferences(|config| config.status_icon_enabled = enabled)
+    }
+
+    pub(crate) fn save_auto_update_enabled(&self, enabled: bool) -> Result<()> {
+        self.update_preferences(|config| config.auto_update_enabled = enabled)
     }
 
     fn save_brand_preset(&self, preset: BrandPreset) -> Result<()> {
@@ -336,6 +353,8 @@ impl PlexState {
         }
         self.status_icon_enabled
             .store(config.status_icon_enabled, Ordering::SeqCst);
+        self.auto_update_enabled
+            .store(config.auto_update_enabled, Ordering::SeqCst);
         Ok(())
     }
 
@@ -650,6 +669,9 @@ pub struct BootstrapResponse {
     client_identifier: String,
     authenticated: bool,
     account: Option<Account>,
+    app_version: String,
+    app_update_supported: bool,
+    auto_update_enabled: bool,
     status_icon_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     status_icon_platform: Option<StatusIconPlatform>,
@@ -869,6 +891,9 @@ pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse,
         client_identifier: state.client_identifier.clone(),
         authenticated: token.is_some(),
         account,
+        app_version: PRODUCT_VERSION.to_string(),
+        app_update_supported: crate::app_update::is_supported(),
+        auto_update_enabled: state.auto_update_enabled(),
         status_icon_enabled: state.status_icon_enabled(),
         status_icon_platform: status_icon_platform(),
         device_name: state.device_name(),
@@ -2949,8 +2974,10 @@ mod tests {
         assert!(normalize_device_name(&config.device_name).is_ok());
         assert_eq!(config.brand_preset, BrandPreset::Amber);
         assert!(config.status_icon_enabled);
+        assert!(config.auto_update_enabled);
         let serialized = serde_json::to_value(config).expect("config should serialize");
         assert_eq!(serialized["statusIconEnabled"], true);
+        assert_eq!(serialized["autoUpdateEnabled"], true);
         assert!(serialized.get("audioCacheLimitGib").is_none());
         assert!(serialized.get("closeBehavior").is_none());
         assert!(serialized.get("syncRecentPlays").is_none());
@@ -3217,6 +3244,7 @@ mod tests {
     #[test]
     fn config_defaults_keep_required_local_preferences() {
         assert!(PersistedConfig::default().status_icon_enabled);
+        assert!(PersistedConfig::default().auto_update_enabled);
         assert!(!PersistedConfig::default().device_name.is_empty());
         assert_eq!(PersistedConfig::default().brand_preset, BrandPreset::Amber);
     }

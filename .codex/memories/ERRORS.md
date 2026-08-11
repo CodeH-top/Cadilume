@@ -1,5 +1,16 @@
 # ERRORS
 
+## 2026-08-11 — PCM seek-storm 压力测试在完整并发套件中出现过一次抖动
+
+- 首轮 `cargo test --locked` 中只有
+  `audio_engine::tests::decoder_worker_reuses_the_bounded_chunk_pool_across_seek_storms`
+  在最终分配上限断言失败；目标文件无本轮改动。同一测试用完整模块名实际执行 5 次均通过，随后
+  再跑完整 108 项 Rust 套件也通过（106 passed / 2 ignored）。
+- 使用 `cargo test <短名称> -- --exact` 会匹配 0 项，不能把该输出当作定向通过；需要传完整模块名
+  或去掉 `--exact`，并确认输出明确显示 `running 1 test`。
+- 若完整套件再次出现同一失败，不应长期依靠重跑放行；应记录 `allocated_chunks`、并行测试负载和
+  worker 退出时序，再决定为该压力测试串行化还是修正缓存池所有权。
+
 ## 2026-08-10 — 内部浏览器 CUA drag 可能不释放 Pointer Capture
 
 - Cadilume 行排序使用 `setPointerCapture()` 后，内部浏览器 `tab.cua.drag()` 本轮能触发 pointer down

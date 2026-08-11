@@ -1,0 +1,111 @@
+name: Release macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Create a public GitHub Release after validation
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: Version tag for publishing, for example v0.1.2
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-macos-${{ github.ref }}-${{ inputs.publish }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust arm64 target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+          rustup target add aarch64-apple-darwin
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: macos-arm64-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            macos-arm64-cargo-
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify release version
+        env:
+          CADILUME_PUBLISH: ${{ inputs.publish }}
+          CADILUME_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: pnpm verify:release-version
+
+      - name: Run frontend validation
+        run: |
+          pnpm check
+          pnpm test
+          pnpm build
+
+      - name: Run Rust validation
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Build manual macOS artifacts
+        if: ${{ !inputs.publish }}
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          args: --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: cadilume-macos-arm64-[bundle]
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.publish }}
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ inputs.release_tag }}
+          releaseName: Cadilume ${{ inputs.release_tag }}
+          releaseCommitish: ${{ github.sha }}
+          releaseBody: macOS arm64 release. This build is currently ad-hoc signed and not notarized; see the README before installation.
+          generateReleaseNotes: true
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+          args: --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json

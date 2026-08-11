@@ -1,3 +1,4 @@
+mod app_update;
 mod audio_cache;
 mod audio_engine;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -17,6 +18,7 @@ use tauri::{Listener, Manager};
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(window::handle_window_event)
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
@@ -34,6 +36,7 @@ pub fn run() {
             now_playing::install(app.handle().clone());
             app.manage(StreamProxy::start(app.handle().clone())?);
             app.manage(window::QuitCoordinator::default());
+            app.manage(app_update::AppUpdateState::default());
             app.listen("playback://log", |event| {
                 // Development/diagnostic channel only: the WebView player logs
                 // sanitized playback decisions through this event so the same
@@ -100,6 +103,9 @@ pub fn run() {
             plex::set_status_icon_enabled,
             plex::set_device_name,
             plex::set_brand_preset,
+            app_update::check_app_update,
+            app_update::install_app_update,
+            app_update::set_auto_update_enabled,
             window::show_main_window,
             window::quit_app,
             window::acknowledge_quit,

@@ -1,5 +1,17 @@
 # LEARNINGS
 
+## 2026-08-11 — Tauri updater 公钥必须原样提交并通过实签验签确认
+
+- `tauri.conf.json` 的 `plugins.updater.pubkey` 是 Tauri signer 生成的整个 `.pub` 文件内容再做
+  Base64 后的字符串，不是只取 Ed25519 密钥行，也不是 `.pub` 文件路径。配置应逐字复制生成文件；
+  虽然 minisign 的 untrusted comment 不参与密码学验证，注释拼错仍会破坏精确比对和换钥审计。
+- 不能靠长度、哈希层级或再次 Base64 解码后与原文件比较来判断私钥匹配。可靠流程是用目标私钥给
+  临时文件签名，把 `.sig` 与配置公钥各自按 updater 的外层 Base64 解码，再使用项目实际依赖的
+  `minisign-verify` 验证原始文件；真实 `.app.tar.gz` 也应在发布前按相同路径复验。
+- GitHub SSH key、Tauri updater minisign key 和 Apple Developer ID / Windows Authenticode
+  证书是三套独立凭据。GitHub 只托管代码与 Release 资产，不需要登记 updater 公钥；旧版本能否
+  继续更新取决于应用内置公钥和签包私钥的连续性。
+
 ## 2026-08-10 — React Portal 锚点不能从延迟状态更新里读取 currentTarget
 
 - React 合成事件的 `event.currentTarget` 只在事件回调同步阶段可靠；把它直接写进 functional state

@@ -61,6 +61,7 @@ Cadilume 是一个面向 macOS 与 Windows 的 Plex 音乐桌面客户端，目�
 - 浅色、深色主题以及琥珀金、雨林绿、澄海蓝三种视觉风格。
 - Windows 提供应用内输出设备选择；macOS 继续使用系统控制中心管理输出路由。
 - 封面缓存、固定 1 GiB 音频缓存和下一首预缓冲，设置页可分别查看与清理缓存。
+- 发行构建可在设置中检查 GitHub Release、下载签名更新，并重启进入新版本；自动检查开关可配置，开发构建强制禁用更新能力。
 
 ### 账号与隐私
 
@@ -89,6 +90,16 @@ Cadilume 是一个面向 macOS 与 Windows 的 Plex 音乐桌面客户端，目�
 - macOS：Xcode Command Line Tools；重新生成 macOS 26 分层图标时需要 Xcode 26 或更高版本
 - Windows：Git、CMake、MSVC C++ Build Tools、Windows 10/11 SDK 与 WebView2 Runtime
 
+## 下载与更新
+
+`Release macOS` GitHub Actions 工作流只允许手动触发，并且只构建 macOS arm64。默认模式仅把 DMG 与 updater 文件保存为 workflow artifacts；维护者必须主动勾选发布并填写 `v0.1.2` 这类匹配版本的标签，才会创建公开 [GitHub Release](https://github.com/CodeH-top/Cadilume/releases) 和签名更新清单。普通 push、合并与创建标签都不会自动运行该工作流。
+
+发行构建通过 **设置 → 应用更新** 检查该清单。自动检查默认开启，也可以关闭；下载安装仍须由用户明确点击，因为安装完成后 Cadilume 会重启。Debug 与浏览器预览构建无法调用 updater，也无法修改该偏好。
+
+> 当前 macOS CI 使用 ad-hoc 签名且未公证，macOS 可能要求用户在“隐私与安全性”中手动放行。面向普通用户的正式公开分发仍需 Apple Developer ID Application 证书、hardened runtime、公证和票据装订。
+
+Windows x64 NSIS 安装包和便携 ZIP 仍处于计划阶段，尚未发布。安装版与便携版需要不同的更新替换语义，实施步骤和真机验收门禁见 [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md)。维护者密钥用途、GitHub Secrets 和发布步骤见 [`docs/RELEASING.md`](docs/RELEASING.md)。
+
 ## 部署与运行
 
 ```bash
@@ -114,6 +125,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build --debug --no-bundle
 ```
 
+创建发布标签前，先确认三处应用版本一致：
+
+```bash
+pnpm verify:release-version
+```
+
 ### macOS DMG
 
 ```bash
@@ -137,6 +154,8 @@ pnpm verify:windows:cross
 ```
 
 交叉门禁会编译 Windows 代码路径和测试二进制，并链接 debug Windows PE 可执行文件；它不会运行这些二进制，也不能验收 Windows 运行时集成与安装器。`verify:windows:bundle` 会在 Windows 上生成用于本地验收的未签名 debug NSIS 安装包。正式公开分发时，请分别配置 Apple Developer ID、公证与票据装订，或 Windows 代码签名。
+
+GitHub macOS 发布工作流位于 [`.github/workflows/release-macos.yml`](.github/workflows/release-macos.yml)；公开发布必须从 `main` 手动执行，且 `vX.Y.Z` 标签与应用版本不一致时会直接拒绝。
 
 ## 主要依赖
 

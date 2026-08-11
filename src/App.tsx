@@ -12,6 +12,7 @@ import {
   CircleUserRound,
   Cloud,
   Database,
+  Download,
   EllipsisVertical,
   Globe2,
   Headphones,
@@ -144,6 +145,7 @@ import type { GlobalNotificationLevel } from "./notifications";
 import { applyThemeMode, readInitialThemeMode } from "./theme";
 import { SharedVolumeControl } from "./VolumeControl";
 import { rasterizeAppearanceSnapshotImages, shouldAnimateAppearanceReveal } from "./appearanceTransition";
+import { displayAppVersion, useAppUpdater, type AppUpdaterController } from "./useAppUpdater";
 
 type Icon = typeof Album;
 
@@ -212,6 +214,7 @@ interface MusicShellRuntime {
   statusIconEnabled: boolean;
   statusIconPlatform?: BootstrapResponse["statusIconPlatform"];
   statusIconSaving: boolean;
+  appUpdater: AppUpdaterController;
   deviceName: string;
   quality: StreamQuality;
   prebufferNext: boolean;
@@ -329,6 +332,8 @@ function MainApplication({
   const [session, setSession] = useState<BootstrapResponse>();
   const [initialLibrary, setInitialLibrary] = useState<InitialLibraryData>();
   const [error, setError] = useState<string>();
+  const notifications = useGlobalNotificationQueue();
+  const appUpdater = useAppUpdater(session, notifications.notify);
   const syncedBrandSessionRef = useRef<BootstrapResponse | undefined>(undefined);
   const requestedUiPreview = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("ui-preview")
@@ -375,19 +380,26 @@ function MainApplication({
     if (session?.brandPreset) syncBrandPreset(session.brandPreset);
   }, [session, syncBrandPreset]);
 
-  if (uiPreview === "splash") return <AppFrame fullBleed><SplashScreen /></AppFrame>;
+  const withNotifications = (content: ReactNode) => (
+    <>
+      {content}
+      <GlobalNotificationQueue notices={notifications.notices} onDismiss={notifications.dismiss} />
+    </>
+  );
+
+  if (uiPreview === "splash") return withNotifications(<AppFrame fullBleed><SplashScreen /></AppFrame>);
   if (uiPreview === "login") {
-    return <AppFrame><LoginScreen clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>;
+    return withNotifications(<AppFrame><LoginScreen clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>);
   }
-  if (uiPreview === "notifications") return <AppFrame><NotificationFixture /></AppFrame>;
-  if (!session && !error) return <AppFrame fullBleed><SplashScreen /></AppFrame>;
-  if (!session) return <AppFrame><FatalError message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>;
+  if (uiPreview === "notifications") return withNotifications(<AppFrame><NotificationFixture /></AppFrame>);
+  if (!session && !error) return withNotifications(<AppFrame fullBleed><SplashScreen /></AppFrame>);
+  if (!session) return withNotifications(<AppFrame><FatalError message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>);
   if (!session.authenticated || !session.account) {
-    return <AppFrame><LoginScreen clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>;
+    return withNotifications(<AppFrame><LoginScreen clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
   }
-  if (error) return <AppFrame><FatalError message={error} retry={retryLoad} /></AppFrame>;
-  if (!initialLibrary) return <AppFrame fullBleed><SplashScreen /></AppFrame>;
-  return <AppFrame integrated><MusicShell initialSession={session} initialLibrary={initialLibrary} themeMode={themeMode} resolvedTheme={resolvedTheme} brandPreset={brandPreset} onThemeMode={onThemeMode} onBrandPreset={onBrandPreset} /></AppFrame>;
+  if (error) return withNotifications(<AppFrame><FatalError message={error} retry={retryLoad} /></AppFrame>);
+  if (!initialLibrary) return withNotifications(<AppFrame fullBleed><SplashScreen /></AppFrame>);
+  return withNotifications(<AppFrame integrated><MusicShell initialSession={session} initialLibrary={initialLibrary} themeMode={themeMode} resolvedTheme={resolvedTheme} brandPreset={brandPreset} onThemeMode={onThemeMode} onBrandPreset={onBrandPreset} appUpdater={appUpdater} notify={notifications.notify} /></AppFrame>);
 }
 
 function AppFrame({ children, integrated = false, fullBleed = false }: {
@@ -486,7 +498,7 @@ function AppTitlebar({ children, inactive = false }: { children?: ReactNode; ina
   );
 }
 
-function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, brandPreset, onThemeMode, onBrandPreset }: {
+function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, brandPreset, onThemeMode, onBrandPreset, appUpdater, notify }: {
   initialSession: BootstrapResponse;
   initialLibrary: InitialLibraryData;
   themeMode: ThemeMode;
@@ -494,6 +506,8 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   brandPreset: BrandPreset;
   onThemeMode: ThemeModeChange;
   onBrandPreset: BrandPresetChange;
+  appUpdater: AppUpdaterController;
+  notify: (message: string, level?: GlobalNotificationLevel) => void;
 }) {
   const account = initialSession.account as PlexAccount;
   const [initialPlaybackSession] = useState(() => readPersistedPlaybackSession());
@@ -503,11 +517,6 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   const [sectionKey, setSectionKey] = useState<string | undefined>(initialLibrary.sectionKey);
   const [libraryArtists, setLibraryArtists] = useState<PlexItem[]>(initialLibrary.libraryArtists);
   const [, setLoading] = useState(true);
-  const {
-    notices,
-    notify,
-    dismiss: dismissNotification,
-  } = useGlobalNotificationQueue();
   const [sidePanel, setSidePanel] = useState<"queue" | "lyrics" | "devices" | null>(null);
   const [nowPlayingOpen, setNowPlayingOpen] = useState(false);
   const [nowPlayingMode, setNowPlayingMode] = useState<NowPlayingMode>(readNowPlayingMode);
@@ -1179,6 +1188,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
     statusIconEnabled,
     statusIconPlatform: initialSession.statusIconPlatform,
     statusIconSaving,
+    appUpdater,
     deviceName,
     quality,
     prebufferNext: player.prebufferNext,
@@ -1397,10 +1407,6 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
       />
 
       {sourcesSyncing && <SourceSyncOverlay />}
-      <GlobalNotificationQueue
-        notices={notices}
-        onDismiss={dismissNotification}
-      />
     </div>
     </MusicShellContext.Provider>
     </ArtworkServerContext.Provider>
@@ -2062,6 +2068,7 @@ function RoutePage() {
       statusIconEnabled={runtime.statusIconEnabled}
       statusIconPlatform={runtime.statusIconPlatform}
       statusIconSaving={runtime.statusIconSaving}
+      appUpdater={runtime.appUpdater}
       brandPreset={runtime.brandPreset}
       deviceName={runtime.deviceName}
       quality={runtime.quality}
@@ -2121,6 +2128,7 @@ interface ContentViewProps {
   statusIconEnabled: boolean;
   statusIconPlatform?: BootstrapResponse["statusIconPlatform"];
   statusIconSaving: boolean;
+  appUpdater: AppUpdaterController;
   brandPreset: BrandPreset;
   deviceName: string;
   quality: StreamQuality;
@@ -3970,6 +3978,18 @@ function SettingsView(props: ContentViewProps) {
   const nativeCacheSummary = props.nativeCacheStatus
     ? formatBytes(props.nativeCacheStatus.size_bytes)
     : "正在统计…";
+  const update = props.appUpdater;
+  const updateStatus = !update.supported
+    ? "开发构建不执行更新检查。"
+    : update.installing
+      ? update.progressPercent === undefined ? "正在下载更新…" : `正在下载更新… ${update.progressPercent}%`
+      : update.checking
+        ? "正在检查 GitHub Release…"
+        : update.error
+          ? `上次更新操作失败：${update.error}`
+          : update.availableUpdate
+            ? `${displayAppVersion(update.availableUpdate.version)} 已可用，安装完成后 Cadilume 会重启。`
+            : "可随时检查 GitHub 上的最新正式版本。";
   return (
     <div className="settings-page">
       <div className="page-heading sticky-page-heading"><h1>设置</h1></div>
@@ -4002,6 +4022,52 @@ function SettingsView(props: ContentViewProps) {
           </div>
         </SettingsGroup>
       )}
+      <SettingsGroup icon={<Download size={18} />} title="应用更新">
+        <div className="settings-stack">
+          <div className="field-row app-update-row">
+            <span>
+              <strong>当前版本 {displayAppVersion(update.currentVersion)}</strong>
+              <small aria-live="polite">{updateStatus}</small>
+              {update.installing && (
+                <span className="app-update-progress" aria-hidden="true">
+                  <i style={{ width: `${update.progressPercent ?? 0}%` }} />
+                </span>
+              )}
+            </span>
+            <button
+              className="secondary-button app-update-button"
+              type="button"
+              disabled={!update.supported || update.checking || update.installing}
+              onClick={() => void (update.availableUpdate ? update.installUpdate() : update.checkForUpdate())}
+            >
+              {update.checking || update.installing
+                ? <LoaderCircle className="spin" size={15} />
+                : update.availableUpdate ? <Download size={15} /> : <RefreshCw size={15} />}
+              {!update.supported
+                ? "开发构建不可用"
+                : update.installing
+                  ? "正在更新…"
+                  : update.checking
+                    ? "正在检查…"
+                    : update.availableUpdate
+                      ? `更新至 ${displayAppVersion(update.availableUpdate.version)}`
+                      : "检查更新"}
+            </button>
+          </div>
+          <div className="toggle-row">
+            <span><strong>自动检查更新</strong></span>
+            <label className="toggle-switch" aria-label="自动检查更新">
+              <input
+                type="checkbox"
+                checked={update.autoUpdateEnabled}
+                disabled={!update.supported || update.preferenceSaving}
+                onChange={(event) => void update.changeAutoUpdateEnabled(event.target.checked)}
+              />
+              <span className="toggle-control" aria-hidden="true" />
+            </label>
+          </div>
+        </div>
+      </SettingsGroup>
       <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放">
         <div className="settings-stack">
           <div className="field-row"><span><strong>音频质量</strong><small>选择 PMS 返回原始流或兼容质量。</small></span><SettingsSelect label="音频质量" value={props.quality} placeholder="选择音频质量" disabled={false} options={[{ value: "auto", label: "自动" }, { value: "original", label: "始终原始质量" }, { value: "320", label: "320 kbps" }, { value: "256", label: "256 kbps" }, { value: "192", label: "192 kbps" }]} onValueChange={(value) => props.onQuality(value as StreamQuality)} /></div>

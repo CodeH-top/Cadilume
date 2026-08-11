@@ -10,6 +10,17 @@ export interface CacheStatus {
   fileCount: number;
 }
 
+export interface AppUpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes?: string;
+}
+
+export type AppUpdateEvent =
+  | { event: "started"; contentLength: number | null }
+  | { event: "progress"; downloaded: number; contentLength: number | null }
+  | { event: "downloaded" };
+
 export interface PlexAccount {
   id?: number;
   username: string;
@@ -25,6 +36,9 @@ export interface BootstrapResponse {
   clientIdentifier: string;
   authenticated: boolean;
   account?: PlexAccount;
+  appVersion: string;
+  appUpdateSupported: boolean;
+  autoUpdateEnabled: boolean;
   statusIconEnabled: boolean;
   statusIconPlatform?: StatusIconPlatform;
   deviceName: string;
