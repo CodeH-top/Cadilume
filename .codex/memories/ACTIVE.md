@@ -108,11 +108,11 @@
   空内容区再逐项补数据；请求失败留在当前初始化流程并提供重试，无服务器或无音乐分区则进入明确空状态。
   Source: user correction and initial-library preload implementation on 2026-08-10.
 
-- [ACT-033] 公开仓库入口固定使用 `README.md` 与 `README_EN.md` 中英文双版本：先介绍 Cadilume
-  作为 Plex Web 与 Plexamp 的音乐桌面替代方案及当前产品功能，再写部署、构建和主要依赖；不要把
-  排障过程、未解决技术问题或开发交接细节写入 README。README 圆角透明图标与仓库头像都从现有
-  Cadilume SVG 图标母版精确派生，不另行改变品牌造型。
-  Source: explicit user documentation and branding request on 2026-08-10.
+- [ACT-033] 公开仓库入口固定使用英文 `README.md` 与中文 `README_ZH.md` 双版本：先介绍
+  Cadilume 作为 Plex Web 与 Plexamp 的音乐桌面替代方案及当前产品功能，再写部署、构建和主要
+  依赖；不要把排障过程、未解决技术问题或开发交接细节写入 README。README 圆角透明图标与仓库
+  头像都从现有 Cadilume SVG 图标母版精确派生，不另行改变品牌造型。
+  Source: explicit user documentation and branding requests on 2026-08-10 and 2026-08-11.
 
 - [ACT-034] Cadilume 品牌图形固定为居中的对称实心唱片、两圈克制沟槽、单一唱片标签与轴孔；
   应用内 `BrandIcon`、README 圆角透明图标、仓库头像、主题预设、状态图标及各平台生成资源必须
