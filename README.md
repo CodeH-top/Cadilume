@@ -78,7 +78,7 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 - macOS, or Windows 10 / 11 x64.
 - Microsoft Edge WebView2 Runtime on Windows; it is already present on most Windows 10 / 11 systems.
 
-macOS is currently the primary development and on-device acceptance platform. The Windows build, installer, and system-integration paths remain available.
+> **Platform validation:** macOS is currently the only platform validated on physical hardware. From macOS, the Windows code paths pass `cargo-xwin` compilation, test-binary build, and PE-link gates for `x86_64-pc-windows-msvc`. Windows runtime behavior and the NSIS installer have not yet been validated on a real Windows system.
 
 ### To build from source
 
@@ -122,13 +122,21 @@ pnpm bundle:macos:dmg
 
 ### Windows
 
+On a Windows development machine:
+
 ```powershell
 pnpm windows:doctor
 pnpm verify:windows
 pnpm verify:windows:bundle
 ```
 
-`verify:windows:bundle` produces an unsigned debug NSIS installer for local acceptance. Public distribution should use Apple Developer ID signing, notarization, and stapling on macOS, or code signing on Windows.
+From macOS with `cargo-xwin` installed:
+
+```bash
+pnpm verify:windows:cross
+```
+
+The cross-platform gate compiles the Windows code paths and test binaries, then links a debug Windows PE executable. It does not run those binaries or validate Windows runtime integrations and the installer. `verify:windows:bundle` produces an unsigned debug NSIS installer for local acceptance on Windows. Public distribution should use Apple Developer ID signing, notarization, and stapling on macOS, or code signing on Windows.
 
 ## Main dependencies
 

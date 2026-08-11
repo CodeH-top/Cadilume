@@ -19,7 +19,9 @@
     "verify:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows.ps1",
     "verify:windows:bundle": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows.ps1 -Bundle",
     "check:windows:cross": "cargo xwin check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --locked",
+    "test:windows:cross": "cargo xwin test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --locked --no-run",
     "build:windows:cross": "tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --debug --no-bundle --ci",
+    "verify:windows:cross": "pnpm check:windows:cross && pnpm test:windows:cross && pnpm build:windows:cross",
     "tauri": "tauri"
   },
   "dependencies": {

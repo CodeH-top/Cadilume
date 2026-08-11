@@ -78,7 +78,7 @@ Cadilume 是一个面向 macOS 与 Windows 的 Plex 音乐桌面客户端，目�
 - macOS，或 Windows 10 / 11 x64。
 - Windows 需要系统提供 Microsoft Edge WebView2 Runtime；常见的 Windows 10 / 11 环境通常已包含。
 
-当前以 macOS 为主要开发与实机验收平台，同时保留 Windows 构建、安装器与系统集成路径。
+> **平台验证状态：** macOS 是当前唯一完成实机验收的平台。Windows 代码路径已在 macOS 上针对 `x86_64-pc-windows-msvc` 通过 `cargo-xwin` 编译、测试二进制构建与 PE 链接门禁，但 Windows 运行时行为和 NSIS 安装器尚未在真实 Windows 系统中验收。
 
 ### 从源码构建
 
@@ -122,13 +122,21 @@ pnpm bundle:macos:dmg
 
 ### Windows
 
+在 Windows 开发机上：
+
 ```powershell
 pnpm windows:doctor
 pnpm verify:windows
 pnpm verify:windows:bundle
 ```
 
-`verify:windows:bundle` 会生成用于本地验收的未签名 debug NSIS 安装包。正式公开分发时，请分别配置 Apple Developer ID、公证与票据装订，或 Windows 代码签名。
+在已安装 `cargo-xwin` 的 macOS 上：
+
+```bash
+pnpm verify:windows:cross
+```
+
+交叉门禁会编译 Windows 代码路径和测试二进制，并链接 debug Windows PE 可执行文件；它不会运行这些二进制，也不能验收 Windows 运行时集成与安装器。`verify:windows:bundle` 会在 Windows 上生成用于本地验收的未签名 debug NSIS 安装包。正式公开分发时，请分别配置 Apple Developer ID、公证与票据装订，或 Windows 代码签名。
 
 ## 主要依赖
 

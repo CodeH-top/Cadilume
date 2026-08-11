@@ -85,11 +85,10 @@ GitHub Actions 的 `windows-latest` runner 会自动执行完整 NSIS 门禁并�
 macOS 上可用已安装的 `cargo-xwin` 做交叉检查：
 
 ```bash
-pnpm check:windows:cross
-pnpm build:windows:cross
+pnpm verify:windows:cross
 ```
 
-第一条快速覆盖 Windows `cfg` 和 WinRT API，第二条进一步完成 Tauri Windows PE 链接。两者都不能证明 WASAPI、SMTC UI、Credential Manager 或通知区域在真实 Windows 会话中工作。裸 `cargo check --target x86_64-pc-windows-msvc` 不够，它会在需要原生 C/Windows SDK 的依赖上失败；使用 `cargo-xwin` 或 Windows runner。
+该命令串行执行 `check:windows:cross`、`test:windows:cross` 与 `build:windows:cross`，依次覆盖 Windows `cfg` 和 WinRT API、测试二进制构建以及 Tauri Windows PE 链接。它不会运行 Windows 测试二进制，也不能证明 WASAPI、SMTC UI、Credential Manager、通知区域或 NSIS 安装器在真实 Windows 会话中工作。裸 `cargo check --target x86_64-pc-windows-msvc` 不够，它会在需要原生 C/Windows SDK 的依赖上失败；使用 `cargo-xwin` 或 Windows runner。
 
 ## 5. Windows 实机验收清单
 
