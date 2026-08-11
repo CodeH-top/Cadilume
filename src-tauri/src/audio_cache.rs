@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -315,6 +315,27 @@ struct CacheInner {
     network_runtime: CacheHttpRuntime,
     network_gate: Arc<NetworkGate>,
     open_entries: Mutex<HashMap<String, Weak<SegmentEntry>>>,
+    active_operations: AtomicUsize,
+}
+
+struct CacheActivityGuard {
+    cache: Arc<CacheInner>,
+}
+
+impl CacheActivityGuard {
+    fn new(cache: &Arc<CacheInner>) -> Self {
+        cache.active_operations.fetch_add(1, Ordering::SeqCst);
+        Self {
+            cache: Arc::clone(cache),
+        }
+    }
+}
+
+impl Drop for CacheActivityGuard {
+    fn drop(&mut self) {
+        let previous = self.cache.active_operations.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0, "cache activity count must not underflow");
+    }
 }
 
 #[derive(Clone)]
@@ -390,6 +411,7 @@ pub(crate) struct SegmentReader {
     position: u64,
     observed_interrupt_epoch: u64,
     decoder_started: bool,
+    _activity: CacheActivityGuard,
 }
 
 impl SegmentCache {
@@ -420,6 +442,7 @@ impl SegmentCache {
                 network_runtime,
                 network_gate: NetworkGate::new(),
                 open_entries: Mutex::new(HashMap::new()),
+                active_operations: AtomicUsize::new(0),
             }),
         };
         let _ = cache.inner.ensure_capacity(0, None);
@@ -450,6 +473,7 @@ impl SegmentCache {
             file,
             position: 0,
             decoder_started: false,
+            _activity: CacheActivityGuard::new(&self.inner),
         })
     }
 
@@ -458,6 +482,12 @@ impl SegmentCache {
     }
 
     pub(crate) fn clear(&self) -> Result<(), String> {
+        let active_operations = self.active_operations();
+        if active_operations != 0 {
+            return Err(format!(
+                "仍有 {active_operations} 个媒体缓存任务未退出，无法清理音频缓存"
+            ));
+        }
         if let Ok(mut entries) = self.inner.open_entries.lock() {
             entries.clear();
         }
@@ -473,6 +503,10 @@ impl SegmentCache {
 
     pub(crate) fn limit_bytes(&self) -> u64 {
         self.inner.limit_bytes
+    }
+
+    pub(crate) fn active_operations(&self) -> usize {
+        self.inner.active_operations.load(Ordering::SeqCst)
     }
 }
 
@@ -959,7 +993,9 @@ impl SegmentReader {
         let cache = Arc::clone(&self.cache);
         let entry = Arc::clone(&self.entry);
         let control = Arc::clone(&self.control);
+        let activity = CacheActivityGuard::new(&self.cache);
         self.cache.network_runtime.spawn(async move {
+            let _activity = activity;
             let _permit = permit;
             sequential_download(response, data, cache, entry, control, expected_len).await;
         });
@@ -2261,6 +2297,11 @@ mod tests {
         let reader = cache
             .open_reader(Some("cancel-sequential"), &source, CachePriority::Current)
             .unwrap();
+        assert_eq!(
+            cache.active_operations(),
+            1,
+            "reader lifetime must keep the cache operation active"
+        );
         let control = reader.control();
         let entry = Arc::clone(&reader.entry);
         let waiting = std::thread::spawn(move || {
@@ -2268,15 +2309,37 @@ mod tests {
             reader.prefetch_head()
         });
         ready_rx.recv().unwrap();
+        let activity_start_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while cache.active_operations() < 2 && std::time::Instant::now() < activity_start_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            cache.active_operations(),
+            2,
+            "the waiting reader and detached sequential download must be tracked independently"
+        );
         control.cancel();
         let error = waiting.join().unwrap().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        let activity_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while cache.active_operations() != 0 && std::time::Instant::now() < activity_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            cache.active_operations(),
+            0,
+            "cancel must finish both reader and sequential-download cleanup"
+        );
+        assert!(
+            entry.runtime.lock().unwrap().index.ranges.is_empty(),
+            "cancelled sequential partial must be discarded before reload"
+        );
         let second_cache = cache.clone();
         let (second_tx, second_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = second_cache
                 .open_reader(
-                    Some("current-after-cancel"),
+                    Some("cancel-sequential"),
                     &second_source,
                     CachePriority::Current,
                 )
@@ -2293,13 +2356,10 @@ mod tests {
         second_server.join().unwrap();
         release_tx.send(()).unwrap();
         server.join().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while !entry.runtime.lock().unwrap().index.ranges.is_empty()
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(entry.runtime.lock().unwrap().index.ranges.is_empty());
+        assert!(
+            !entry.runtime.lock().unwrap().index.ranges.is_empty(),
+            "old sequential cleanup must not truncate the reloaded cache entry"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -2738,7 +2738,61 @@ fn write_dev_token_fallback(token: &str) -> Result<(), String> {
     write_dev_token_file(&dev_token_fallback_path(), token)
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
+#[cfg(debug_assertions)]
+fn write_dev_token_file(path: &Path, token: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::{w, PCWSTR},
+        Win32::{
+            Foundation::{LocalFree, HLOCAL},
+            Security::{
+                Authorization::{
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                },
+                SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+                PSECURITY_DESCRIPTOR,
+            },
+        },
+    };
+
+    let mut file =
+        std::fs::File::create(path).map_err(|error| format!("写入开发 token 文件失败: {error}"))?;
+    let path_wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            w!("D:P(A;;FA;;;OW)"),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+        .map_err(|error| format!("创建开发 token 文件安全描述符失败: {error}"))?;
+        let permission_result = SetFileSecurityW(
+            PCWSTR(path_wide.as_ptr()),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+        .ok();
+        let _ = LocalFree(HLOCAL(descriptor.0));
+        permission_result.map_err(|error| format!("收紧开发 token 文件权限失败: {error}"))?;
+    }
+    file.write_all(token.as_bytes())
+        .map_err(|error| format!("写入开发 token 文件失败: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[cfg(debug_assertions)]
+fn write_dev_token_fallback(token: &str) -> Result<(), String> {
+    write_dev_token_file(&dev_token_fallback_path(), token)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 #[cfg(debug_assertions)]
 fn write_dev_token_fallback(token: &str) -> Result<(), String> {
     use std::io::Write;

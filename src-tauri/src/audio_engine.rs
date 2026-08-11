@@ -36,6 +36,8 @@ const DECODE_INITIAL_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
 /// PMS quality when the original source cannot be prepared promptly.
 const SEGMENT_DECODE_PREPARE_TIMEOUT: Duration = Duration::from_secs(6);
 const SEGMENT_PREPARE_CANCEL_TIMEOUT: Duration = Duration::from_secs(3);
+const PLAYBACK_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const PLAYBACK_TASK_SHUTDOWN_POLL: Duration = Duration::from_millis(10);
 const DECODE_INITIAL_WAIT_POLL: Duration = Duration::from_millis(50);
 const DECODE_SEND_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 static NEXT_DECODE_WORKER_ID: AtomicUsize = AtomicUsize::new(1);
@@ -296,6 +298,11 @@ impl Drop for DecodeWorkerExitGuard {
     fn drop(&mut self) {
         self.0.worker_exited.store(true, Ordering::SeqCst);
     }
+}
+
+struct PlaybackTransition {
+    generation: u64,
+    decode_states: Vec<Arc<DecodeBufferState>>,
 }
 
 /// A non-blocking rodio Source backed by a dedicated decoder worker. The
@@ -902,7 +909,7 @@ impl QueueState {
         }
         if current > 0 {
             Some(current - 1)
-        } else if self.repeat == NativeRepeatMode::All {
+        } else if self.repeat != NativeRepeatMode::Off {
             Some(self.tracks.len() - 1)
         } else {
             None
@@ -1160,8 +1167,9 @@ impl NativeAudioEngineSlot {
             .take();
         if let Some(engine) = engine {
             engine.accepting_work.store(false, Ordering::SeqCst);
-            engine.clear_session_state_and_wait().await;
+            let cleanup = engine.clear_session_state_and_wait().await;
             engine.stopped.store(true, Ordering::SeqCst);
+            cleanup?;
         }
         self.segment_cache.clear()?;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1295,14 +1303,27 @@ impl NativeAudioEngineSlot {
         // Stop the old decoder before the new engine restores from the shared
         // segment cache so only one playback authority remains audible.
         old.accepting_work.store(false, Ordering::SeqCst);
-        let stopped_generation = old.stop_immediately_and_wait().await;
+        let stopped_generation = match old.stop_immediately_and_wait().await {
+            Ok(generation) => generation,
+            Err(error) => {
+                old.accepting_work.store(true, Ordering::SeqCst);
+                return Err(format!("停止旧输出设备媒体任务失败: {error}"));
+            }
+        };
         if let Err(error) = new_engine.restore_playback_snapshot(&snapshot).await {
             new_engine.accepting_work.store(false, Ordering::SeqCst);
-            new_engine.stop_immediately_and_wait().await;
+            let cleanup = new_engine.stop_immediately_and_wait().await;
             new_engine.stopped.store(true, Ordering::SeqCst);
             old.accepting_work.store(true, Ordering::SeqCst);
-            if old.playback_generation.load(Ordering::SeqCst) == stopped_generation {
+            if cleanup.is_ok()
+                && old.playback_generation.load(Ordering::SeqCst) == stopped_generation
+            {
                 let _ = old.restore_playback_snapshot(&snapshot).await;
+            }
+            if let Err(cleanup_error) = cleanup {
+                return Err(format!(
+                    "在新输出设备上恢复播放失败: {error}；清理新引擎失败: {cleanup_error}"
+                ));
             }
             return Err(format!("在新输出设备上恢复播放失败: {error}"));
         }
@@ -1324,9 +1345,14 @@ impl NativeAudioEngineSlot {
         };
         if !installed {
             new_engine.accepting_work.store(false, Ordering::SeqCst);
-            new_engine.stop_immediately_and_wait().await;
+            let cleanup = new_engine.stop_immediately_and_wait().await;
             new_engine.stopped.store(true, Ordering::SeqCst);
             old.accepting_work.store(true, Ordering::SeqCst);
+            if let Err(error) = cleanup {
+                return Err(format!(
+                    "播放状态在输出设备切换期间发生变化，且清理新引擎失败: {error}"
+                ));
+            }
             return Err("播放状态在输出设备切换期间发生变化，请重试".to_string());
         }
         if let Ok(mut preferred) = self.preferred_device.lock() {
@@ -1635,12 +1661,13 @@ impl NativeAudioEngine {
         previous.stop();
     }
 
-    fn prepare_playback_transition(&self) -> u64 {
+    fn prepare_playback_transition(&self) -> PlaybackTransition {
         let _transition = self
             .transition_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let generation = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut decode_states = Vec::with_capacity(2);
         self.loaded.store(false, Ordering::SeqCst);
         self.ended_sent.store(true, Ordering::SeqCst);
         self.desired_playing.store(false, Ordering::SeqCst);
@@ -1651,20 +1678,25 @@ impl NativeAudioEngine {
         if let Ok(mut pending) = self.pending.lock() {
             if let Some(pending) = pending.take() {
                 pending.decode_state.cancel_worker();
+                decode_states.push(pending.decode_state);
             }
         }
         if let Ok(mut decode_state) = self.decode_state.lock() {
             if let Some(decode_state) = decode_state.take() {
                 decode_state.cancel_worker();
+                decode_states.push(decode_state);
             }
         }
         self.cancel_active_prepare();
         self.replace_player();
-        generation
+        PlaybackTransition {
+            generation,
+            decode_states,
+        }
     }
 
     fn begin_playback_transition(&self) -> u64 {
-        self.prepare_playback_transition()
+        self.prepare_playback_transition().generation
     }
 
     fn playback_is_current(&self, generation: u64) -> bool {
@@ -1683,12 +1715,30 @@ impl NativeAudioEngine {
         self.begin_playback_transition()
     }
 
-    async fn stop_immediately_and_wait(&self) -> u64 {
-        self.prepare_playback_transition()
+    async fn stop_immediately_and_wait(&self) -> Result<u64, String> {
+        let transition = self.prepare_playback_transition();
+        let deadline = tokio::time::Instant::now() + PLAYBACK_TASK_SHUTDOWN_TIMEOUT;
+        loop {
+            let active_workers = transition
+                .decode_states
+                .iter()
+                .filter(|state| !state.worker_exited.load(Ordering::SeqCst))
+                .count();
+            let active_cache_operations = self.segment_cache.active_operations();
+            if active_workers == 0 && active_cache_operations == 0 {
+                return Ok(transition.generation);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "等待媒体任务退出超时（解码任务 {active_workers}，缓存任务 {active_cache_operations}）"
+                ));
+            }
+            tokio::time::sleep(PLAYBACK_TASK_SHUTDOWN_POLL).await;
+        }
     }
 
-    async fn clear_session_state_and_wait(&self) {
-        self.stop_immediately_and_wait().await;
+    async fn clear_session_state_and_wait(&self) -> Result<(), String> {
+        self.stop_immediately_and_wait().await?;
         self.artwork_generation.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut metadata) = self.metadata.lock() {
             *metadata = None;
@@ -1705,6 +1755,7 @@ impl NativeAudioEngine {
         if let Ok(mut queue) = self.queue.lock() {
             *queue = QueueState::default();
         }
+        Ok(())
     }
 
     /// Background-fetch the album artwork bytes from the loopback artwork
@@ -2036,7 +2087,10 @@ impl NativeAudioEngine {
         prepare_timeout: Duration,
     ) -> Result<usize, String> {
         self.ensure_accepting_work()?;
-        let generation = self.begin_playback_transition();
+        let generation = self.stop_immediately_and_wait().await?;
+        if !self.playback_is_current(generation) {
+            return Err("播放加载已被新操作替代".to_string());
+        }
         let metadata_for_source = metadata.clone();
         *self
             .metadata
@@ -2544,7 +2598,7 @@ impl NativeAudioEngine {
 
     async fn rebuild_after_pending_queue_change(&self) -> Result<(), String> {
         let snapshot = self.capture_playback_snapshot();
-        let generation = self.stop_immediately_and_wait().await;
+        let generation = self.stop_immediately_and_wait().await?;
         if self.playback_generation.load(Ordering::SeqCst) != generation {
             return Err("播放状态在队列同步期间发生变化".to_string());
         }
@@ -3113,7 +3167,7 @@ pub async fn native_audio_clear_queue(
 ) -> Result<(), String> {
     let _operation = state.output_switch_lock.lock().await;
     if let Some(engine) = state.current() {
-        engine.clear_session_state_and_wait().await;
+        engine.clear_session_state_and_wait().await?;
         let _ = app.emit(
             "native-audio://event",
             serde_json::json!({ "type": "buffering", "buffering": false }),
@@ -3932,6 +3986,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_and_wait_returns_after_current_decoder_worker_exits() {
+        let cache_root = unique_temp_path("decoder-stop-wait-cache");
+        let wav = unique_temp_path("decoder-stop-wait.wav");
+        write_test_wav_of_seconds(&wav, 10);
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        engine.player().set_volume(0.0);
+        engine
+            .load_and_play(wav.to_str().unwrap())
+            .expect("长音频应启动 decoder worker");
+        let state = engine
+            .decode_state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .expect("加载后应记录 decoder worker");
+        assert!(
+            !state.worker_exited.load(Ordering::SeqCst),
+            "有界 PCM 队列应让长音频 decoder 在停止前保持活动"
+        );
+
+        let generation = engine
+            .stop_immediately_and_wait()
+            .await
+            .expect("等待式停止应在超时前完成");
+
+        assert_eq!(
+            engine.playback_generation.load(Ordering::SeqCst),
+            generation
+        );
+        assert!(state.worker_exited.load(Ordering::SeqCst));
+        assert_eq!(engine.segment_cache.active_operations(), 0);
+        let _ = std::fs::remove_file(wav);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[tokio::test]
     async fn latest_artwork_generation_wins_within_one_playback_generation() {
         let app = axum::Router::new()
             .route(
@@ -4313,6 +4404,15 @@ mod tests {
             Some(2),
             "repeat-all 首曲上一首应回绕"
         );
+        queue.repeat = NativeRepeatMode::One;
+        assert_eq!(
+            queue.previous_index(),
+            Some(2),
+            "repeat-one 只影响自然结束，手动上一首仍应回绕队列"
+        );
+        queue.repeat = NativeRepeatMode::Off;
+        assert_eq!(queue.previous_index(), None, "repeat-off 首曲不能回绕");
+        queue.repeat = NativeRepeatMode::All;
         queue.current_index = 1;
         assert_eq!(queue.previous_index(), Some(0));
     }
