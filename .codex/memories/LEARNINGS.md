@@ -11,6 +11,10 @@
 - GitHub SSH key、Tauri updater minisign key 和 Apple Developer ID / Windows Authenticode
   证书是三套独立凭据。GitHub 只托管代码与 Release 资产，不需要登记 updater 公钥；旧版本能否
   继续更新取决于应用内置公钥和签包私钥的连续性。
+- `tauri-apps/tauri-action@v1` 的 `uploadWorkflowArtifacts: true` 只会上传 macOS 的 `.app`
+  与 `.dmg` bundle，不会自动包含 updater 生成的 `.app.tar.gz` 和 `.sig`。非发布的手动构建还需
+  使用 `actions/upload-artifact` 显式上传这两个文件，并以 `if-no-files-found: error` 防止验证制品
+  静默缺失；公开发布路径仍由 `tauri-action` 生成并上传 Release updater 资产。
 
 ## 2026-08-10 — React Portal 锚点不能从延迟状态更新里读取 currentTarget
 

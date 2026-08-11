@@ -126,7 +126,8 @@
 
 - [ACT-035] GitHub 的 macOS Release 构建与发布只能由 `workflow_dispatch` 手动触发；普通 push、
   合并和标签创建均不得触发。手动运行默认只保存 workflow artifacts；公开 Release 还必须显式选择
-  发布、从 `main` 执行，并提供与三处应用版本完全一致的 `vX.Y.Z` 标签。
+  发布、从 `main` 执行，并提供与三处应用版本完全一致的 `vX.Y.Z` 标签。默认手动构建的 artifacts
+  必须同时包含 app、DMG、updater 归档与签名，不能只验证安装包。
   Source: explicit user release workflow requirement on 2026-08-11.
 
 ## Validation

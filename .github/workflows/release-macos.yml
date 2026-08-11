@@ -92,6 +92,16 @@ jobs:
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: cadilume-macos-arm64-[bundle]
 
+      - name: Upload manual macOS updater artifacts
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadilume-macos-arm64-updater
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+
       - name: Publish GitHub Release
         if: ${{ inputs.publish }}
         uses: tauri-apps/tauri-action@v1
