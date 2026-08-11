@@ -1,8 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <g transform="translate(512 512) scale(1.45) translate(-512 -512)" fill="#000">
-    <path fill-rule="evenodd" d="M512 216a296 296 0 1 1 0 592 296 296 0 0 1 0-592Zm0 56a240 240 0 1 0 0 480 240 240 0 0 0 0-480Z"/>
-    <path fill-rule="evenodd" d="M512 432a80 80 0 1 1 0 160 80 80 0 0 1 0-160Zm0 56a24 24 0 1 0 0 48 24 24 0 0 0 0-48Z"/>
-    <path d="M376 512c0-56 24-104 64-136" fill="none" stroke="#000" stroke-width="56" stroke-linecap="round"/>
-    <path d="M544 384h64l128 128-128 128h-64l128-128-128-128Z"/>
+  <defs>
+    <mask id="vinyl-cutouts">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="512" cy="512" r="210" fill="none" stroke="#000" stroke-width="18" opacity=".24"/>
+      <circle cx="512" cy="512" r="156" fill="none" stroke="#000" stroke-width="12" opacity=".16"/>
+      <circle cx="512" cy="512" r="88" fill="#000"/>
+    </mask>
+  </defs>
+  <g transform="translate(512 512) scale(1.45) translate(-512 -512)">
+    <circle cx="512" cy="512" r="296" fill="#000" mask="url(#vinyl-cutouts)"/>
+    <circle cx="512" cy="512" r="24" fill="#000"/>
   </g>
 </svg>

@@ -114,6 +114,12 @@
   Cadilume SVG 图标母版精确派生，不另行改变品牌造型。
   Source: explicit user documentation and branding request on 2026-08-10.
 
+- [ACT-034] Cadilume 品牌图形固定为居中的对称实心唱片、两圈克制沟槽、单一唱片标签与轴孔；
+  应用内 `BrandIcon`、README 圆角透明图标、仓库头像、主题预设、状态图标及各平台生成资源必须
+  保持同一结构，不恢复不对称弧线或多层靶心。README 技术栈徽章左半统一使用 Cadilume 深墨色
+  `#18110B`，右半保留各技术与平台的可辨识色。
+  Source: explicit user visual correction on 2026-08-11.
+
 ## Validation
 
 - Run TypeScript check, frontend tests/build, Rust tests, and a practical Tauri build before committing an implementation round.

@@ -2,13 +2,12 @@
   <title>Cadilume README icon</title>
   <g transform="translate(64 64) scale(0.875)">
     <rect width="1024" height="1024" rx="224" fill="#F0A15D"/>
-    <g fill="none" stroke="#18110B" stroke-linecap="round">
-      <circle cx="512" cy="512" r="296" stroke-width="56"/>
-      <circle cx="512" cy="512" r="182" stroke-width="18" opacity=".34"/>
-      <circle cx="512" cy="512" r="80" stroke-width="56"/>
-      <path d="M370 592c-24-50-24-108 0-158" stroke-width="26"/>
-      <path d="M654 388c32 36 48 80 48 124" stroke-width="18" opacity=".52"/>
+    <circle cx="512" cy="512" r="296" fill="#18110B"/>
+    <g fill="none" stroke="#F0A15D">
+      <circle cx="512" cy="512" r="210" stroke-width="18" opacity=".24"/>
+      <circle cx="512" cy="512" r="156" stroke-width="12" opacity=".16"/>
     </g>
+    <circle cx="512" cy="512" r="88" fill="#F0A15D"/>
     <circle cx="512" cy="512" r="24" fill="#18110B"/>
   </g>
 </svg>

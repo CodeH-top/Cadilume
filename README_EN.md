@@ -6,12 +6,12 @@
 
 **An open-source desktop music alternative to Plex Web and Plexamp**
 
-[![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat&logo=tauri&logoColor=white)](https://tauri.app/)
-[![React 19](https://img.shields.io/badge/React-19-61DAFB?style=flat&logo=react&logoColor=111111)](https://react.dev/)
-[![Rust](https://img.shields.io/badge/Rust-stable-000000?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![macOS](https://img.shields.io/badge/macOS-supported-000000?style=flat&logo=apple&logoColor=white)](https://www.apple.com/macos/)
-[![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat&logo=windows11&logoColor=white)](https://www.microsoft.com/windows/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat&labelColor=18110B&logo=tauri&logoColor=FFC131)](https://tauri.app/)
+[![React 19](https://img.shields.io/badge/React-19-61DAFB?style=flat&labelColor=18110B&logo=react&logoColor=61DAFB)](https://react.dev/)
+[![Rust](https://img.shields.io/badge/Rust-stable-B7410E?style=flat&labelColor=18110B&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![macOS](https://img.shields.io/badge/macOS-supported-6E6E73?style=flat&labelColor=18110B&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat&labelColor=18110B&logo=windows11&logoColor=white)](https://www.microsoft.com/windows/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-D4A72C?style=flat&labelColor=18110B)](LICENSE)
 
 [中文](README.md) | English
 
