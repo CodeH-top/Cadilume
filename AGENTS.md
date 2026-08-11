@@ -1,16 +1,16 @@
 # Cadilume 项目入口
 
-本文件是 Cadilume 独立仓库的项目级工作规则。项目知识、开发记录和持续记忆都保存在本仓库内；开始工作时不需要依赖父目录的项目说明或父目录中的 Cadilume 记忆。
+本文件是 Cadilume 独立仓库的项目级工作规则。可共享的项目事实保存在本文件、`docs/` 和代码中；Codex 项目记忆仅保存在本机 `.codex/memories/`，由 Git 忽略，不随仓库分发。
 
 ## 启动检查
 
 每次在本仓库开始任务前：
 
-1. 读取 `.codex/memories/PROFILE.md`，确认项目身份、范围和用户偏好。
-2. 读取 `.codex/memories/ACTIVE.md`，应用当前有效的工程约束。
+1. 应用当前环境的全局 Codex 规则与记忆。
+2. 如果本机存在 `.codex/memories/PROFILE.md` 与 `.codex/memories/ACTIVE.md`，读取并应用；新克隆缺少本地记忆不构成阻塞。
 3. 按任务需要查阅 `docs/` 中的架构、交接和验证记录。
 
-父工作区的通用安全规则仍然适用，但 Cadilume 的项目事实以本文件和本仓库 `.codex/memories/` 为准。
+父工作区的通用安全规则仍然适用；Cadilume 的可共享项目事实以本文件、`docs/` 和代码为准，本地记忆只提供当前机器上的补充上下文。
 
 ## 项目身份
 
@@ -58,5 +58,5 @@ git diff --check
 
 - 每个实现轮次在目标验证全绿后立即创建本地 Conventional Commit，提交信息默认使用中文描述；不主动 push。
 - 不使用 `git reset --hard`、`git checkout --` 或 `git restore` 丢弃用户改动；清理构建产物时只操作已明确确认可再生的项目路径。
-- 每轮结束前检查本仓库 `.codex/memories/` 的 `PROFILE.md`、`ACTIVE.md`、`LEARNINGS.md`、`ERRORS.md`、`FEATURE_REQUESTS.md`；仅记录非显然、可复用的结论。父工作区记忆只记录跨项目规则，不写入 Cadilume 专属事实。
+- `.codex/memories/` 只允许本机留存，由 Git 忽略；不得使用 `git add -f` 将其中任何文件重新加入仓库。每轮结束前在这些本地文件存在时完成记忆检查；不存在时仅检查当前环境的全局记忆。
 - 本入口文件被全局 gitignore 忽略；为保证独立仓库克隆后仍有完整入口，修改后使用 `git add -f AGENTS.md` 纳入提交。
