@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { loadInitialLibraryData, type InitialLibrarySource } from "./initialLibrary";
+import {
+  isInitialLibrarySnapshotScopeActive,
+  loadInitialLibraryData,
+  type InitialLibrarySource,
+} from "./initialLibrary";
 import type { LibrarySection, PlexHub, PlexItem, PlexPlaylist, PlexServer } from "./types";
 
 const server = (id: string): PlexServer => ({
@@ -46,6 +50,13 @@ function source(overrides: Partial<InitialLibrarySource> = {}): InitialLibrarySo
 }
 
 describe("initial library loading", () => {
+  it("does not reactivate a consumed startup snapshot after returning to its original source", () => {
+    expect(isInitialLibrarySnapshotScopeActive(false, 0, "server-a", "server-a")).toBe(true);
+    expect(isInitialLibrarySnapshotScopeActive(false, 0, "server-b", "server-a")).toBe(false);
+    expect(isInitialLibrarySnapshotScopeActive(true, 0, "server-a", "server-a")).toBe(false);
+    expect(isInitialLibrarySnapshotScopeActive(false, 1, "server-a", "server-a")).toBe(false);
+  });
+
   it("waits for every first-screen source and returns one coherent preferred-server snapshot", async () => {
     const recentlyPlayed: PlexHub = {
       title: "Recently Played",

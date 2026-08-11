@@ -97,7 +97,12 @@ import "./App.css";
 import { ARTIST_BIOGRAPHY_COLLAPSE_LINES, normalizeArtistBiography, previewArtistBiography, shouldCollapseArtistBiography } from "./artistBiography";
 import { appendUniqueArtistTracks, collectAllArtistTracks, isArtistTrackCollectionCancelled } from "./artistTracks";
 import { selectRandomContextPlayback } from "./contextPlayback";
-import { loadInitialLibraryData, orderPlaylistsByRecency, type InitialLibraryData } from "./initialLibrary";
+import {
+  isInitialLibrarySnapshotScopeActive,
+  loadInitialLibraryData,
+  orderPlaylistsByRecency,
+  type InitialLibraryData,
+} from "./initialLibrary";
 import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
 import { isCurrentLibraryDetailRoute, libraryDetailRoute, libraryRouteHash, libraryTracksRoute, parseLibraryRoute, type LibraryDetailType, type LibraryRoute } from "./libraryRoute";
 import { createCadilumeEntryState, historyEntryCacheKey, routeEntryId, routeParentEntryId } from "./routeEntry";
@@ -200,6 +205,7 @@ interface MusicShellRuntime {
   updatePlaylist: (playlist: PlexPlaylist, changes: PlaylistChanges) => Promise<void>;
   deletePlaylist: (playlist: PlexPlaylist) => Promise<void>;
   sourceRevision: number;
+  initialSectionSnapshotActive: boolean;
   playlistMutationRevision: number;
   bumpPlaylistMutation: () => void;
   routeAliveRef: RefObject<KeepAliveRef | null>;
@@ -521,6 +527,8 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   const [artworkCacheBusy, setArtworkCacheBusy] = useState(false);
   const [audioCacheBusy, setAudioCacheBusy] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
+  const [initialServerSnapshotInvalidated, setInitialServerSnapshotInvalidated] = useState(false);
+  const [initialSectionSnapshotInvalidated, setInitialSectionSnapshotInvalidated] = useState(false);
   const routeAliveRef = useKeepAliveRef();
   const [routeCacheEpoch, setRouteCacheEpoch] = useState(0);
   const [sourcesSyncing, setSourcesSyncing] = useState(false);
@@ -605,6 +613,19 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
 
   const selectedServer = servers.find((server) => server.id === serverId);
   const selectedSection = sections.find((section) => section.key === sectionKey);
+  const initialServerSnapshotActive = isInitialLibrarySnapshotScopeActive(
+    initialServerSnapshotInvalidated,
+    sourceRevision,
+    serverId,
+    initialLibrary.serverId,
+  );
+  const initialSectionSnapshotActive = initialServerSnapshotActive
+    && isInitialLibrarySnapshotScopeActive(
+      initialSectionSnapshotInvalidated,
+      sourceRevision,
+      sectionKey,
+      initialLibrary.sectionKey,
+    );
 
   useLayoutEffect(() => {
     const nextContext = serverId && sectionKey ? { serverId, sectionKey } : undefined;
@@ -620,11 +641,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   }, [routeAliveRef, sectionKey, serverId]);
 
   useEffect(() => {
-    if (
-      sourceRevision === 0
-      && serverId === initialLibrary.serverId
-      && sectionKey === initialLibrary.sectionKey
-    ) return;
+    if (initialSectionSnapshotActive) return;
     const requestId = ++artistDirectoryRequestRef.current;
     if (!serverId || !sectionKey) {
       setLibraryArtists([]);
@@ -640,7 +657,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
     return () => {
       if (artistDirectoryRequestRef.current === requestId) artistDirectoryRequestRef.current += 1;
     };
-  }, [initialLibrary.sectionKey, initialLibrary.serverId, sectionKey, serverId, sourceRevision]);
+  }, [initialSectionSnapshotActive, sectionKey, serverId]);
 
   useEffect(() => {
     if (!previewPlaybackFailure || !player.current) {
@@ -715,7 +732,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   }, [notify, preferredPlaybackServerId]);
 
   useEffect(() => {
-    if (sourceRevision === 0 && serverId === initialLibrary.serverId) return;
+    if (initialServerSnapshotActive) return;
     if (!serverId) return;
     let cancelled = false;
     setLoading(true);
@@ -734,7 +751,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
       })
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
-  }, [initialLibrary.serverId, notify, serverId, sourceRevision]);
+  }, [initialServerSnapshotActive, notify, serverId]);
 
   const loadPlaylistList = useCallback(async (announce = false) => {
     const requestId = ++playlistListRequestRef.current;
@@ -802,9 +819,9 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   }, [bumpPlaylistMutation, loadPlaylistList, notify, serverId]);
 
   useEffect(() => {
-    if (sourceRevision === 0 && serverId === initialLibrary.serverId) return;
+    if (initialServerSnapshotActive) return;
     void loadPlaylistList();
-  }, [initialLibrary.serverId, loadPlaylistList, serverId, sourceRevision]);
+  }, [initialServerSnapshotActive, loadPlaylistList]);
 
   const syncSources = async () => {
     setSourcesSyncing(true);
@@ -904,6 +921,19 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
       // Keep the in-memory preference when storage is restricted.
     }
   };
+
+  const changeServerId = useCallback((value: string) => {
+    if (value === serverId) return;
+    setInitialServerSnapshotInvalidated(true);
+    setInitialSectionSnapshotInvalidated(true);
+    setServerId(value);
+  }, [serverId]);
+
+  const changeSectionKey = useCallback((value: string) => {
+    if (value === sectionKey) return;
+    setInitialSectionSnapshotInvalidated(true);
+    setSectionKey(value);
+  }, [sectionKey]);
 
   const clearArtworkDiskCache = async () => {
     cacheStatusRequestRef.current += 1;
@@ -1142,6 +1172,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
     updatePlaylist: updatePlaylistCallback,
     deletePlaylist: deletePlaylistCallback,
     sourceRevision,
+    initialSectionSnapshotActive,
     playlistMutationRevision,
     bumpPlaylistMutation,
     routeAliveRef,
@@ -1166,8 +1197,8 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
     changeBrandPreset,
     changeDeviceName,
     changeQuality,
-    setServerId,
-    setSectionKey,
+    setServerId: changeServerId,
+    setSectionKey: changeSectionKey,
     setPrebufferNext: player.setPrebufferNext,
     clearArtworkDiskCache,
     clearAudioDiskCache,
@@ -1744,9 +1775,7 @@ function RoutePage() {
   const runtime = useMusicShellRuntime();
   const preparedHome = !route.detail
     && route.view === "home"
-    && runtime.sourceRevision === 0
-    && runtime.serverId === runtime.initialLibrary.serverId
-    && runtime.sectionKey === runtime.initialLibrary.sectionKey
+    && runtime.initialSectionSnapshotActive
       ? runtime.initialLibrary.home
       : undefined;
   const [items, setItems] = useState<PlexItem[]>(() => preparedHome?.recentAlbums || []);

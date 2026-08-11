@@ -33,6 +33,15 @@ export interface InitialLibrarySource {
   getRecentAlbums: typeof getRecentAlbums;
 }
 
+export function isInitialLibrarySnapshotScopeActive(
+  invalidated: boolean,
+  sourceRevision: number,
+  currentId: string | undefined,
+  initialId: string | undefined,
+): boolean {
+  return !invalidated && sourceRevision === 0 && currentId === initialId;
+}
+
 const defaultSource: InitialLibrarySource = {
   discoverServers,
   getSections,

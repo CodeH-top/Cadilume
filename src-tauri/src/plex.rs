@@ -947,10 +947,9 @@ pub async fn logout(
     stream_proxy: State<'_, StreamProxy>,
     audio_engine: State<'_, NativeAudioEngineSlot>,
 ) -> Result<(), String> {
-    // Credential revocation is the authoritative result of logout. Cache and
-    // ticket cleanup is best-effort after the engine has stopped; reporting a
-    // cleanup warning as command failure would leave the WebView looking
-    // authenticated even though its credential is already gone.
+    // Credential revocation is authoritative and must succeed before logout
+    // mutates runtime state. Later cache and ticket cleanup remains best-effort.
+    delete_account_token()?;
     let mut cleanup_warnings = Vec::new();
     if let Err(error) = audio_engine.reset_and_clear_cache().await {
         cleanup_warnings.push(error);
@@ -958,7 +957,6 @@ pub async fn logout(
     if let Err(error) = stream_proxy.clear().map_err(display_error) {
         cleanup_warnings.push(error);
     }
-    delete_account_token();
     match state.token.write() {
         Ok(mut token) => *token = None,
         Err(_) => cleanup_warnings.push("登录状态写入失败".to_string()),
@@ -2832,15 +2830,25 @@ fn store_account_token(token: &str) -> Result<(), String> {
 }
 
 #[cfg(debug_assertions)]
-fn delete_account_token() {
-    let _ = std::fs::remove_file(dev_token_fallback_path());
+fn delete_dev_token_file(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("删除开发 token 文件失败: {error}")),
+    }
+}
+
+#[cfg(debug_assertions)]
+fn delete_account_token() -> Result<(), String> {
+    delete_dev_token_file(&dev_token_fallback_path())
 }
 
 #[cfg(not(debug_assertions))]
-fn delete_account_token() {
+fn delete_account_token() -> Result<(), String> {
     if let Ok(entry) = keyring_entry() {
         let _ = entry.delete_credential();
     }
+    Ok(())
 }
 
 async fn ensure_success(response: Response, context: &str) -> Result<Response> {
@@ -2902,6 +2910,25 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn deleting_dev_token_is_idempotent_and_reports_non_file_targets() {
+        let cache = TestCache::new();
+        let token = cache.root.join("dev-token");
+        fs::write(&token, "token").expect("test token should be created");
+
+        delete_dev_token_file(&token).expect("existing token should be removed");
+        delete_dev_token_file(&token).expect("missing token should count as logged out");
+        assert!(!token.exists());
+
+        let directory = cache.root.join("token-directory");
+        fs::create_dir(&directory).expect("non-file target should be created");
+        let error = delete_dev_token_file(&directory)
+            .expect_err("a non-file target must not be reported as deleted");
+        assert!(error.starts_with("删除开发 token 文件失败:"));
+        assert!(directory.is_dir());
     }
 
     #[test]
