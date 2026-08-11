@@ -4,6 +4,7 @@ version = "0.1.2"
 description = "A lightweight desktop music player for Plex libraries"
 authors = ["hoganchou"]
 edition = "2021"
+rust-version = "1.88"
 license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

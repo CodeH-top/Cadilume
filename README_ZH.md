@@ -8,8 +8,8 @@
 
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat&labelColor=18110B&logo=tauri&logoColor=FFC131)](https://tauri.app/)
 [![React 19](https://img.shields.io/badge/React-19-61DAFB?style=flat&labelColor=18110B&logo=react&logoColor=61DAFB)](https://react.dev/)
-[![Rust](https://img.shields.io/badge/Rust-stable-B7410E?style=flat&labelColor=18110B&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![macOS](https://img.shields.io/badge/macOS-supported-6E6E73?style=flat&labelColor=18110B&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-B7410E?style=flat&labelColor=18110B&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![macOS 11+](https://img.shields.io/badge/macOS-11%2B-6E6E73?style=flat&labelColor=18110B&logo=apple&logoColor=white)](https://www.apple.com/macos/)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat&labelColor=18110B&logo=windows11&logoColor=white)](https://www.microsoft.com/windows/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-D4A72C?style=flat&labelColor=18110B)](LICENSE)
 
@@ -76,16 +76,16 @@ Cadilume 是一个面向 macOS 与 Windows 的 Plex 音乐桌面客户端，目�
 
 - 一个可正常登录的 Plex 账号。
 - 至少一个当前账号有权访问的 Plex Media Server Music 资料库。
-- macOS，或 Windows 10 / 11 x64。
+- macOS 11 或更高版本，或 Windows 10 / 11 x64。
 - Windows 需要系统提供 Microsoft Edge WebView2 Runtime；常见的 Windows 10 / 11 环境通常已包含。
 
-> **平台验证状态：** macOS 是当前唯一完成实机验收的平台。Windows 代码路径已在 macOS 上针对 `x86_64-pc-windows-msvc` 通过 `cargo-xwin` 编译、测试二进制构建与 PE 链接门禁，但 Windows 运行时行为和 NSIS 安装器尚未在真实 Windows 系统中验收。
+> **平台验证状态：** 发行元数据与二进制最低面向 macOS 11，但目前只有 macOS 26 完成实机验收。Windows 代码路径已在 macOS 上针对 `x86_64-pc-windows-msvc` 通过 `cargo-xwin` 编译、测试二进制构建与 PE 链接门禁，但 Windows 运行时行为和 NSIS 安装器尚未在真实 Windows 系统中验收。
 
 ### 从源码构建
 
 - Node.js 20 或更高版本
 - pnpm 10 或更高版本
-- Rust stable
+- Rust 1.88 或更高版本
 - 对应平台的系统 SDK
 - macOS：Xcode Command Line Tools；重新生成 macOS 26 分层图标时需要 Xcode 26 或更高版本
 - Windows：Git、CMake、MSVC C++ Build Tools、Windows 10/11 SDK 与 WebView2 Runtime
@@ -167,7 +167,7 @@ GitHub macOS 发布工作流位于 [`.github/workflows/release-macos.yml`](.gith
 | TypeScript | 5.8 | 前端类型系统 |
 | Vite | 7 | 开发服务器与前端构建 |
 | Vitest | 4 | 前端测试 |
-| Rust | stable | 原生服务、播放与平台能力 |
+| Rust | 1.88+ | 原生服务、播放与平台能力 |
 | rodio | 0.22.2 | 播放队列与音频输出 |
 | cpal | 0.17.3 | CoreAudio / WASAPI 设备访问 |
 | symphonia | 0.5.5 | 音频格式探测与解码 |

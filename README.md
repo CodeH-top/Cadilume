@@ -8,8 +8,8 @@
 
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat&labelColor=18110B&logo=tauri&logoColor=FFC131)](https://tauri.app/)
 [![React 19](https://img.shields.io/badge/React-19-61DAFB?style=flat&labelColor=18110B&logo=react&logoColor=61DAFB)](https://react.dev/)
-[![Rust](https://img.shields.io/badge/Rust-stable-B7410E?style=flat&labelColor=18110B&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![macOS](https://img.shields.io/badge/macOS-supported-6E6E73?style=flat&labelColor=18110B&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-B7410E?style=flat&labelColor=18110B&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![macOS 11+](https://img.shields.io/badge/macOS-11%2B-6E6E73?style=flat&labelColor=18110B&logo=apple&logoColor=white)](https://www.apple.com/macos/)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat&labelColor=18110B&logo=windows11&logoColor=white)](https://www.microsoft.com/windows/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-D4A72C?style=flat&labelColor=18110B)](LICENSE)
 
@@ -76,16 +76,16 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 
 - A Plex account that can sign in normally.
 - At least one Plex Media Server Music library available to that account.
-- macOS, or Windows 10 / 11 x64.
+- macOS 11 or later, or Windows 10 / 11 x64.
 - Microsoft Edge WebView2 Runtime on Windows; it is already present on most Windows 10 / 11 systems.
 
-> **Platform validation:** macOS is currently the only platform validated on physical hardware. From macOS, the Windows code paths pass `cargo-xwin` compilation, test-binary build, and PE-link gates for `x86_64-pc-windows-msvc`. Windows runtime behavior and the NSIS installer have not yet been validated on a real Windows system.
+> **Platform validation:** Release metadata and binaries target macOS 11 or later, while macOS 26 is currently the only macOS version validated on physical hardware. From macOS, the Windows code paths pass `cargo-xwin` compilation, test-binary build, and PE-link gates for `x86_64-pc-windows-msvc`. Windows runtime behavior and the NSIS installer have not yet been validated on a real Windows system.
 
 ### To build from source
 
 - Node.js 20 or later
 - pnpm 10 or later
-- Rust stable
+- Rust 1.88 or later
 - The SDK for the target platform
 - macOS: Xcode Command Line Tools; Xcode 26 or later is required only when regenerating the macOS 26 layered icon
 - Windows: Git, CMake, MSVC C++ Build Tools, Windows 10/11 SDK, and WebView2 Runtime
@@ -167,7 +167,7 @@ The GitHub macOS release workflow is defined in [`.github/workflows/release-maco
 | TypeScript | 5.8 | Frontend type system |
 | Vite | 7 | Development server and frontend builds |
 | Vitest | 4 | Frontend tests |
-| Rust | stable | Native services, playback, and platform features |
+| Rust | 1.88+ | Native services, playback, and platform features |
 | rodio | 0.22.2 | Playback queue and audio output |
 | cpal | 0.17.3 | CoreAudio / WASAPI device access |
 | symphonia | 0.5.5 | Audio format probing and decoding |
