@@ -4,20 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Create a public GitHub Release after validation
+        description: 校验通过后创建公开 GitHub Release 与 release 提交
         required: true
         type: boolean
         default: false
-      release_tag:
-        description: Version tag for publishing, for example v0.1.2
-        required: false
+      release_version:
+        description: 构建版本，例如 0.2.0（也接受 v0.2.0 或 V0.2.0）
+        required: true
         type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-macos-${{ github.ref }}-${{ inputs.publish }}
+  group: release-macos
   cancel-in-progress: false
 
 jobs:
@@ -29,18 +29,26 @@ jobs:
       RUST_BACKTRACE: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
+
+      - name: Prepare release version
+        id: release_version
+        env:
+          CADILUME_RELEASE_VERSION: ${{ inputs.release_version }}
+        run: pnpm prepare:release-version
 
       - name: Setup Rust arm64 target
         shell: bash
@@ -50,7 +58,7 @@ jobs:
           rustup target add aarch64-apple-darwin
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -66,7 +74,7 @@ jobs:
       - name: Verify release version
         env:
           CADILUME_PUBLISH: ${{ inputs.publish }}
-          CADILUME_RELEASE_TAG: ${{ inputs.release_tag }}
+          CADILUME_RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
         run: pnpm verify:release-version
 
       - name: Run frontend validation
@@ -79,6 +87,43 @@ jobs:
         run: |
           cargo fmt --manifest-path src-tauri/Cargo.toml --check
           cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Create release commit
+        id: release_commit
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          CADILUME_RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch origin --prune --tags
+          base_sha="$(git rev-parse HEAD)"
+          remote_main_sha="$(git rev-parse origin/main)"
+          remote_dev_sha="$(git rev-parse origin/dev 2>/dev/null || true)"
+          if [[ "${base_sha}" != "${remote_main_sha}" ]]; then
+            echo "::error::main 在发布验证期间已更新，请从最新 main 重新运行"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m "release: ${CADILUME_RELEASE_TAG}"
+          elif [[ "$(git log -1 --pretty=%s)" != "release: ${CADILUME_RELEASE_TAG}" ]]; then
+            git commit --allow-empty -m "release: ${CADILUME_RELEASE_TAG}"
+          fi
+
+          release_sha="$(git rev-parse HEAD)"
+          git push origin HEAD:main
+          if [[ "${remote_dev_sha}" == "${base_sha}" ]]; then
+            if ! git push origin HEAD:dev; then
+              echo "::warning::dev 在发布期间已更新，release 提交只推送到了 main"
+            fi
+          else
+            echo "::notice::dev 与发布基线不同，未自动移动 dev"
+          fi
+          echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
 
       - name: Build manual macOS artifacts
         if: ${{ !inputs.publish }}
@@ -94,7 +139,7 @@ jobs:
 
       - name: Upload manual macOS updater artifacts
         if: ${{ !inputs.publish }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cadilume-macos-arm64-updater
           path: |
@@ -110,9 +155,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ inputs.release_tag }}
-          releaseName: Cadilume ${{ inputs.release_tag }}
-          releaseCommitish: ${{ github.sha }}
+          tagName: ${{ steps.release_version.outputs.tag }}
+          releaseName: Cadilume ${{ steps.release_version.outputs.tag }}
+          releaseCommitish: ${{ steps.release_commit.outputs.sha }}
           releaseBody: macOS arm64 release. This build is currently ad-hoc signed and not notarized; see the README before installation.
           generateReleaseNotes: true
           releaseDraft: false

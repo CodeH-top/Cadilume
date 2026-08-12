@@ -22,7 +22,8 @@ Cadilume 发布同时使用三套用途不同的凭据，不能相互替代：
 `.github/workflows/release-macos.yml` 只接受手动触发，有两种模式：
 
 - 默认不勾选发布：构建 macOS arm64 DMG 与 updater artifacts，只保存为 workflow artifacts，不创建公开 Release。
-- 明确勾选发布并填写 `vX.Y.Z`：只允许从 `main` 执行，验证标签与三处应用版本一致后创建公开 GitHub Release，并上传 DMG、`.app.tar.gz`、`.sig` 与 `latest.json`。
+- 每次运行都填写稳定版本，例如 `0.2.0`；`v0.2.0` 与 `V0.2.0` 也会规范化为应用版本 `0.2.0` 和标签 `v0.2.0`。工作流在构建前同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 与 `src-tauri/Cargo.lock`。
+- 明确勾选发布：只允许从 `main` 执行。验证通过后自动创建并推送 `release: vX.Y.Z` 提交；`dev` 仍与发布基线一致时一并快进。随后在该提交上创建规范标签与公开 GitHub Release，并上传 DMG、`.app.tar.gz`、`.sig` 与 `latest.json`。
 
 普通 push、分支合并和单独推送标签都不会触发 Release 构建。
 
@@ -30,11 +31,9 @@ Cadilume 发布同时使用三套用途不同的凭据，不能相互替代：
 
 ## 发布步骤
 
-1. 同步更新 `package.json`、`src-tauri/tauri.conf.json` 与 `src-tauri/Cargo.toml` 的版本。
-2. 运行 `pnpm verify:release-version` 和仓库完整验证门禁。
-3. 将通过验证的提交合并到 `main` 并推送 GitHub。
-4. 先手动运行 `Release macOS`，下载并检查 workflow artifacts。
-5. 在 `main` 上再次手动运行工作流，勾选发布并填写与版本一致的标签，例如 `v0.1.2`；工作流负责创建标签和 Release。
-6. 确认公开 Release 含 DMG、updater archive、`.sig` 和 `latest.json`，并从上一发行版实测检查、下载、安装和重启。
+1. 将准备发布的功能提交合并到 `main` 并推送 GitHub；无需手工修改应用版本，也无需提前创建标签。
+2. 可先在 `main` 手动运行 `Release macOS`，填写目标版本但不勾选发布，下载并检查 workflow artifacts；此模式只在构建工作区临时应用版本，不创建 release 提交。
+3. 正式发布时再次从 `main` 手动运行工作流，填写同一版本并勾选发布。工作流负责同步版本、运行完整门禁、创建 release 提交、规范标签和 Release。
+4. 确认公开 Release 含 DMG、updater archive、`.sig` 和 `latest.json`，并从上一发行版实测检查、下载、安装和重启。
 
 不要从非标签构建手工拼装 `latest.json`，也不要把私钥、私钥口令或 Apple 证书导出文件加入 Release 资产。

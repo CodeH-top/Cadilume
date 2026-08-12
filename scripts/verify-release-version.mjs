@@ -34,7 +34,7 @@ if (publish && process.env.GITHUB_REF !== "refs/heads/main") {
   throw new Error("公开发布只能从 main 分支手动执行");
 }
 if (publish && !requestedTag) {
-  throw new Error("公开发布必须填写 release_tag");
+  throw new Error("公开发布必须提供规范化的发布版本标签");
 }
 const tag = requestedTag || (process.env.GITHUB_REF_TYPE === "tag" ? process.env.GITHUB_REF_NAME : undefined);
 if (tag && tag !== `v${expectedVersion}`) {

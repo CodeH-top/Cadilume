@@ -92,7 +92,7 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 
 ## Downloads and updates
 
-The manually triggered `Release macOS` GitHub Actions workflow builds macOS arm64 only. Its default mode stores DMG and updater files as workflow artifacts. A maintainer must explicitly enable the publish input and provide a matching tag such as `v0.1.2` to create a public [GitHub Release](https://github.com/CodeH-top/Cadilume/releases) with the signed updater manifest. Pushes, merges, and tag creation do not run this workflow automatically.
+The manually triggered `Release macOS` GitHub Actions workflow builds macOS arm64 only. Enter a stable version such as `0.2.0` (`v0.2.0` and `V0.2.0` are also accepted); the workflow applies it to all application manifests before building. Its default mode stores DMG and updater files as workflow artifacts. When publish is enabled from `main`, the workflow also creates and pushes a `release: v0.2.0` commit, creates the canonical `v0.2.0` tag, and publishes a [GitHub Release](https://github.com/CodeH-top/Cadilume/releases) with the signed updater manifest. Pushes, merges, and tag creation do not run this workflow automatically.
 
 Release builds check that manifest through **Settings → App Update**. Automatic checking is enabled by default and can be turned off. Downloading and installing still requires an explicit user action because Cadilume restarts after installation. Debug and browser-preview builds cannot call the updater or change its preference.
 
