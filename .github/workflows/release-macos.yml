@@ -50,6 +50,17 @@ jobs:
           CADILUME_RELEASE_VERSION: ${{ inputs.release_version }}
         run: pnpm prepare:release-version
 
+      - name: Ensure release tag is unused
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          CADILUME_RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${CADILUME_RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "::error::发布标签 ${CADILUME_RELEASE_TAG} 已存在；不可变 Release 标签不能覆盖或复用"
+            exit 1
+          fi
+
       - name: Setup Rust arm64 target
         shell: bash
         run: |
@@ -160,7 +171,24 @@ jobs:
           releaseCommitish: ${{ steps.release_commit.outputs.sha }}
           releaseBody: macOS arm64 release. This build is currently ad-hoc signed and not notarized; see the README before installation.
           generateReleaseNotes: true
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           uploadUpdaterJson: true
           args: --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
+
+      - name: Verify assets and publish immutable Release
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CADILUME_RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          asset_names="$(gh release view "${CADILUME_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          for required_pattern in '\.dmg$' '\.app\.tar\.gz$' '\.app\.tar\.gz\.sig$' '^latest\.json$'; do
+            if ! grep -Eq "${required_pattern}" <<<"${asset_names}"; then
+              echo "::error::草稿 Release 缺少必要资产（${required_pattern}），保持草稿且不公开"
+              exit 1
+            fi
+          done
+          gh release edit "${CADILUME_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false

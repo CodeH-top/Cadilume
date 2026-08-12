@@ -92,7 +92,7 @@ Cadilume 是一个面向 macOS 与 Windows 的 Plex 音乐桌面客户端，目�
 
 ## 下载与更新
 
-`Release macOS` GitHub Actions 工作流只允许手动触发，并且只构建 macOS arm64。运行时填写 `0.2.0` 这类稳定版本（也接受 `v0.2.0` 或 `V0.2.0`），工作流会先把该版本同步到全部应用清单再构建。默认模式仅把 DMG 与 updater 文件保存为 workflow artifacts；从 `main` 主动勾选发布时，工作流还会创建并推送 `release: v0.2.0` 提交、规范化的 `v0.2.0` 标签、公开 [GitHub Release](https://github.com/CodeH-top/Cadilume/releases) 和签名更新清单。普通 push、合并与创建标签都不会自动运行该工作流。
+`Release macOS` GitHub Actions 工作流只允许手动触发，并且只构建 macOS arm64。运行时填写 `0.2.0` 这类稳定版本（也接受 `v0.2.0` 或 `V0.2.0`），工作流会先把该版本同步到全部应用清单再构建。默认模式仅把 DMG 与 updater 文件保存为 workflow artifacts；从 `main` 主动勾选发布时，工作流还会创建并推送 `release: v0.2.0` 提交，先向草稿上传全部资产，确认 DMG、updater 归档、签名和更新清单齐全后，才公开并冻结规范化的 `v0.2.0` [GitHub Release](https://github.com/CodeH-top/Cadilume/releases)。普通 push、合并与创建标签都不会自动运行该工作流。
 
 发行构建通过 **设置 → 应用更新** 检查该清单。自动检查默认开启，也可以关闭；下载安装仍须由用户明确点击，因为安装完成后 Cadilume 会重启。Debug 与浏览器预览构建无法调用 updater，也无法修改该偏好。
 
