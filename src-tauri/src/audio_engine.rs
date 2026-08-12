@@ -471,7 +471,16 @@ fn send_decoded_chunk(
             return DecodedChunkSend::Superseded(chunk.samples);
         }
         let observed_epoch = state.worker_signal_epoch.load(Ordering::SeqCst);
-        state.buffered_chunks.fetch_add(1, Ordering::SeqCst);
+        if state
+            .buffered_chunks
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                (count < state.buffer_capacity).then_some(count + 1)
+            })
+            .is_err()
+        {
+            state.wait_for_worker_signal(observed_epoch, Some(DECODE_SEND_WAIT_TIMEOUT));
+            continue;
+        }
         match sender.try_send(chunk) {
             Ok(()) => return DecodedChunkSend::Sent,
             Err(TrySendError::Full(returned)) => {
@@ -549,9 +558,13 @@ where
                 }
 
                 let epoch = worker_state.seek_epoch.load(Ordering::SeqCst);
-                let mut samples = match spare_samples
-                    .take()
-                    .or_else(|| recycle_receiver.try_recv().ok())
+                // Drain returned buffers first so the realtime side keeps a
+                // free recycle slot during rapid seeks. The worker-local spare
+                // remains the fallback for a superseded in-flight chunk.
+                let mut samples = match recycle_receiver
+                    .try_recv()
+                    .ok()
+                    .or_else(|| spare_samples.take())
                 {
                     Some(mut samples) => {
                         samples.clear();
@@ -3800,9 +3813,11 @@ mod tests {
                 .try_seek(Duration::from_millis(seek_index * 17))
                 .unwrap();
         }
+        let allocated_chunks = state.allocated_chunks.load(Ordering::SeqCst);
         assert!(
-            state.allocated_chunks.load(Ordering::SeqCst) <= state.buffer_capacity + 1,
-            "seek storm must reuse superseded worker buffers instead of reallocating"
+            allocated_chunks <= state.buffer_capacity + 1,
+            "seek storm must reuse superseded worker buffers instead of reallocating: allocated {allocated_chunks}, limit {}",
+            state.buffer_capacity + 1,
         );
 
         drop(source);
