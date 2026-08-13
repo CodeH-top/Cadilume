@@ -11,6 +11,7 @@ import {
   ChevronDown,
   CircleUserRound,
   Cloud,
+  Copy,
   Database,
   Download,
   EllipsisVertical,
@@ -25,6 +26,7 @@ import {
   LoaderCircle,
   LogOut,
   Menu,
+  Minus,
   Mic2,
   Moon,
   Music2,
@@ -41,6 +43,7 @@ import {
   Search,
   Server,
   Settings,
+  Square,
   Shuffle,
   SkipBack,
   SkipForward,
@@ -57,6 +60,7 @@ import * as Select from "@radix-ui/react-select";
 import { KeepAlive, type KeepAliveRef, useKeepAliveContext, useKeepAliveRef } from "keepalive-for-react";
 import { createHashRouter, Navigate, RouterProvider, useLocation, useNavigate, useOutlet } from "react-router-dom";
 import { createContext, FormEvent, memo, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createPortal, flushSync } from "react-dom";
 import { TooltipLayer } from "./TooltipLayer";
 import {
@@ -407,14 +411,16 @@ function AppFrame({ children, integrated = false, fullBleed = false }: {
   integrated?: boolean;
   fullBleed?: boolean;
 }) {
+  const isWindows = detectOutputPlatform(navigator) === "windows";
+  const showTitlebar = !integrated && (!fullBleed || isWindows);
   return (
     <div
-      className={`app-frame ${integrated ? "is-integrated" : ""} ${fullBleed ? "is-full-bleed" : ""}`.trim()}
-      data-platform={detectOutputPlatform(navigator)}
+      className={`app-frame ${integrated ? "is-integrated" : ""} ${fullBleed ? "is-full-bleed" : ""} ${isWindows && fullBleed ? "is-windows-full-bleed" : ""}`.trim()}
+      data-platform={isWindows ? "windows" : detectOutputPlatform(navigator)}
     >
-      {fullBleed
-        ? <div className="app-frame__full-bleed-drag-region" data-tauri-drag-region aria-hidden="true" />
-        : !integrated && <AppTitlebar />}
+      {showTitlebar
+        ? <AppTitlebar />
+        : fullBleed && <div className="app-frame__full-bleed-drag-region" data-tauri-drag-region aria-hidden="true" />}
       <div className="app-frame-content">{children}</div>
       <TooltipLayer />
     </div>
@@ -479,6 +485,7 @@ function NotificationFixture() {
 }
 
 function AppTitlebar({ children, inactive = false }: { children?: ReactNode; inactive?: boolean }) {
+  const isWindows = detectOutputPlatform(navigator) === "windows";
   return (
     <header
       className={`app-titlebar ${children ? "has-toolbar" : "is-standalone"}`}
@@ -489,12 +496,69 @@ function AppTitlebar({ children, inactive = false }: { children?: ReactNode; ina
       <div className="app-titlebar__drag-region" data-tauri-drag-region aria-hidden="true" />
       <div className="app-titlebar__content">
         <div className="app-titlebar__brand">
-          <span className="app-titlebar__brand-mark"><BrandIcon size={17} /></span>
+          <span className="app-titlebar__brand-mark"><BrandIcon size={isWindows ? 21 : 17} /></span>
           <strong>Cadilume</strong>
         </div>
         {children && <div className="app-titlebar__toolbar">{children}</div>}
       </div>
+      {isWindows && <WindowsWindowControls />}
     </header>
+  );
+}
+
+function WindowsWindowControls() {
+  const appWindow = useMemo(() => isDesktopRuntime() ? getCurrentWindow() : undefined, []);
+  const [maximized, setMaximized] = useState(false);
+
+  useEffect(() => {
+    if (!appWindow) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const syncMaximized = () => {
+      void appWindow.isMaximized()
+        .then((value) => {
+          if (!disposed) setMaximized(value);
+        })
+        .catch(() => undefined);
+    };
+    syncMaximized();
+    void appWindow.onResized(syncMaximized).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [appWindow]);
+
+  if (!appWindow) return null;
+
+  const runWindowAction = (action: () => Promise<void>) => {
+    void action().catch(() => undefined);
+  };
+
+  return (
+    <div className="app-titlebar__window-controls" role="group" aria-label="窗口控制">
+      <button type="button" className="window-control" aria-label="最小化" title="最小化" onClick={() => runWindowAction(() => appWindow.minimize())}>
+        <Minus size={15} strokeWidth={1.8} />
+      </button>
+      <button
+        type="button"
+        className="window-control"
+        aria-label={maximized ? "还原" : "最大化"}
+        title={maximized ? "还原" : "最大化"}
+        onClick={() => runWindowAction(async () => {
+          await appWindow.toggleMaximize();
+          setMaximized(await appWindow.isMaximized());
+        })}
+      >
+        {maximized ? <Copy size={14} strokeWidth={1.8} /> : <Square size={14} strokeWidth={1.8} />}
+      </button>
+      <button type="button" className="window-control window-control--close" aria-label="关闭" title="关闭" onClick={() => runWindowAction(() => appWindow.close())}>
+        <X size={15} strokeWidth={1.8} />
+      </button>
+    </div>
   );
 }
 

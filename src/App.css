@@ -173,6 +173,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .app-frame.is-integrated { grid-template-rows: minmax(0, 1fr); }
 .app-frame.is-full-bleed { grid-template-rows: minmax(0, 1fr); }
 .app-frame[data-platform="macos"] { --traffic-light-reserved-width: 88px; }
+.app-frame[data-platform="windows"] .app-frame__full-bleed-drag-region { display: none; }
+.app-frame[data-platform="windows"].is-windows-full-bleed { grid-template-rows: var(--app-titlebar-height) minmax(0, 1fr); }
 .app-frame-content { min-width: 0; min-height: 0; overflow: hidden; }
 .app-frame__full-bleed-drag-region { position: absolute; z-index: 20; inset: 0 0 auto; height: var(--app-titlebar-height); }
 .app-titlebar { position: relative; z-index: 20; min-width: 0; width: 100%; height: var(--app-titlebar-height); min-height: var(--app-titlebar-height); display: flex; align-items: center; flex-shrink: 0; overflow: visible; border-bottom: 1px solid var(--border); background: var(--topbar); color: var(--muted-strong); user-select: none; -webkit-user-select: none; }
@@ -190,6 +192,18 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .app-titlebar__toolbar a,
 .app-titlebar__toolbar [role="button"],
 .app-titlebar__toolbar [tabindex] { pointer-events: auto; user-select: auto; -webkit-user-select: auto; }
+.app-titlebar__window-controls { position: absolute; z-index: 2; top: 0; right: 0; height: 100%; display: flex; align-items: stretch; pointer-events: auto; }
+.window-control { width: 46px; height: 100%; display: grid; place-items: center; border: 0; border-radius: 0; padding: 0; color: var(--muted-strong); background: transparent; transition: color 140ms ease, background 140ms ease; }
+.window-control:hover, .window-control:focus-visible { color: var(--text); background: var(--hover-fill); }
+.window-control--close:hover, .window-control--close:focus-visible { color: #fff; background: #c93636; }
+.window-control svg { pointer-events: none; }
+.app-frame[data-platform="windows"] .app-titlebar { --traffic-light-reserved-width: 0px; }
+.app-frame[data-platform="windows"] { --app-titlebar-height: 60px; }
+.app-frame[data-platform="windows"] .app-titlebar__content { padding-right: 138px; }
+.app-frame[data-platform="windows"] .app-titlebar__brand { justify-content: center; gap: 10px; padding: 0 16px; }
+.app-frame[data-platform="windows"] .app-titlebar__brand-mark { width: 36px; height: 36px; border-radius: 10px; }
+.app-frame[data-platform="windows"] .app-titlebar__brand strong { font-size: 18px; font-weight: 760; letter-spacing: 0; }
+.app-frame[data-platform="windows"].is-windows-full-bleed .splash-screen { padding-top: 22px; }
 .skip-link { position: absolute; left: 12px; top: -48px; z-index: var(--z-skip-link); background: var(--accent); color: var(--accent-ink); padding: 8px 12px; border-radius: 8px; text-decoration: none; font-weight: 700; }
 .skip-link:focus { top: 12px; }
 .app-shell { position: relative; isolation: isolate; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); grid-template-rows: var(--app-titlebar-height) minmax(0, 1fr) var(--player-height); width: 100%; height: 100%; overflow: clip; background: var(--bg); }

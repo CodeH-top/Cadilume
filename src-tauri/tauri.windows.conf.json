@@ -1,5 +1,24 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Cadilume",
+        "width": 1280,
+        "height": 820,
+        "visible": false,
+        "minWidth": 1280,
+        "minHeight": 820,
+        "center": true,
+        "resizable": true,
+        "decorations": false,
+        "shadow": true,
+        "backgroundThrottling": "disabled",
+        "fullscreen": false
+      }
+    ]
+  },
   "bundle": {
     "targets": ["nsis"],
     "icon": [
