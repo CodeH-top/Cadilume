@@ -16,7 +16,6 @@ import {
   Download,
   EllipsisVertical,
   Globe2,
-  Headphones,
   History,
   Laptop,
   ListEnd,
@@ -48,7 +47,6 @@ import {
   SkipBack,
   SkipForward,
   SlidersHorizontal,
-  Speaker,
   Sparkles,
   Sun,
   Trash2,
@@ -88,9 +86,9 @@ import {
   movePlaylistItem,
   nativeAudioCacheStatus,
   normalizeDeviceName,
-  openWindowsAudioSettings,
   removeTracksFromPlaylist,
   searchLibrary,
+  setCloseBehavior as saveCloseBehavior,
   setStatusIconEnabled as saveStatusIconEnabled,
   setBrandPreset as saveBrandPreset,
   setDeviceName as saveDeviceName,
@@ -106,6 +104,7 @@ import {
   isInitialLibrarySnapshotScopeActive,
   loadInitialLibraryData,
   orderPlaylistsByRecency,
+  withStartupTimeout,
   type InitialLibraryData,
 } from "./initialLibrary";
 import { groupPlexItemsByAlphabet, PLEX_ALPHABET_INDEX, type PlexAlphabetBucket } from "./libraryIndex";
@@ -126,6 +125,7 @@ import type {
   BootstrapResponse,
   BrandPreset,
   CacheStatus,
+  CloseBehavior,
   LibrarySection,
   LibraryView,
   PlexAccount,
@@ -176,6 +176,7 @@ const ARTIST_TRACK_PAGE_SIZE = 50;
 const LIBRARY_TRACK_PAGE_SIZE = 50;
 const SOURCE_SYNC_OVERLAY_MINIMUM_MS = 600;
 const SIDE_PANEL_MOTION_MS = 220;
+const STARTUP_TIMEOUT_MS = 45_000;
 type ConnectionKind = "local" | "remote" | "relay" | "disconnected";
 type ResolvedTheme = ThemeMode;
 type ThemeTransitionOrigin = { x: number; y: number };
@@ -184,7 +185,9 @@ type BrandPresetChange = (preset: BrandPreset, origin?: ThemeTransitionOrigin) =
 type AppearanceState = { theme: ThemeMode; brand: BrandPreset };
 
 type MusicPlayer = ReturnType<typeof usePlayer>;
+type OutputDevicesController = ReturnType<typeof useOutputDevices>;
 type PlaylistSelection = { tracks: PlexItem[]; label: string };
+const SYSTEM_OUTPUT_DEVICE_VALUE = "__cadilume_system_default__";
 
 interface MusicShellRuntime {
   initialSession: BootstrapResponse;
@@ -218,6 +221,7 @@ interface MusicShellRuntime {
   statusIconEnabled: boolean;
   statusIconPlatform?: BootstrapResponse["statusIconPlatform"];
   statusIconSaving: boolean;
+  closeBehavior: CloseBehavior;
   appUpdater: AppUpdaterController;
   deviceName: string;
   quality: StreamQuality;
@@ -230,10 +234,12 @@ interface MusicShellRuntime {
   sourcesSyncing: boolean;
   playbackSettingsRequest: number;
   player: MusicPlayer;
+  outputDevices: OutputDevicesController;
   notify: (message: string, level?: GlobalNotificationLevel) => void;
   playRecommendationItem: (item: PlexItem, context: PlexItem[]) => Promise<void>;
   playRecommendationPlaylist: (playlist: PlexPlaylist) => Promise<void>;
   changeStatusIconEnabled: (enabled: boolean) => Promise<void>;
+  changeCloseBehavior: (behavior: CloseBehavior) => Promise<void>;
   changeBrandPreset: BrandPresetChange;
   changeDeviceName: (nextDeviceName: string) => Promise<string>;
   changeQuality: (value: StreamQuality) => void;
@@ -248,7 +254,7 @@ interface MusicShellRuntime {
   openDeviceNameDialog: () => void;
   openPlaylistCreation: () => void;
   openPlaylistPicker: (tracks: readonly PlexItem[], label?: string) => void;
-  setSidePanel: (value: "queue" | "lyrics" | "devices" | null) => void;
+  setSidePanel: (value: "queue" | "lyrics" | null) => void;
   setNowPlayingOpen: (open: boolean) => void;
   setPlaybackSettingsRequest: React.Dispatch<React.SetStateAction<number>>;
 }
@@ -350,14 +356,22 @@ function MainApplication({
     setError(undefined);
     let authenticatedSession: BootstrapResponse | undefined;
     try {
-      const nextSession = await bootstrap();
+      const nextSession = await withStartupTimeout(
+        () => bootstrap(),
+        STARTUP_TIMEOUT_MS,
+        "恢复 Plex 账号超时，请检查网络连接后重试。",
+      );
       if (!nextSession.authenticated || !nextSession.account) {
         setInitialLibrary(undefined);
         setSession(nextSession);
         return;
       }
       authenticatedSession = nextSession;
-      const nextLibrary = await loadInitialLibraryData(readPersistedPlaybackSession()?.serverId);
+      const nextLibrary = await withStartupTimeout(
+        () => loadInitialLibraryData(readPersistedPlaybackSession()?.serverId),
+        STARTUP_TIMEOUT_MS,
+        "连接音乐资料库超时，请确认 Plex Media Server 在线后重试。",
+      );
       setInitialLibrary(nextLibrary);
       setSession(nextSession);
     } catch (reason) {
@@ -398,6 +412,9 @@ function MainApplication({
   if (uiPreview === "notifications") return withNotifications(<AppFrame><NotificationFixture /></AppFrame>);
   if (!session && !error) return withNotifications(<AppFrame fullBleed><SplashScreen /></AppFrame>);
   if (!session) return withNotifications(<AppFrame><FatalError message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>);
+  if (session.credentialStatus === "unavailable") {
+    return withNotifications(<AppFrame><FatalError message="无法访问系统凭据存储。请解锁系统钥匙串或凭据管理器后重试。" retry={retryLoad} /></AppFrame>);
+  }
   if (!session.authenticated || !session.account) {
     return withNotifications(<AppFrame><LoginScreen clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
   }
@@ -488,7 +505,7 @@ function AppTitlebar({ children, inactive = false }: { children?: ReactNode; ina
   const isWindows = detectOutputPlatform(navigator) === "windows";
   return (
     <header
-      className={`app-titlebar ${children ? "has-toolbar" : "is-standalone"}`}
+      className={`app-titlebar ${children || isWindows ? "has-toolbar" : "is-standalone"}`}
       aria-label="Cadilume 顶部工具栏"
       aria-hidden={inactive || undefined}
       inert={inactive || undefined}
@@ -499,9 +516,13 @@ function AppTitlebar({ children, inactive = false }: { children?: ReactNode; ina
           <span className="app-titlebar__brand-mark"><BrandIcon size={isWindows ? 21 : 17} /></span>
           <strong>Cadilume</strong>
         </div>
-        {children && <div className="app-titlebar__toolbar">{children}</div>}
+        {(children || isWindows) && (
+          <div className="app-titlebar__toolbar">
+            <div className="app-titlebar__toolbar-main">{children}</div>
+            {isWindows && <WindowsWindowControls />}
+          </div>
+        )}
       </div>
-      {isWindows && <WindowsWindowControls />}
     </header>
   );
 }
@@ -540,12 +561,12 @@ function WindowsWindowControls() {
 
   return (
     <div className="app-titlebar__window-controls" role="group" aria-label="窗口控制">
-      <button type="button" className="window-control" aria-label="最小化" title="最小化" onClick={() => runWindowAction(() => appWindow.minimize())}>
-        <Minus size={15} strokeWidth={1.8} />
+      <button type="button" className="window-control window-control--minimize" aria-label="最小化" title="最小化" onClick={() => runWindowAction(() => appWindow.minimize())}>
+        <Minus size={18} strokeWidth={1.8} />
       </button>
       <button
         type="button"
-        className="window-control"
+        className="window-control window-control--maximize"
         aria-label={maximized ? "还原" : "最大化"}
         title={maximized ? "还原" : "最大化"}
         onClick={() => runWindowAction(async () => {
@@ -553,10 +574,10 @@ function WindowsWindowControls() {
           setMaximized(await appWindow.isMaximized());
         })}
       >
-        {maximized ? <Copy size={14} strokeWidth={1.8} /> : <Square size={14} strokeWidth={1.8} />}
+        {maximized ? <Copy size={18} strokeWidth={1.8} /> : <Square size={18} strokeWidth={1.8} />}
       </button>
       <button type="button" className="window-control window-control--close" aria-label="关闭" title="关闭" onClick={() => runWindowAction(() => appWindow.close())}>
-        <X size={15} strokeWidth={1.8} />
+        <X size={18} strokeWidth={1.8} />
       </button>
     </div>
   );
@@ -581,7 +602,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   const [sectionKey, setSectionKey] = useState<string | undefined>(initialLibrary.sectionKey);
   const [libraryArtists, setLibraryArtists] = useState<PlexItem[]>(initialLibrary.libraryArtists);
   const [, setLoading] = useState(true);
-  const [sidePanel, setSidePanel] = useState<"queue" | "lyrics" | "devices" | null>(null);
+  const [sidePanel, setSidePanel] = useState<"queue" | "lyrics" | null>(null);
   const [nowPlayingOpen, setNowPlayingOpen] = useState(false);
   const [nowPlayingMode, setNowPlayingMode] = useState<NowPlayingMode>(readNowPlayingMode);
   const [playlistSelection, setPlaylistSelection] = useState<PlaylistSelection>();
@@ -592,6 +613,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   const [playlistListError, setPlaylistListError] = useState<string>();
   const [statusIconEnabled, setStatusIconEnabled] = useState(initialSession.statusIconEnabled);
   const [statusIconSaving, setStatusIconSaving] = useState(false);
+  const [closeBehavior, setCloseBehavior] = useState<CloseBehavior>(initialSession.closeBehavior);
   const [deviceName, setDeviceName] = useState(initialSession.deviceName);
   const [quality, setQuality] = useState<StreamQuality>(() => readStoredQuality(initialPlaybackSession?.quality));
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>();
@@ -714,7 +736,8 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   }, [routeAliveRef, sectionKey, serverId]);
 
   useEffect(() => {
-    if (initialSectionSnapshotActive) return;
+    const shouldHydrateInitialArtists = initialLibrary.libraryArtistsComplete === false;
+    if (initialSectionSnapshotActive && !shouldHydrateInitialArtists) return;
     const requestId = ++artistDirectoryRequestRef.current;
     if (!serverId || !sectionKey) {
       setLibraryArtists([]);
@@ -730,7 +753,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
     return () => {
       if (artistDirectoryRequestRef.current === requestId) artistDirectoryRequestRef.current += 1;
     };
-  }, [initialSectionSnapshotActive, sectionKey, serverId]);
+  }, [initialLibrary.libraryArtistsComplete, initialSectionSnapshotActive, sectionKey, serverId]);
 
   useEffect(() => {
     if (!previewPlaybackFailure || !player.current) {
@@ -974,6 +997,17 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
       setStatusIconSaving(false);
     }
   };
+
+  const changeCloseBehavior = useCallback(async (behavior: CloseBehavior) => {
+    const previous = closeBehavior;
+    setCloseBehavior(behavior);
+    try {
+      setCloseBehavior(await saveCloseBehavior(behavior));
+    } catch (reason) {
+      setCloseBehavior(previous);
+      notify(reason instanceof Error ? reason.message : String(reason), "error");
+    }
+  }, [closeBehavior, notify]);
 
   const changeDeviceName = useCallback(async (nextDeviceName: string) => {
     try {
@@ -1252,6 +1286,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
     statusIconEnabled,
     statusIconPlatform: initialSession.statusIconPlatform,
     statusIconSaving,
+    closeBehavior,
     appUpdater,
     deviceName,
     quality,
@@ -1264,10 +1299,12 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
     sourcesSyncing,
     playbackSettingsRequest,
     player,
+    outputDevices,
     notify,
     playRecommendationItem,
     playRecommendationPlaylist,
     changeStatusIconEnabled,
+    changeCloseBehavior,
     changeBrandPreset,
     changeDeviceName,
     changeQuality,
@@ -1327,13 +1364,6 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
             onSeek={player.seek}
           />
         </div>
-      )}
-
-      {sidePanel === "devices" && (
-        <DevicesPanel
-          output={outputDevices}
-          onClose={() => setSidePanel(null)}
-        />
       )}
 
       <NowPlayingView
@@ -1447,27 +1477,19 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
         expanded={expandedPlayerOpen}
         queueOpen={queuePanelOpen}
         lyricsOpen={lyricsPanelOpen}
-        devicesOpen={sidePanel === "devices"}
-        outputPlatform={outputDevices.platform}
         canOpenNowPlaying={hasCurrentTrack}
         canToggleQueue={hasQueue}
         canToggleLyrics={canToggleLyrics}
         onOpenNowPlaying={() => {
           if (!player.current) return;
           cancelDeferredQueueOpen();
-          setSidePanel((value) => value === "lyrics" || value === "devices" ? null : value);
+          setSidePanel((value) => value === "lyrics" ? null : value);
           setPlaylistSelection(undefined);
           setNowPlayingOpen(true);
         }}
         onToggleQueue={toggleQueuePanel}
         onToggleLyrics={toggleLyricsPanel}
         onAddToPlaylist={openCurrentTrackPlaylistPicker}
-        onOutputAction={() => {
-          cancelDeferredQueueOpen();
-          setNowPlayingOpen(false);
-          setPlaylistSelection(undefined);
-          setSidePanel((value) => value === "devices" ? null : "devices");
-        }}
       />
 
       {sourcesSyncing && <SourceSyncOverlay />}
@@ -1846,6 +1868,7 @@ function RoutePage() {
   const preparedHome = !route.detail
     && route.view === "home"
     && runtime.initialSectionSnapshotActive
+    && runtime.initialLibrary.homeComplete !== false
       ? runtime.initialLibrary.home
       : undefined;
   const [items, setItems] = useState<PlexItem[]>(() => preparedHome?.recentAlbums || []);
@@ -2132,7 +2155,9 @@ function RoutePage() {
       statusIconEnabled={runtime.statusIconEnabled}
       statusIconPlatform={runtime.statusIconPlatform}
       statusIconSaving={runtime.statusIconSaving}
+      closeBehavior={runtime.closeBehavior}
       appUpdater={runtime.appUpdater}
+      outputDevices={runtime.outputDevices}
       brandPreset={runtime.brandPreset}
       deviceName={runtime.deviceName}
       quality={runtime.quality}
@@ -2156,6 +2181,7 @@ function RoutePage() {
       onShuffleDetail={() => shuffleContext(detail?.children || [])}
       onPlayTrack={(track, context) => runtime.player.playContext(track, context)}
       onStatusIconEnabled={runtime.changeStatusIconEnabled}
+      onCloseBehavior={runtime.changeCloseBehavior}
       onBrandPreset={runtime.changeBrandPreset}
       onEditDeviceName={runtime.openDeviceNameDialog}
       onQuality={runtime.changeQuality}
@@ -2192,7 +2218,9 @@ interface ContentViewProps {
   statusIconEnabled: boolean;
   statusIconPlatform?: BootstrapResponse["statusIconPlatform"];
   statusIconSaving: boolean;
+  closeBehavior: CloseBehavior;
   appUpdater: AppUpdaterController;
+  outputDevices: OutputDevicesController;
   brandPreset: BrandPreset;
   deviceName: string;
   quality: StreamQuality;
@@ -2216,6 +2244,7 @@ interface ContentViewProps {
   onShuffleDetail: () => void;
   onPlayTrack: (track: PlexItem, context: PlexItem[]) => void;
   onStatusIconEnabled: (enabled: boolean) => void;
+  onCloseBehavior: (behavior: CloseBehavior) => void;
   onBrandPreset: BrandPresetChange;
   onEditDeviceName: () => void;
   onQuality: (value: StreamQuality) => void;
@@ -4075,6 +4104,27 @@ function SettingsView(props: ContentViewProps) {
       <SettingsGroup icon={<Laptop size={18} />} title="设备">
         <DeviceNameSetting value={props.deviceName} onEdit={props.onEditDeviceName} />
       </SettingsGroup>
+      <SettingsGroup icon={<PanelTop size={18} />} title="关闭主面板">
+        <div className="close-behavior-options" role="radiogroup" aria-label="关闭主面板">
+          {([
+            ["panel", "关闭主面板"],
+            ["tray", "最小化到系统托盘"],
+            ["quit", "退出云音乐"],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={`close-behavior-option ${props.closeBehavior === value ? "active" : ""}`}
+              role="radio"
+              aria-checked={props.closeBehavior === value}
+              onClick={() => props.onCloseBehavior(value)}
+            >
+              <span className="close-behavior-radio" aria-hidden="true" />
+              <strong>{label}</strong>
+            </button>
+          ))}
+        </div>
+      </SettingsGroup>
       {props.statusIconPlatform && (
         <SettingsGroup icon={<PanelTop size={18} />} title="系统状态图标">
           <div className="toggle-row">
@@ -4086,7 +4136,7 @@ function SettingsView(props: ContentViewProps) {
           </div>
         </SettingsGroup>
       )}
-      <SettingsGroup icon={<Download size={18} />} title="应用更新">
+      {!import.meta.env.DEV && <SettingsGroup icon={<Download size={18} />} title="应用更新">
         <div className="settings-stack">
           <div className="field-row app-update-row">
             <span>
@@ -4131,10 +4181,11 @@ function SettingsView(props: ContentViewProps) {
             </label>
           </div>
         </div>
-      </SettingsGroup>
+      </SettingsGroup>}
       <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放">
         <div className="settings-stack">
           <div className="field-row"><span><strong>音频质量</strong><small>选择 PMS 返回原始流或兼容质量。</small></span><SettingsSelect label="音频质量" value={props.quality} placeholder="选择音频质量" disabled={false} options={[{ value: "auto", label: "自动" }, { value: "original", label: "始终原始质量" }, { value: "320", label: "320 kbps" }, { value: "256", label: "256 kbps" }, { value: "192", label: "192 kbps" }]} onValueChange={(value) => props.onQuality(value as StreamQuality)} /></div>
+          {props.outputDevices.platform === "windows" && <WindowsOutputSetting output={props.outputDevices} />}
           <div className="toggle-row">
             <span><strong>预缓冲下一首</strong><small>提前加载队列中的下一首。</small></span>
             <label className="toggle-switch" aria-label="预缓冲下一首"><input type="checkbox" checked={props.prebufferNext} onChange={(event) => props.onPrebufferNext(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /></label>
@@ -4513,57 +4564,33 @@ function LyricsPanel({ open, track, lyrics, onSeek }: {
   );
 }
 
-function DevicesPanel({ output, onClose }: {
-  output: ReturnType<typeof useOutputDevices>;
-  onClose: () => void;
-}) {
-  const openWindowsSettings = async () => {
-    try {
-      await openWindowsAudioSettings();
-    } catch (reason) {
-      output.setMessage(reason instanceof Error ? reason.message : "无法打开 Windows 音量合成器。");
-    }
-  };
-
+function WindowsOutputSetting({ output }: { output: OutputDevicesController }) {
+  const selectedValue = output.selectedDeviceId || SYSTEM_OUTPUT_DEVICE_VALUE;
+  const options = output.devices.map((device) => ({
+    value: device.deviceId || SYSTEM_OUTPUT_DEVICE_VALUE,
+    label: device.label,
+  }));
   return (
-    <aside className="devices-panel" role="dialog" aria-label="播放设备">
-      <header><h2>播放设备</h2><IconButton label="关闭播放设备" tooltip={null} onClick={onClose}><X size={18} /></IconButton></header>
-      <div className="devices-content">
-        {output.platform === "windows" ? (
-          <>
-            <div className="device-hero"><span><Speaker size={23} /></span><div><strong>Windows 音频输出</strong><small>仅改变 Cadilume，不修改系统默认设备。</small></div></div>
-            {output.canSelectSink ? (
-              <>
-                <div className="device-toolbar">
-                  {output.canUseSystemPicker && <button className="secondary-button" type="button" onClick={() => void output.requestSystemDevice()}><Headphones size={16} />打开系统选择器</button>}
-                  <IconButton label="刷新输出设备" onClick={() => void output.refresh()}><RefreshCw className={output.loading ? "spin" : ""} size={16} /></IconButton>
-                </div>
-                <div className="device-list" role="radiogroup" aria-label="Windows 音频输出设备">
-                  {output.devices.map((device) => (
-                    <button
-                      className={`device-option ${output.selectedDeviceId === device.deviceId ? "active" : ""}`}
-                      key={device.deviceId || "system-default"}
-                      type="button"
-                      role="radio"
-                      aria-checked={output.selectedDeviceId === device.deviceId}
-                      onClick={() => void output.selectDevice(device.deviceId)}
-                    >
-                      <span className="device-option-icon">{device.isDefault ? <Laptop size={18} /> : <Speaker size={18} />}</span>
-                      <span><strong>{device.label}</strong><small>{device.isDefault ? "跟随 Windows 默认设备" : "Cadilume 专用输出"}</small></span>
-                      {output.selectedDeviceId === device.deviceId && <Check size={16} />}
-                    </button>
-                  ))}
-                </div>
-              </>
-            ) : <div className="device-unavailable"><Speaker size={23} /><strong>当前 WebView2 不支持应用内切换</strong><small>请更新 Microsoft Edge WebView2 Runtime，或在 Windows 音量合成器中单独指定 Cadilume 的输出。</small></div>}
-            <button className="secondary-button device-settings-button" type="button" onClick={() => void openWindowsSettings()}><SlidersHorizontal size={16} />打开 Windows 音量合成器</button>
-          </>
-        ) : (
-          <div className="device-unavailable"><Speaker size={23} /><strong>跟随系统音频输出</strong><small>当前平台不提供应用级设备选择，请从系统声音设置切换。</small></div>
-        )}
-        {output.message && <p className="device-message" role="status">{output.message}</p>}
+    <div className="settings-output-setting">
+      <div className="field-row settings-output-row">
+        <span><strong>Windows 播放设备</strong><small>仅改变 Cadilume 的输出，不修改系统默认设备。</small></span>
+        <div className="settings-output-controls">
+          <SettingsSelect
+            label="Windows 播放设备"
+            value={selectedValue}
+            placeholder="选择播放设备"
+            disabled={!output.canSelectSink}
+            options={options}
+            onValueChange={(value) => void output.selectDevice(value === SYSTEM_OUTPUT_DEVICE_VALUE ? "" : value)}
+          />
+          <IconButton label="刷新播放设备" tooltip="刷新播放设备" disabled={output.loading} onClick={() => void output.refresh()}>
+            <RefreshCw className={output.loading ? "spin" : ""} size={16} />
+          </IconButton>
+        </div>
       </div>
-    </aside>
+      {!output.canSelectSink && <p className="device-hint">当前 WebView2 不支持应用内切换，可在 Windows 音量合成器中单独指定 Cadilume 的输出。</p>}
+      {output.message && <p className="device-message" role="status">{output.message}</p>}
+    </div>
   );
 }
 
@@ -5003,7 +5030,7 @@ function PlaylistPicker({ serverId, tracks, label, onClose, onPlaylistCreated, o
   );
 }
 
-function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded, queueOpen, lyricsOpen, devicesOpen, outputPlatform, canOpenNowPlaying, canToggleQueue, canToggleLyrics, onOpenNowPlaying, onToggleQueue, onToggleLyrics, onAddToPlaylist, onOutputAction }: {
+function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded, queueOpen, lyricsOpen, canOpenNowPlaying, canToggleQueue, canToggleLyrics, onOpenNowPlaying, onToggleQueue, onToggleLyrics, onAddToPlaylist }: {
   player: ReturnType<typeof usePlayer>;
   loading: boolean;
   buffering: boolean;
@@ -5011,8 +5038,6 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
   expanded: boolean;
   queueOpen: boolean;
   lyricsOpen: boolean;
-  devicesOpen: boolean;
-  outputPlatform: ReturnType<typeof useOutputDevices>["platform"];
   canOpenNowPlaying: boolean;
   canToggleQueue: boolean;
   canToggleLyrics: boolean;
@@ -5020,7 +5045,6 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
   onToggleQueue: () => void;
   onToggleLyrics: () => void;
   onAddToPlaylist: () => void;
-  onOutputAction: () => void;
 }) {
   const displayDuration = usableDurationSeconds(player.duration, (player.current?.duration || 0) / 1000);
   const progressFill = rangeFillPercent(player.progress, displayDuration);
@@ -5073,7 +5097,6 @@ function PlayerBar({ player, loading, buffering, nowPlayingTriggerRef, expanded,
         />
         <IconButton label="添加到歌单" disabled={!canOpenNowPlaying} onClick={onAddToPlaylist}><ListPlus size={19} /></IconButton>
         <IconButton label="播放队列" active={queueOpen} disabled={!canToggleQueue} onClick={onToggleQueue}><ListMusic size={19} /></IconButton>
-        {outputPlatform !== "macos" && <IconButton label="播放设备" active={devicesOpen} onClick={onOutputAction}><Speaker size={18} /></IconButton>}
         <SharedVolumeControl variant="compact" volume={player.volume} muted={player.muted} onMutedChange={player.setMuted} onVolumeChange={player.setVolume} />
       </div>
     </footer>

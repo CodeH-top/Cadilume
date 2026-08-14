@@ -9,8 +9,9 @@ export function BrandIcon({ size = 20, className }: BrandIconProps) {
       <circle cx="12" cy="12" r="10" fill="currentColor" />
       <circle cx="12" cy="12" r="7.1" stroke="var(--accent, transparent)" strokeWidth=".7" opacity=".3" />
       <circle cx="12" cy="12" r="5.25" stroke="var(--accent, transparent)" strokeWidth=".5" opacity=".2" />
-      <circle cx="12" cy="12" r="3" fill="var(--accent, transparent)" />
-      <circle cx="12" cy="12" r=".8" fill="currentColor" />
+      {/* The label and spindle are part of the vinyl itself, not the theme. */}
+      <circle cx="12" cy="12" r="3" fill="#050505" />
+      <circle cx="12" cy="12" r=".8" fill="#050505" />
     </svg>
   );
 }

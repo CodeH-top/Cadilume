@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener},
-    sync::{Arc, Mutex},
+    sync::{mpsc::sync_channel, Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -249,22 +249,46 @@ impl StreamProxy {
             .route("/artwork/{ticket}", get(artwork_get).head(artwork_head))
             .with_state(runtime);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = sync_channel::<std::result::Result<(), String>>(1);
 
         tauri::async_runtime::spawn(async move {
             let listener = match TcpListener::from_std(listener) {
                 Ok(listener) => listener,
                 Err(error) => {
-                    eprintln!("本机媒体代理启动失败：{error}");
+                    let _ = ready_tx.send(Err(error.to_string()));
+                    crate::diagnostics::record(
+                        "代理",
+                        format_args!("loopback=failed error={error}"),
+                    );
                     return;
                 }
             };
+            // Do not hand out a loopback ticket until Tokio has registered the
+            // socket. Release builds schedule the first command much faster
+            // than `tauri dev`, so returning before this point can make the
+            // first decoder request race the proxy task's startup.
+            let _ = ready_tx.send(Ok(()));
             let server = axum::serve(listener, router).with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
             });
             if let Err(error) = server.await {
-                eprintln!("本机媒体代理已停止：{error}");
+                crate::diagnostics::record("代理", format_args!("loopback=stopped error={error}"));
             }
         });
+
+        match ready_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let _ = shutdown_tx.send(());
+                return Err(anyhow!("本机媒体代理启动失败：{error}"));
+            }
+            Err(error) => {
+                let _ = shutdown_tx.send(());
+                return Err(anyhow!("等待本机媒体代理就绪超时：{error}"));
+            }
+        }
+
+        crate::diagnostics::record("代理", format_args!("loopback=ready port={port}"));
 
         Ok(Self {
             port,
@@ -409,6 +433,15 @@ pub fn stream_url(
         effective,
         connection_kind,
         server.connections.len(),
+    );
+    crate::diagnostics::record(
+        "播放",
+        format_args!(
+            "stream_ticket=issued quality={} connection={} candidates={}",
+            effective,
+            connection_kind,
+            server.connections.len()
+        ),
     );
     proxy.issue(target).map_err(|error| error.to_string())
 }
@@ -589,64 +622,69 @@ async fn forward_to_plex(
     let Some(plex) = runtime.app.try_state::<PlexState>() else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "播放器服务尚未就绪");
     };
-    let server = match plex.stream_server(&target.server_id) {
-        Ok(server) if !server.connections.is_empty() => server,
-        Ok(_) => return error_response(StatusCode::BAD_GATEWAY, "Plex 服务器没有可用连接"),
-        Err(_) => return error_response(StatusCode::NOT_FOUND, "Plex 服务器连接已失效"),
-    };
+    let mut authorization_refreshed = false;
+    let mut authorization_failure = None;
+    'authorization: loop {
+        let server = match plex.stream_server(&target.server_id) {
+            Ok(server) if !server.connections.is_empty() => server,
+            Ok(_) => return error_response(StatusCode::BAD_GATEWAY, "Plex 服务器没有可用连接"),
+            Err(_) => return error_response(StatusCode::NOT_FOUND, "Plex 服务器连接已失效"),
+        };
 
-    let mut attempts: Vec<UpstreamAttempt> = Vec::new();
-    for connection in &server.connections {
-        let endpoints = match build_upstream_urls(target, connection, plex.client_identifier()) {
-            Ok(endpoints) => endpoints,
-            Err(_) => continue,
-        };
-        let connection_kind = if connection.local {
-            "local"
-        } else if connection.relay {
-            "relay"
-        } else {
-            "remote"
-        };
-        // Ticket issuance already pins the representation. Do not resolve
-        // `auto` again here, or a later Range request could change quality.
-        let effective_quality = target.quality.clone();
-        let endpoint_kind = if effective_quality == "original" {
-            "direct"
-        } else {
-            "transcode"
-        };
-        for endpoint in endpoints {
-            let mut request = plex
-                .plex_identity_headers(runtime.client.request(method.clone(), endpoint))
-                .header(ACCEPT, "audio/mpeg,audio/*;q=0.9,*/*;q=0.1")
-                .header(ACCEPT_ENCODING, "identity")
-                .header("X-Plex-Token", &server.token)
-                .header("X-Plex-Session-Identifier", &target.session_id);
-            if let Some(range) = range.as_ref() {
-                request = request.header(RANGE, range.clone());
-            }
-            if let Some(if_range) = if_range.as_ref() {
-                request = request.header(IF_RANGE, if_range.clone());
-            }
-
-            match tokio::time::timeout(STREAM_CLIENT_TIMEOUTS.response_headers, request.send())
-                .await
+        let mut attempts: Vec<UpstreamAttempt> = Vec::new();
+        for connection in &server.connections {
+            let endpoints = match build_upstream_urls(target, connection, plex.client_identifier())
             {
-                Ok(Ok(response))
-                    if is_forwardable_audio_response(
-                        response.status(),
-                        response.headers(),
-                        range.is_some(),
-                    ) =>
+                Ok(endpoints) => endpoints,
+                Err(_) => continue,
+            };
+            let connection_kind = if connection.local {
+                "local"
+            } else if connection.relay {
+                "relay"
+            } else {
+                "remote"
+            };
+            // Ticket issuance already pins the representation. Do not resolve
+            // `auto` again here, or a later Range request could change quality.
+            let effective_quality = target.quality.clone();
+            let endpoint_kind = if effective_quality == "original" {
+                "direct"
+            } else {
+                "transcode"
+            };
+            for endpoint in endpoints {
+                let mut request = plex
+                    .plex_identity_headers(runtime.client.request(method.clone(), endpoint))
+                    .header(ACCEPT, "audio/mpeg,audio/*;q=0.9,*/*;q=0.1")
+                    .header(ACCEPT_ENCODING, "identity")
+                    .header("X-Plex-Token", &server.token)
+                    .header("X-Plex-Session-Identifier", &target.session_id);
+                if let Some(range) = range.as_ref() {
+                    request = request.header(RANGE, range.clone());
+                }
+                if let Some(if_range) = if_range.as_ref() {
+                    request = request.header(IF_RANGE, if_range.clone());
+                }
+
+                match tokio::time::timeout(STREAM_CLIENT_TIMEOUTS.response_headers, request.send())
+                    .await
                 {
-                    let content_type = response
-                        .headers()
-                        .get(CONTENT_TYPE)
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("(无 Content-Type)")
-                        .to_string();
-                    eprintln!(
+                    Ok(Ok(response))
+                        if is_forwardable_audio_response(
+                            response.status(),
+                            response.headers(),
+                            range.is_some(),
+                            endpoint_kind == "transcode",
+                        ) =>
+                    {
+                        let content_type = response
+                            .headers()
+                            .get(CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("(无 Content-Type)")
+                            .to_string();
+                        eprintln!(
                         "[播放] 上游可播放：质量={} 连接={} 端点={} HTTP={} Content-Type={} Range={}",
                         effective_quality,
                         connection_kind,
@@ -655,82 +693,155 @@ async fn forward_to_plex(
                         content_type,
                         range.as_ref().map(|value| value.to_str().unwrap_or("?")).unwrap_or("无"),
                     );
-                    plex.promote_connection(&target.server_id, &connection.uri);
-                    return downstream_response(response, &method);
-                }
-                Ok(Ok(response)) => {
-                    let content_type = response
-                        .headers()
-                        .get(CONTENT_TYPE)
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("(无 Content-Type)")
-                        .to_string();
-                    let status = response.status();
-                    eprintln!(
-                        "[播放] 上游失败：质量={} 连接={} 端点={} HTTP={} Content-Type={}",
-                        effective_quality,
-                        connection_kind,
-                        endpoint_kind,
-                        status.as_u16(),
-                        content_type,
-                    );
-                    attempts.push(UpstreamAttempt {
-                        quality: effective_quality.clone(),
-                        connection_kind,
-                        endpoint_kind,
-                        status: Some(status.as_u16()),
-                        content_type: response
+                        if range.as_ref().is_none_or(|value| {
+                            value
+                                .to_str()
+                                .map(|value| value.starts_with("bytes=0-"))
+                                .unwrap_or(false)
+                        }) {
+                            crate::diagnostics::record(
+                            "播放",
+                            format_args!(
+                                "upstream=playable quality={} connection={} endpoint={} status={} content_type={}",
+                                effective_quality,
+                                connection_kind,
+                                endpoint_kind,
+                                response.status().as_u16(),
+                                content_type
+                            ),
+                        );
+                        }
+                        plex.promote_connection(&target.server_id, &connection.uri);
+                        return downstream_response(response, &method);
+                    }
+                    Ok(Ok(response)) => {
+                        let status = response.status();
+                        if !authorization_refreshed
+                            && (status == StatusCode::UNAUTHORIZED
+                                || status == StatusCode::FORBIDDEN)
+                        {
+                            authorization_failure = Some(status);
+                            crate::diagnostics::record(
+                                "播放",
+                                format_args!(
+                                    "server_authorization=stale status={} refresh=started",
+                                    status.as_u16()
+                                ),
+                            );
+                            authorization_refreshed = true;
+                            match plex.refresh_servers().await {
+                                Ok(_) => {
+                                    authorization_failure = None;
+                                    crate::diagnostics::record(
+                                        "播放",
+                                        format_args!("server_authorization=refreshed"),
+                                    );
+                                    continue 'authorization;
+                                }
+                                Err(error) => {
+                                    crate::diagnostics::record(
+                                        "播放",
+                                        format_args!("server_authorization=refresh_failed"),
+                                    );
+                                    eprintln!("[播放] 刷新 Plex 服务器授权失败：{error}");
+                                }
+                            }
+                        }
+                        let content_type = response
                             .headers()
                             .get(CONTENT_TYPE)
                             .and_then(|value| value.to_str().ok())
-                            .map(str::to_owned),
-                    });
-                    // PMS rate-limits bursty probing (typically `bytes=0-1`
-                    // followed by a full-range request) with 503/429. A short
-                    // backoff before the next connection/endpoint lets the
-                    // server recover instead of failing the whole WebView load.
-                    if status == StatusCode::SERVICE_UNAVAILABLE
-                        || status == StatusCode::TOO_MANY_REQUESTS
-                    {
-                        tokio::time::sleep(Duration::from_millis(300)).await;
+                            .unwrap_or("(无 Content-Type)")
+                            .to_string();
+                        eprintln!(
+                            "[播放] 上游失败：质量={} 连接={} 端点={} HTTP={} Content-Type={}",
+                            effective_quality,
+                            connection_kind,
+                            endpoint_kind,
+                            status.as_u16(),
+                            content_type,
+                        );
+                        attempts.push(UpstreamAttempt {
+                            quality: effective_quality.clone(),
+                            connection_kind,
+                            endpoint_kind,
+                            status: Some(status.as_u16()),
+                            content_type: response
+                                .headers()
+                                .get(CONTENT_TYPE)
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_owned),
+                        });
+                        // PMS rate-limits bursty probing (typically `bytes=0-1`
+                        // followed by a full-range request) with 503/429. A short
+                        // backoff before the next connection/endpoint lets the
+                        // server recover instead of failing the whole WebView load.
+                        if status == StatusCode::SERVICE_UNAVAILABLE
+                            || status == StatusCode::TOO_MANY_REQUESTS
+                        {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                        }
                     }
-                }
-                Ok(Err(_)) | Err(_) => {
-                    eprintln!(
-                        "[播放] 上游连接失败：质量={} 连接={} 端点={}",
-                        effective_quality, connection_kind, endpoint_kind,
-                    );
-                    plex.demote_connection(&target.server_id, &connection.uri);
-                    attempts.push(UpstreamAttempt {
-                        quality: effective_quality.clone(),
-                        connection_kind,
-                        endpoint_kind,
-                        status: None,
-                        content_type: None,
-                    });
+                    Ok(Err(_)) | Err(_) => {
+                        eprintln!(
+                            "[播放] 上游连接失败：质量={} 连接={} 端点={}",
+                            effective_quality, connection_kind, endpoint_kind,
+                        );
+                        plex.demote_connection(&target.server_id, &connection.uri);
+                        attempts.push(UpstreamAttempt {
+                            quality: effective_quality.clone(),
+                            connection_kind,
+                            endpoint_kind,
+                            status: None,
+                            content_type: None,
+                        });
+                    }
                 }
             }
         }
-    }
 
-    if let Some(last) = attempts.last() {
-        let summary = last.summary();
-        let attempts_label = if attempts.len() == 1 {
-            "1 个端点".to_string()
+        if let Some(status) = authorization_failure {
+            let (message, scope) = if status == StatusCode::UNAUTHORIZED {
+                (
+                    "Plex 账号授权已失效，请重新登录后再播放",
+                    "account_authorization_invalid",
+                )
+            } else {
+                (
+                    "Plex 服务器拒绝了音频访问，请检查共享权限或重新登录",
+                    "server_authorization_denied",
+                )
+            };
+            crate::diagnostics::record(
+                "播放",
+                format_args!("upstream={} status={}", scope, status.as_u16()),
+            );
+            return error_response(status, message);
+        }
+
+        if let Some(last) = attempts.last() {
+            let summary = last.summary();
+            let attempts_label = if attempts.len() == 1 {
+                "1 个端点".to_string()
+            } else {
+                format!("{} 个端点", attempts.len())
+            };
+            eprintln!("[播放] 代理全部尝试失败：{attempts_label}，最后一次为 {summary}");
+            crate::diagnostics::record(
+                "播放",
+                format_args!("upstream=failed attempts={} last={summary}", attempts.len()),
+            );
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Plex 音频代理失败：已尝试 {attempts_label}，最后一次为 {summary}"),
+            );
         } else {
-            format!("{} 个端点", attempts.len())
-        };
-        eprintln!("[播放] 代理全部尝试失败：{attempts_label}，最后一次为 {summary}");
-        error_response(
-            StatusCode::BAD_GATEWAY,
-            format!("Plex 音频代理失败：已尝试 {attempts_label}，最后一次为 {summary}"),
-        )
-    } else {
-        error_response(StatusCode::BAD_GATEWAY, "无法连接 Plex 音频服务器")
+            return error_response(StatusCode::BAD_GATEWAY, "无法连接 Plex 音频服务器");
+        }
     }
 }
 
-fn is_supported_audio_content_type(headers: &HeaderMap) -> bool {
+fn normalized_content_type(headers: &HeaderMap) -> Option<String> {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -742,13 +853,76 @@ fn is_supported_audio_content_type(headers: &HeaderMap) -> bool {
                 .trim()
                 .to_ascii_lowercase()
         })
-        .is_some_and(|mime| mime.starts_with("audio/"))
+        .filter(|value| !value.is_empty())
+}
+
+fn is_supported_audio_content_type(headers: &HeaderMap) -> bool {
+    normalized_content_type(headers).is_some_and(|mime| mime.starts_with("audio/"))
+}
+
+fn is_generic_media_content_type(headers: &HeaderMap) -> bool {
+    normalized_content_type(headers).is_none_or(|mime| {
+        matches!(
+            mime.as_str(),
+            "application/octet-stream" | "binary/octet-stream" | "application/x-download"
+        )
+    })
+}
+
+fn has_valid_partial_content_range(headers: &HeaderMap) -> bool {
+    let Some(value) = headers
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(value) = value.strip_prefix("bytes ") else {
+        return false;
+    };
+    let Some((range, total)) = value.split_once('/') else {
+        return false;
+    };
+    let Some((start, end)) = range.split_once('-') else {
+        return false;
+    };
+    let (Ok(start), Ok(end), Ok(total)) = (
+        start.parse::<u64>(),
+        end.parse::<u64>(),
+        total.parse::<u64>(),
+    ) else {
+        return false;
+    };
+    start <= end && end < total
+}
+
+fn has_media_framing(status: StatusCode, headers: &HeaderMap, transcode_endpoint: bool) -> bool {
+    if status == StatusCode::PARTIAL_CONTENT {
+        return has_valid_partial_content_range(headers);
+    }
+    if status != StatusCode::OK {
+        return false;
+    }
+    let has_content_length = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > 0);
+    let is_chunked = headers
+        .get(TRANSFER_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        });
+    has_content_length || (transcode_endpoint && is_chunked)
 }
 
 fn is_forwardable_audio_response(
     status: StatusCode,
     headers: &HeaderMap,
     range_requested: bool,
+    transcode_endpoint: bool,
 ) -> bool {
     if status == StatusCode::RANGE_NOT_SATISFIABLE {
         return range_requested
@@ -758,7 +932,10 @@ fn is_forwardable_audio_response(
                 .and_then(|value| value.strip_prefix("bytes */"))
                 .is_some_and(|total| total.parse::<u64>().is_ok());
     }
-    status.is_success() && is_supported_audio_content_type(headers)
+    status.is_success()
+        && (is_supported_audio_content_type(headers)
+            || (is_generic_media_content_type(headers)
+                && has_media_framing(status, headers, transcode_endpoint)))
 }
 
 fn downstream_response(upstream: reqwest::Response, method: &Method) -> Response {
@@ -901,7 +1078,23 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
 fn build_stream_client() -> Result<Client> {
     let mut builder = Client::builder()
         .connect_timeout(STREAM_CLIENT_TIMEOUTS.connect)
-        .redirect(Policy::none())
+        // PMS installations and Relay endpoints occasionally redirect an HTTP
+        // media URL to the HTTPS form. Follow only a short, same-host chain;
+        // never let a server-supplied Location turn the loopback proxy into a
+        // cross-origin fetcher.
+        .redirect(Policy::custom(|attempt| {
+            let Some(previous) = attempt.previous().last() else {
+                return attempt.stop();
+            };
+            if attempt.previous().len() > 3 {
+                return attempt.stop();
+            }
+            if safe_media_redirect_origin(previous, attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
         // 远程 PMS 经反向代理时，复用 keep-alive 连接的大文件流会被截断
         // （IncompleteBody）；每次请求新开连接与 curl 行为一致，最稳。
         .pool_max_idle_per_host(0)
@@ -913,6 +1106,20 @@ fn build_stream_client() -> Result<Client> {
         builder = builder.read_timeout(timeout);
     }
     builder.build().map_err(Into::into)
+}
+
+fn safe_media_redirect_origin(previous: &Url, next: &Url) -> bool {
+    let scheme_upgrade = previous.scheme() == next.scheme()
+        || (previous.scheme() == "http" && next.scheme() == "https");
+    scheme_upgrade
+        && previous
+            .host_str()
+            .zip(next.host_str())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+        && previous.port_or_known_default() == next.port_or_known_default()
+        && next.username().is_empty()
+        && next.password().is_none()
+        && next.fragment().is_none()
 }
 
 fn build_upstream_urls(
@@ -1493,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn only_audio_content_types_are_forwarded_to_the_webview() {
+    fn audio_and_framed_generic_content_types_are_forwarded_to_the_webview() {
         let mut headers = HeaderMap::new();
         assert!(!is_supported_audio_content_type(&headers));
 
@@ -1515,7 +1722,6 @@ mod tests {
             "text/html; charset=utf-8",
             "application/xml",
             "application/json",
-            "application/octet-stream",
             "image/png",
         ] {
             headers.insert(CONTENT_TYPE, HeaderValue::from_str(mime).unwrap());
@@ -1524,6 +1730,56 @@ mod tests {
                 "expected {mime} to be rejected"
             );
         }
+
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(CONTENT_RANGE, HeaderValue::from_static("bytes 0-511/1024"));
+        assert!(is_forwardable_audio_response(
+            StatusCode::PARTIAL_CONTENT,
+            &headers,
+            true,
+            false,
+        ));
+
+        headers.remove(CONTENT_RANGE);
+        assert!(!is_forwardable_audio_response(
+            StatusCode::OK,
+            &headers,
+            false,
+            false,
+        ));
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("1024"));
+        assert!(is_forwardable_audio_response(
+            StatusCode::OK,
+            &headers,
+            false,
+            false,
+        ));
+
+        headers.remove(CONTENT_LENGTH);
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        assert!(!is_forwardable_audio_response(
+            StatusCode::OK,
+            &headers,
+            false,
+            false,
+        ));
+        assert!(is_forwardable_audio_response(
+            StatusCode::OK,
+            &headers,
+            false,
+            true,
+        ));
+
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
+        assert!(!is_forwardable_audio_response(
+            StatusCode::OK,
+            &headers,
+            false,
+            true,
+        ));
     }
 
     #[test]
@@ -1535,10 +1791,12 @@ mod tests {
             StatusCode::RANGE_NOT_SATISFIABLE,
             &headers,
             true,
+            false,
         ));
         assert!(!is_forwardable_audio_response(
             StatusCode::RANGE_NOT_SATISFIABLE,
             &headers,
+            false,
             false,
         ));
 
@@ -1547,6 +1805,40 @@ mod tests {
             StatusCode::RANGE_NOT_SATISFIABLE,
             &headers,
             true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn media_redirects_are_same_origin_and_only_upgrade_to_https() {
+        let base = Url::parse("http://media.example.test:32400/library/parts/1").unwrap();
+        assert!(safe_media_redirect_origin(
+            &base,
+            &Url::parse("http://media.example.test:32400/library/parts/1").unwrap()
+        ));
+        assert!(safe_media_redirect_origin(
+            &base,
+            &Url::parse("https://media.example.test:32400/library/parts/1").unwrap()
+        ));
+        assert!(!safe_media_redirect_origin(
+            &base,
+            &Url::parse("https://media.example.test:443/library/parts/1").unwrap()
+        ));
+        assert!(!safe_media_redirect_origin(
+            &base,
+            &Url::parse("http://other.example.test:32400/library/parts/1").unwrap()
+        ));
+        assert!(!safe_media_redirect_origin(
+            &base,
+            &Url::parse("https://media.example.test:32400/library/parts/1#fragment").unwrap()
+        ));
+        assert!(!safe_media_redirect_origin(
+            &base,
+            &Url::parse("https://user:secret@media.example.test:32400/library/parts/1").unwrap()
+        ));
+        assert!(!safe_media_redirect_origin(
+            &Url::parse("https://media.example.test:32400/library/parts/1").unwrap(),
+            &base
         ));
     }
 

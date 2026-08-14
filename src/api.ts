@@ -2,7 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { demoAlbums, demoArtists, demoBootstrap, demoPlaylistItems, demoPlaylists, demoRecommendationHubs, demoSections, demoServers, demoTracks } from "./demo";
 import { plexLibraryTrackSort, plexSingerTrackSort, sortTracks, type TrackSortState } from "./trackSort";
-import type { AppUpdateEvent, AppUpdateInfo, BootstrapResponse, BrandPreset, CacheStatus, LibrarySection, PlexContributor, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
+import type { AppUpdateEvent, AppUpdateInfo, BootstrapResponse, BrandPreset, CacheStatus, CloseBehavior, LibrarySection, PlexContributor, PlexHub, PlexItem, PlexItemPage, PlexLyricsPayload, PlexPin, PlexPlaylist, PlexServer, StreamQuality } from "./types";
 
 const artworkQueue: Array<() => void> = [];
 let activeArtworkRequests = 0;
@@ -277,14 +277,26 @@ export async function getSections(serverId: string): Promise<LibrarySection[]> {
   });
 }
 
-export async function getLibraryItems(serverId: string, sectionKey: string, type: 8 | 9 | 10): Promise<PlexItem[]> {
+export interface LibraryItemsOptions {
+  /** Limit the number of records returned for non-blocking startup previews. */
+  maxItems?: number;
+}
+
+export async function getLibraryItems(
+  serverId: string,
+  sectionKey: string,
+  type: 8 | 9 | 10,
+  options: LibraryItemsOptions = {},
+): Promise<PlexItem[]> {
+  const maxItems = typeof options.maxItems === "number" && Number.isFinite(options.maxItems)
+    ? Math.max(1, Math.floor(options.maxItems))
+    : undefined;
   if (!isDesktopRuntime()) {
-    if (type === 8) return demoLibraryArtists();
-    if (type === 9) return demoAlbums;
-    return demoLibraryTracks();
+    const items = type === 8 ? demoLibraryArtists() : type === 9 ? demoAlbums : demoLibraryTracks();
+    return maxItems === undefined ? items : items.slice(0, maxItems);
   }
-  const pageSize = 500;
-  const loadCompleteIndex = type === 8 || type === 9;
+  const pageSize = maxItems === undefined ? 500 : Math.min(500, maxItems);
+  const loadCompleteIndex = maxItems === undefined && (type === 8 || type === 9);
   const items: PlexItem[] = [];
   let start = 0;
   let totalSize: number | undefined;
@@ -298,6 +310,10 @@ export async function getLibraryItems(serverId: string, sectionKey: string, type
     });
     const pageItems = metadata(response);
     items.push(...pageItems);
+    if (maxItems !== undefined && items.length >= maxItems) {
+      items.length = maxItems;
+      break;
+    }
     const root = container(response);
     totalSize ??= optionalNumber(root.totalSize);
 
@@ -1098,6 +1114,11 @@ export async function setStatusIconEnabled(enabled: boolean): Promise<boolean> {
   return invoke("set_status_icon_enabled", { enabled });
 }
 
+export async function setCloseBehavior(behavior: CloseBehavior): Promise<CloseBehavior> {
+  if (!isDesktopRuntime()) return behavior;
+  return invoke("set_close_behavior", { behavior });
+}
+
 export async function setDeviceName(deviceName: string): Promise<string> {
   const normalized = normalizeDeviceName(deviceName);
   if (!isDesktopRuntime()) return normalized;
@@ -1114,10 +1135,6 @@ export async function quitApplication(): Promise<void> {
 
 export async function showMainWindow(): Promise<void> {
   if (isDesktopRuntime()) await invoke("show_main_window");
-}
-
-export async function openWindowsAudioSettings(): Promise<void> {
-  if (isDesktopRuntime()) await openUrl("ms-settings:apps-volume");
 }
 
 export async function reportTimeline(serverId: string, track: PlexItem, playbackState: "playing" | "paused" | "stopped", time: number): Promise<void> {
