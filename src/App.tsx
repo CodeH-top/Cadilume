@@ -177,6 +177,7 @@ const LIBRARY_TRACK_PAGE_SIZE = 50;
 const SOURCE_SYNC_OVERLAY_MINIMUM_MS = 600;
 const SIDE_PANEL_MOTION_MS = 220;
 const STARTUP_TIMEOUT_MS = 45_000;
+const APP_ICON_URL = "/app-icon.svg";
 type ConnectionKind = "local" | "remote" | "relay" | "disconnected";
 type ResolvedTheme = ThemeMode;
 type ThemeTransitionOrigin = { x: number; y: number };
@@ -513,7 +514,7 @@ function AppTitlebar({ children, inactive = false }: { children?: ReactNode; ina
       <div className="app-titlebar__drag-region" data-tauri-drag-region aria-hidden="true" />
       <div className="app-titlebar__content">
         <div className="app-titlebar__brand">
-          <span className="app-titlebar__brand-mark"><BrandIcon size={isWindows ? 21 : 17} /></span>
+          <img className="app-titlebar__brand-mark" src={APP_ICON_URL} alt="" aria-hidden="true" />
           <strong>Cadilume</strong>
         </div>
         {(children || isWindows) && (
