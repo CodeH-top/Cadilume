@@ -199,6 +199,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .window-control:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .window-control--close:hover, .window-control--close:focus-visible { color: #fff; background: #c93636; }
 .window-control svg { width: var(--window-control-icon-size); height: var(--window-control-icon-size); pointer-events: none; }
+.window-control--maximize svg { width: 16px; height: 16px; }
 .app-frame[data-platform="windows"] .app-titlebar { --traffic-light-reserved-width: 0px; }
 .app-frame[data-platform="windows"] { --app-titlebar-height: 60px; }
 .app-frame[data-platform="windows"] .app-titlebar__content { padding-right: 0; }
@@ -495,8 +496,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .primary-button { margin-top: 16px; border: 0; background: var(--accent); color: var(--accent-ink); }
 .primary-button:hover:not(:disabled) { filter: brightness(1.08); }
 .primary-button:disabled { opacity: 0.62; cursor: default; }
-.secondary-button { border: 1px solid var(--border-strong); background: var(--panel-strong); color: var(--text); }
-.secondary-button:hover:not(:disabled) { background: var(--panel-hover); }
+.secondary-button { border: 1px solid var(--border-strong); background: transparent; color: var(--text); }
+.secondary-button:hover:not(:disabled), .secondary-button:focus-visible { background: var(--hover-fill); }
 .secondary-button:disabled { opacity: 0.52; cursor: default; }
 .danger-button { border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); background: color-mix(in srgb, var(--danger) 9%, transparent); color: var(--danger); }
 .danger-button:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
