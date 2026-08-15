@@ -199,8 +199,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .window-control:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .window-control--close:hover, .window-control--close:focus-visible { color: #fff; background: #c93636; }
 .window-control svg { width: var(--window-control-icon-size); height: var(--window-control-icon-size); pointer-events: none; }
-.window-control--maximize svg { width: 16px; height: 16px; }
-.window-control--close svg { width: 20px; height: 20px; }
+.window-control--maximize svg { width: 15px; height: 15px; }
+.window-control--close svg { width: 18px; height: 18px; }
 .app-frame[data-platform="windows"] .app-titlebar { --traffic-light-reserved-width: 0px; }
 .app-frame[data-platform="windows"] { --app-titlebar-height: 60px; }
 .app-frame[data-platform="windows"] .app-titlebar__content { padding-right: 0; }
