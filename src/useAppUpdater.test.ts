@@ -93,10 +93,12 @@ function session(overrides: Partial<BootstrapResponse> = {}): BootstrapResponse 
   return {
     clientIdentifier: "client-1",
     authenticated: false,
+    credentialStatus: "missing",
     appVersion: "0.1.2",
     appUpdateSupported: true,
     autoUpdateEnabled: true,
     statusIconEnabled: true,
+    closeBehavior: "panel",
     deviceName: "Test Mac",
     brandPreset: "amber",
     ...overrides,

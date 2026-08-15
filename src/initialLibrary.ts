@@ -21,7 +21,11 @@ export interface InitialLibraryData {
   sectionKey?: string;
   playlists: PlexPlaylist[];
   libraryArtists: PlexItem[];
+  /** False when the startup snapshot intentionally contains only a preview. */
+  libraryArtistsComplete?: boolean;
   home: InitialHomeData;
+  /** False when the home snapshot needs a background refresh after mounting. */
+  homeComplete?: boolean;
 }
 
 export interface InitialLibrarySource {
@@ -31,7 +35,12 @@ export interface InitialLibrarySource {
   getLibraryItems: typeof getLibraryItems;
   getRecommendationHubs: typeof getRecommendationHubs;
   getRecentAlbums: typeof getRecentAlbums;
+  getInitialLibraryArtists?: (serverId: string, sectionKey: string) => Promise<PlexItem[]>;
 }
+
+export const INITIAL_LIBRARY_ARTIST_LIMIT = 120;
+const REQUIRED_STARTUP_REQUEST_TIMEOUT_MS = 15_000;
+const OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS = 10_000;
 
 export function isInitialLibrarySnapshotScopeActive(
   invalidated: boolean,
@@ -49,7 +58,52 @@ const defaultSource: InitialLibrarySource = {
   getLibraryItems,
   getRecommendationHubs,
   getRecentAlbums,
+  getInitialLibraryArtists: (serverId, sectionKey) => getLibraryItems(serverId, sectionKey, 8, {
+    maxItems: INITIAL_LIBRARY_ARTIST_LIMIT,
+  }),
 };
+
+/**
+ * Tauri invokes cannot be cancelled from the WebView. A bounded promise keeps
+ * startup recoverable when a Plex connection or a stale WebView IPC call does
+ * not settle; the underlying request may finish later, but it can no longer
+ * hold the first screen hostage.
+ */
+export function withStartupTimeout<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(message));
+    }, timeoutMs);
+
+    let pending: Promise<T>;
+    try {
+      pending = Promise.resolve(operation());
+    } catch (reason) {
+      pending = Promise.reject(reason);
+    }
+    pending.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(value);
+      },
+      (reason) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        reject(reason);
+      },
+    );
+  });
+}
 
 export function orderPlaylistsByRecency(playlists: readonly PlexPlaylist[]): PlexPlaylist[] {
   return [...playlists].sort((left, right) => {
@@ -63,7 +117,11 @@ export async function loadInitialLibraryData(
   preferredServerId?: string,
   source: InitialLibrarySource = defaultSource,
 ): Promise<InitialLibraryData> {
-  const servers = await source.discoverServers();
+  const servers = await withStartupTimeout(
+    () => source.discoverServers(),
+    REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+    "发现 Plex Media Server 超时，请检查网络连接后重试。",
+  );
   if (!servers.length) {
     return {
       servers,
@@ -82,10 +140,21 @@ export async function loadInitialLibraryData(
 
   for (const selectedServer of orderedServers) {
     try {
-      const [sections, playlistCatalog] = await Promise.all([
-        source.getSections(selectedServer.id),
-        source.getPlaylists(selectedServer.id),
+      const [sectionsResult, playlistsResult] = await Promise.allSettled([
+        withStartupTimeout(
+          () => source.getSections(selectedServer.id),
+          REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的音乐资料库超时。`,
+        ),
+        withStartupTimeout(
+          () => source.getPlaylists(selectedServer.id),
+          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的歌单超时。`,
+        ),
       ]);
+      if (sectionsResult.status === "rejected") throw sectionsResult.reason;
+      const sections = sectionsResult.value;
+      const playlistCatalog = playlistsResult.status === "fulfilled" ? playlistsResult.value : [];
       const selectedSection = sections[0];
       const playlists = orderPlaylistsByRecency(playlistCatalog);
       if (!selectedSection) {
@@ -99,11 +168,32 @@ export async function loadInitialLibraryData(
         };
       }
 
-      const [libraryArtists, recommendationHubs, recentAlbums] = await Promise.all([
-        source.getLibraryItems(selectedServer.id, selectedSection.key, 8),
-        source.getRecommendationHubs(selectedServer.id, selectedSection.key),
-        source.getRecentAlbums(selectedServer.id, selectedSection.key),
+      const [artistsResult, hubsResult, recentResult] = await Promise.allSettled([
+        withStartupTimeout(
+          () => source.getInitialLibraryArtists
+            ? source.getInitialLibraryArtists(selectedServer.id, selectedSection.key)
+            : source.getLibraryItems(selectedServer.id, selectedSection.key, 8),
+          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的艺术家索引超时。`,
+        ),
+        withStartupTimeout(
+          () => source.getRecommendationHubs(selectedServer.id, selectedSection.key),
+          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的推荐内容超时。`,
+        ),
+        withStartupTimeout(
+          () => source.getRecentAlbums(selectedServer.id, selectedSection.key),
+          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的最近专辑超时。`,
+        ),
       ]);
+      const libraryArtists = artistsResult.status === "fulfilled"
+        ? artistsResult.value.slice(0, INITIAL_LIBRARY_ARTIST_LIMIT)
+        : [];
+      const recommendationHubs = hubsResult.status === "fulfilled" ? hubsResult.value : [];
+      const recentAlbums = recentResult.status === "fulfilled" ? recentResult.value : [];
+      const libraryArtistsComplete = !source.getInitialLibraryArtists && artistsResult.status === "fulfilled";
+      const homeComplete = hubsResult.status === "fulfilled" && recentResult.status === "fulfilled";
       const completeHubs = recommendationHubs.some(isRecentlyAddedHub) || !recentAlbums.length
         ? recommendationHubs
         : [
@@ -123,10 +213,12 @@ export async function loadInitialLibraryData(
         sectionKey: selectedSection.key,
         playlists,
         libraryArtists,
+        ...(!libraryArtistsComplete ? { libraryArtistsComplete: false } : {}),
         home: {
           recentAlbums,
           hubs: homeRecommendationHubs(completeHubs),
         },
+        ...(!homeComplete ? { homeComplete: false } : {}),
       };
     } catch (reason) {
       lastError = reason;

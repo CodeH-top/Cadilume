@@ -148,16 +148,6 @@ jobs:
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: cadilume-macos-arm64-[bundle]
 
-      - name: Upload manual macOS updater artifacts
-        if: ${{ !inputs.publish }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: cadilume-macos-arm64-updater
-          path: |
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
-          if-no-files-found: error
-
       - name: Publish GitHub Release
         if: ${{ inputs.publish }}
         uses: tauri-apps/tauri-action@v1
@@ -175,6 +165,78 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
           args: --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
+
+      - name: Verify packaged macOS application and DMG
+        shell: bash
+        env:
+          CADILUME_RELEASE_VERSION: ${{ steps.release_version.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          bundle_root="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          apps=("${bundle_root}/macos/"*.app)
+          dmgs=("${bundle_root}/dmg/"*.dmg)
+          updater_archives=("${bundle_root}/macos/"*.app.tar.gz)
+          updater_signatures=("${bundle_root}/macos/"*.app.tar.gz.sig)
+          if [[ ${#apps[@]} -ne 1 || ${#dmgs[@]} -ne 1 ]]; then
+            echo "::error::应生成且仅生成一个 macOS .app 和一个 DMG"
+            exit 1
+          fi
+          if [[ ${#updater_archives[@]} -ne 1 || ${#updater_signatures[@]} -ne 1 ]]; then
+            echo "::error::缺少完整的 macOS updater 归档或签名"
+            exit 1
+          fi
+
+          app="${apps[0]}"
+          dmg="${dmgs[0]}"
+          executable="${app}/Contents/MacOS/Cadilume"
+          info_plist="${app}/Contents/Info.plist"
+          test -x "${executable}"
+          test -f "${app}/Contents/Resources/icon.icns"
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${info_plist}")" == "top.codeh.cadilume" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${info_plist}")" == "${CADILUME_RELEASE_VERSION}" ]]
+          lipo -verify_arch arm64 "${executable}"
+          codesign --verify --deep --strict --verbose=2 "${app}"
+
+          linked_libraries="$(otool -L "${executable}")"
+          grep -q '/System/Library/Frameworks/CoreAudio.framework' <<<"${linked_libraries}"
+          grep -q '/System/Library/Frameworks/AudioToolbox.framework' <<<"${linked_libraries}"
+          if grep -Eq '/(opt/homebrew|opt/local|usr/local)/' <<<"${linked_libraries}"; then
+            echo "::error::发行程序链接了禁止的外部运行依赖"
+            printf '%s\n' "${linked_libraries}"
+            exit 1
+          fi
+
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "${mount_dir}" -quiet >/dev/null 2>&1 || true
+            rmdir "${mount_dir}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          hdiutil attach "${dmg}" -readonly -nobrowse -mountpoint "${mount_dir}" -quiet
+          dmg_apps=("${mount_dir}/"*.app)
+          if [[ ${#dmg_apps[@]} -ne 1 ]]; then
+            echo "::error::DMG 内应包含且仅包含一个 .app"
+            exit 1
+          fi
+          dmg_app="${dmg_apps[0]}"
+          dmg_executable="${dmg_app}/Contents/MacOS/Cadilume"
+          test -x "${dmg_executable}"
+          codesign --verify --deep --strict --verbose=2 "${dmg_app}"
+          cmp "${executable}" "${dmg_executable}"
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${dmg_app}/Contents/Info.plist")" == "top.codeh.cadilume" ]]
+          echo "macOS DMG 核验通过：arm64、签名、版本、音频系统依赖和 DMG 内应用均完整"
+
+      - name: Upload manual macOS updater artifacts
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cadilume-macos-arm64-updater
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
 
       - name: Verify assets and publish immutable Release
         if: ${{ inputs.publish }}

@@ -1,6 +1,7 @@
 mod app_update;
 mod audio_cache;
 mod audio_engine;
+mod diagnostics;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod now_playing;
 mod plex;
@@ -21,6 +22,27 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(window::handle_window_event)
         .setup(|app| {
+            match app.path().app_log_dir() {
+                Ok(log_dir) => {
+                    if let Err(error) = diagnostics::initialize(&log_dir) {
+                        eprintln!("[启动] 无法初始化诊断日志：{error}");
+                    }
+                }
+                Err(error) => eprintln!("[启动] 无法定位诊断日志目录：{error}"),
+            }
+            diagnostics::record(
+                "启动",
+                format_args!(
+                    "version={} platform={} profile={}",
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::OS,
+                    if cfg!(debug_assertions) {
+                        "debug"
+                    } else {
+                        "release"
+                    }
+                ),
+            );
             let config_dir = app.path().app_config_dir()?;
             let cache_dir = app.path().app_cache_dir()?;
             fs::create_dir_all(&config_dir)?;
@@ -101,6 +123,7 @@ pub fn run() {
             audio_engine::native_queue_set_repeat,
             audio_engine::native_queue_set_shuffle,
             plex::set_status_icon_enabled,
+            plex::set_close_behavior,
             plex::set_device_name,
             plex::set_brand_preset,
             app_update::check_app_update,

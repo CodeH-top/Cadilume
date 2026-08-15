@@ -1,4 +1,6 @@
 export type StatusIconPlatform = "macos" | "windows";
+export type CloseBehavior = "panel" | "tray" | "quit";
+export type CredentialStatus = "available" | "missing" | "unavailable";
 export type LibraryView = "home" | "albums" | "artists" | "tracks" | "search" | "settings";
 export type StreamQuality = "auto" | "original" | "320" | "256" | "192";
 export type ThemeMode = "light" | "dark";
@@ -35,12 +37,14 @@ export interface PlexAccount {
 export interface BootstrapResponse {
   clientIdentifier: string;
   authenticated: boolean;
+  credentialStatus: CredentialStatus;
   account?: PlexAccount;
   appVersion: string;
   appUpdateSupported: boolean;
   autoUpdateEnabled: boolean;
   statusIconEnabled: boolean;
   statusIconPlatform?: StatusIconPlatform;
+  closeBehavior: CloseBehavior;
   deviceName: string;
   brandPreset: BrandPreset;
 }

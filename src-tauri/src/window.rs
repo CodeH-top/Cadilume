@@ -12,7 +12,7 @@ use tauri::{
 };
 use tokio::sync::oneshot;
 
-use crate::plex::{status_icon_platform, BrandPreset, PlexState};
+use crate::plex::{status_icon_platform, BrandPreset, CloseBehavior, PlexState};
 
 const TRAY_ID: &str = "cadilume-tray";
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -104,6 +104,21 @@ enum StatusIconAction {
     Create,
     Remove,
     Noop,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MainCloseAction {
+    ClosePanel,
+    HideToTray,
+    ExitApplication,
+}
+
+fn main_close_action(behavior: CloseBehavior) -> MainCloseAction {
+    match behavior {
+        CloseBehavior::Panel => MainCloseAction::ClosePanel,
+        CloseBehavior::Tray => MainCloseAction::HideToTray,
+        CloseBehavior::Quit => MainCloseAction::ExitApplication,
+    }
 }
 
 fn status_icon_action(enabled: bool, icon_exists: bool) -> StatusIconAction {
@@ -203,8 +218,19 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
         return;
     }
 
+    let Some(state) = window.app_handle().try_state::<PlexState>() else {
+        return;
+    };
     api.prevent_close();
-    let _ = window.minimize();
+    match main_close_action(state.close_behavior()) {
+        MainCloseAction::ClosePanel => {
+            let _ = window.minimize();
+        }
+        MainCloseAction::HideToTray => {
+            let _ = window.hide();
+        }
+        MainCloseAction::ExitApplication => request_app_quit(window.app_handle()),
+    }
 }
 
 pub(crate) fn reveal_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -254,12 +280,31 @@ fn request_app_quit<R: Runtime>(app: &AppHandle<R>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{status_icon_action, QuitCoordinator, StatusIconAction};
+    use super::{
+        main_close_action, status_icon_action, MainCloseAction, QuitCoordinator, StatusIconAction,
+    };
+    use crate::plex::CloseBehavior;
 
     #[cfg(target_os = "macos")]
     use super::{dock_icon_bytes, menu_bar_icon, should_reveal_main_window_on_reopen};
     #[cfg(target_os = "macos")]
     use crate::plex::BrandPreset;
+
+    #[test]
+    fn main_window_close_behavior_maps_to_panel_tray_or_exit() {
+        assert_eq!(
+            main_close_action(CloseBehavior::Panel),
+            MainCloseAction::ClosePanel
+        );
+        assert_eq!(
+            main_close_action(CloseBehavior::Tray),
+            MainCloseAction::HideToTray
+        );
+        assert_eq!(
+            main_close_action(CloseBehavior::Quit),
+            MainCloseAction::ExitApplication
+        );
+    }
 
     #[test]
     fn status_icon_changes_create_or_remove_only_when_its_native_state_differs() {

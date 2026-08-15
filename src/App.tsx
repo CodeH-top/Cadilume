@@ -12,6 +12,7 @@ import {
   CircleUserRound,
   Cloud,
   Copy,
+  DoorClosed,
   Database,
   Download,
   EllipsisVertical,
@@ -177,7 +178,11 @@ const LIBRARY_TRACK_PAGE_SIZE = 50;
 const SOURCE_SYNC_OVERLAY_MINIMUM_MS = 600;
 const SIDE_PANEL_MOTION_MS = 220;
 const STARTUP_TIMEOUT_MS = 45_000;
-const APP_ICON_URL = "/app-icon.svg";
+const APP_ICON_URLS: Record<BrandPreset, string> = {
+  amber: "/app-icon.svg",
+  verdant: "/app-icon-verdant.svg",
+  azure: "/app-icon-azure.svg",
+};
 type ConnectionKind = "local" | "remote" | "relay" | "disconnected";
 type ResolvedTheme = ThemeMode;
 type ThemeTransitionOrigin = { x: number; y: number };
@@ -406,28 +411,29 @@ function MainApplication({
     </>
   );
 
-  if (uiPreview === "splash") return withNotifications(<AppFrame fullBleed><SplashScreen /></AppFrame>);
+  if (uiPreview === "splash") return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen /></AppFrame>);
   if (uiPreview === "login") {
-    return withNotifications(<AppFrame><LoginScreen clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>);
+    return withNotifications(<AppFrame brandPreset={brandPreset}><LoginScreen clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>);
   }
-  if (uiPreview === "notifications") return withNotifications(<AppFrame><NotificationFixture /></AppFrame>);
-  if (!session && !error) return withNotifications(<AppFrame fullBleed><SplashScreen /></AppFrame>);
-  if (!session) return withNotifications(<AppFrame><FatalError message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>);
+  if (uiPreview === "notifications") return withNotifications(<AppFrame brandPreset={brandPreset}><NotificationFixture /></AppFrame>);
+  if (!session && !error) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen /></AppFrame>);
+  if (!session) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>);
   if (session.credentialStatus === "unavailable") {
-    return withNotifications(<AppFrame><FatalError message="无法访问系统凭据存储。请解锁系统钥匙串或凭据管理器后重试。" retry={retryLoad} /></AppFrame>);
+    return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError message="无法访问系统凭据存储。请解锁系统钥匙串或凭据管理器后重试。" retry={retryLoad} /></AppFrame>);
   }
   if (!session.authenticated || !session.account) {
-    return withNotifications(<AppFrame><LoginScreen clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
+    return withNotifications(<AppFrame brandPreset={brandPreset}><LoginScreen clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
   }
-  if (error) return withNotifications(<AppFrame><FatalError message={error} retry={retryLoad} /></AppFrame>);
-  if (!initialLibrary) return withNotifications(<AppFrame fullBleed><SplashScreen /></AppFrame>);
-  return withNotifications(<AppFrame integrated><MusicShell initialSession={session} initialLibrary={initialLibrary} themeMode={themeMode} resolvedTheme={resolvedTheme} brandPreset={brandPreset} onThemeMode={onThemeMode} onBrandPreset={onBrandPreset} appUpdater={appUpdater} notify={notifications.notify} /></AppFrame>);
+  if (error) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError message={error} retry={retryLoad} /></AppFrame>);
+  if (!initialLibrary) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen /></AppFrame>);
+  return withNotifications(<AppFrame integrated brandPreset={brandPreset}><MusicShell initialSession={session} initialLibrary={initialLibrary} themeMode={themeMode} resolvedTheme={resolvedTheme} brandPreset={brandPreset} onThemeMode={onThemeMode} onBrandPreset={onBrandPreset} appUpdater={appUpdater} notify={notifications.notify} /></AppFrame>);
 }
 
-function AppFrame({ children, integrated = false, fullBleed = false }: {
+function AppFrame({ children, integrated = false, fullBleed = false, brandPreset = "amber" }: {
   children: ReactNode;
   integrated?: boolean;
   fullBleed?: boolean;
+  brandPreset?: BrandPreset;
 }) {
   const isWindows = detectOutputPlatform(navigator) === "windows";
   const showTitlebar = !integrated && (!fullBleed || isWindows);
@@ -437,7 +443,7 @@ function AppFrame({ children, integrated = false, fullBleed = false }: {
       data-platform={isWindows ? "windows" : detectOutputPlatform(navigator)}
     >
       {showTitlebar
-        ? <AppTitlebar />
+        ? <AppTitlebar brandPreset={brandPreset} />
         : fullBleed && <div className="app-frame__full-bleed-drag-region" data-tauri-drag-region aria-hidden="true" />}
       <div className="app-frame-content">{children}</div>
       <TooltipLayer />
@@ -502,7 +508,7 @@ function NotificationFixture() {
   );
 }
 
-function AppTitlebar({ children, inactive = false }: { children?: ReactNode; inactive?: boolean }) {
+function AppTitlebar({ children, inactive = false, brandPreset = "amber" }: { children?: ReactNode; inactive?: boolean; brandPreset?: BrandPreset }) {
   const isWindows = detectOutputPlatform(navigator) === "windows";
   return (
     <header
@@ -514,7 +520,7 @@ function AppTitlebar({ children, inactive = false }: { children?: ReactNode; ina
       <div className="app-titlebar__drag-region" data-tauri-drag-region aria-hidden="true" />
       <div className="app-titlebar__content">
         <div className="app-titlebar__brand">
-          <img className="app-titlebar__brand-mark" src={APP_ICON_URL} alt="" aria-hidden="true" />
+          <img className="app-titlebar__brand-mark" src={APP_ICON_URLS[brandPreset]} alt="" aria-hidden="true" />
           <strong>Cadilume</strong>
         </div>
         {(children || isWindows) && (
@@ -528,7 +534,8 @@ function AppTitlebar({ children, inactive = false }: { children?: ReactNode; ina
   );
 }
 
-function WindowsWindowControls() {
+function WindowsWindowControls({ className = "" }: { className?: string }) {
+  const isWindows = detectOutputPlatform(navigator) === "windows";
   const appWindow = useMemo(() => isDesktopRuntime() ? getCurrentWindow() : undefined, []);
   const [maximized, setMaximized] = useState(false);
 
@@ -554,14 +561,14 @@ function WindowsWindowControls() {
     };
   }, [appWindow]);
 
-  if (!appWindow) return null;
+  if (!isWindows || !appWindow) return null;
 
   const runWindowAction = (action: () => Promise<void>) => {
     void action().catch(() => undefined);
   };
 
   return (
-    <div className="app-titlebar__window-controls" role="group" aria-label="窗口控制">
+    <div className={`app-titlebar__window-controls ${className}`.trim()} role="group" aria-label="窗口控制">
       <button type="button" className="window-control window-control--minimize" aria-label="最小化" title="最小化" onClick={() => runWindowAction(() => appWindow.minimize())}>
         <Minus size={18} strokeWidth={1.8} />
       </button>
@@ -1396,10 +1403,13 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
         canNext={queueNavigation.canNext}
         theme={themeMode}
         headerActions={(
-          <div className="now-playing-header-status-actions" role="group" aria-label="外观与连接状态">
-            <ConnectionIndicator server={selectedServer} connected={connectionAvailable} />
-            <ThemeCycleButton resolvedTheme={resolvedTheme} onChange={onThemeMode} />
-          </div>
+          <>
+            <div className="now-playing-header-status-actions" role="group" aria-label="外观与连接状态">
+              <ConnectionIndicator server={selectedServer} connected={connectionAvailable} />
+              <ThemeCycleButton resolvedTheme={resolvedTheme} onChange={onThemeMode} />
+            </div>
+            <WindowsWindowControls className="now-playing-window-controls" />
+          </>
         )}
         onSeek={player.seek}
         onShuffleChange={player.setShuffle}
@@ -1590,7 +1600,7 @@ function MusicRouterLayout() {
 
   return (
     <>
-      <AppTitlebar inactive={runtime.expandedPlayerOpen}>
+      <AppTitlebar inactive={runtime.expandedPlayerOpen} brandPreset={runtime.brandPreset}>
         <LibrarySearchBox route={route} navigateRoute={navigateRoute} notify={runtime.notify} />
         <div className="topbar-actions">
           <div className="topbar-account" aria-label={`${runtime.account.title || runtime.account.username} 的 Plex 用户信息`}>
@@ -4105,12 +4115,11 @@ function SettingsView(props: ContentViewProps) {
       <SettingsGroup icon={<Laptop size={18} />} title="设备">
         <DeviceNameSetting value={props.deviceName} onEdit={props.onEditDeviceName} />
       </SettingsGroup>
-      <SettingsGroup icon={<PanelTop size={18} />} title="关闭主面板">
-        <div className="close-behavior-options" role="radiogroup" aria-label="关闭主面板">
+      <SettingsGroup icon={<DoorClosed size={18} />} title="关闭">
+        <div className="close-behavior-options" role="radiogroup" aria-label="关闭">
           {([
-            ["panel", "关闭主面板"],
-            ["tray", "最小化到系统托盘"],
-            ["quit", "退出云音乐"],
+            ["tray", "最小化到托盘"],
+            ["quit", "退出程序"],
           ] as const).map(([value, label]) => (
             <button
               key={value}

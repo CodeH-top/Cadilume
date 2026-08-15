@@ -39,11 +39,13 @@ const covers = albumNames.map(demoCover);
 export const demoBootstrap: BootstrapResponse = {
   clientIdentifier: "demo-client",
   authenticated: true,
+  credentialStatus: "available",
   appVersion: "0.1.2",
   appUpdateSupported: false,
   autoUpdateEnabled: true,
   statusIconEnabled: true,
   statusIconPlatform: "macos",
+  closeBehavior: "panel",
   deviceName: "演示 Mac",
   brandPreset: "amber",
   account: {

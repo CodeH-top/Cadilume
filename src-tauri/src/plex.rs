@@ -64,6 +64,8 @@ pub struct PlaylistBatchRemoveResult {
 #[serde(rename_all = "camelCase")]
 struct PersistedConfig {
     client_identifier: String,
+    #[serde(default = "default_close_behavior")]
+    close_behavior: CloseBehavior,
     #[serde(default = "default_status_icon_enabled")]
     status_icon_enabled: bool,
     #[serde(default = "default_auto_update_enabled")]
@@ -78,6 +80,7 @@ impl Default for PersistedConfig {
     fn default() -> Self {
         Self {
             client_identifier: Uuid::new_v4().to_string(),
+            close_behavior: default_close_behavior(),
             status_icon_enabled: default_status_icon_enabled(),
             auto_update_enabled: default_auto_update_enabled(),
             device_name: default_device_name(),
@@ -90,6 +93,10 @@ const fn default_status_icon_enabled() -> bool {
     true
 }
 
+const fn default_close_behavior() -> CloseBehavior {
+    CloseBehavior::Tray
+}
+
 const fn default_auto_update_enabled() -> bool {
     true
 }
@@ -99,9 +106,39 @@ fn strip_retired_config_values(value: &mut Value) -> bool {
         return false;
     };
     let removed_sync_recent_plays = config.remove("syncRecentPlays").is_some();
-    let removed_close_behavior = config.remove("closeBehavior").is_some();
     let removed_audio_cache_limit = config.remove("audioCacheLimitGib").is_some();
-    removed_sync_recent_plays || removed_close_behavior || removed_audio_cache_limit
+    removed_sync_recent_plays || removed_audio_cache_limit
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloseBehavior {
+    Panel,
+    Tray,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialStatus {
+    Available,
+    Missing,
+    Unavailable,
+}
+
+impl CredentialStatus {
+    fn log_label(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Missing => "missing",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+struct StoredCredential {
+    token: Option<String>,
+    status: CredentialStatus,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -196,6 +233,17 @@ fn normalize_persisted_device_name(config: &mut PersistedConfig) -> bool {
     config.device_name != previous
 }
 
+fn normalize_persisted_close_behavior(config: &mut PersistedConfig) -> bool {
+    if config.close_behavior != CloseBehavior::Panel {
+        return false;
+    }
+    // `panel` used to minimize the main window without applying the tray
+    // policy. Keep old configs usable while exposing only the two supported
+    // close actions in the settings UI.
+    config.close_behavior = CloseBehavior::Tray;
+    true
+}
+
 fn write_persisted_config(path: &Path, config: &PersistedConfig) -> Result<()> {
     fs::write(path, serde_json::to_vec_pretty(config)?).context("无法保存 Cadilume 配置")
 }
@@ -255,6 +303,7 @@ pub struct PlexState {
     client_identifier: String,
     status_icon_enabled: AtomicBool,
     auto_update_enabled: AtomicBool,
+    credential_status: RwLock<CredentialStatus>,
     token: RwLock<Option<String>>,
     servers: RwLock<HashMap<String, CachedServer>>,
 }
@@ -280,13 +329,18 @@ impl PlexState {
             Err(error) => return Err(error).context("无法读取 Cadilume 配置"),
         };
         should_persist_config |= normalize_persisted_device_name(&mut config);
+        should_persist_config |= normalize_persisted_close_behavior(&mut config);
         if should_persist_config {
             write_persisted_config(&config_path, &config)?;
         }
 
         // Dev builds read only the plaintext fallback file; release builds use
         // the Keychain exclusively. The two credential stores never mix.
-        let token = read_account_token();
+        let stored_credential = read_account_token();
+        crate::diagnostics::record(
+            "账号",
+            format_args!("credential_store={}", stored_credential.status.log_label()),
+        );
         let protected_client = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
@@ -303,13 +357,21 @@ impl PlexState {
             client_identifier: config.client_identifier.clone(),
             status_icon_enabled: AtomicBool::new(config.status_icon_enabled),
             auto_update_enabled: AtomicBool::new(config.auto_update_enabled),
-            token: RwLock::new(token),
+            credential_status: RwLock::new(stored_credential.status),
+            token: RwLock::new(stored_credential.token),
             servers: RwLock::new(HashMap::new()),
         })
     }
 
     pub fn status_icon_enabled(&self) -> bool {
         self.status_icon_enabled.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn close_behavior(&self) -> CloseBehavior {
+        self.config
+            .lock()
+            .map(|config| config.close_behavior)
+            .unwrap_or_else(|_| default_close_behavior())
     }
 
     pub(crate) fn auto_update_enabled(&self) -> bool {
@@ -324,8 +386,25 @@ impl PlexState {
             .ok_or_else(|| anyhow!("尚未登录 Plex"))
     }
 
+    fn credential_status(&self) -> CredentialStatus {
+        self.credential_status
+            .read()
+            .map(|status| *status)
+            .unwrap_or(CredentialStatus::Unavailable)
+    }
+
+    fn set_credential_status(&self, status: CredentialStatus) {
+        if let Ok(mut current) = self.credential_status.write() {
+            *current = status;
+        }
+    }
+
     fn save_status_icon_enabled(&self, enabled: bool) -> Result<()> {
         self.update_preferences(|config| config.status_icon_enabled = enabled)
+    }
+
+    pub(crate) fn save_close_behavior(&self, behavior: CloseBehavior) -> Result<()> {
+        self.update_preferences(|config| config.close_behavior = behavior)
     }
 
     pub(crate) fn save_auto_update_enabled(&self, enabled: bool) -> Result<()> {
@@ -630,6 +709,94 @@ impl PlexState {
         })
     }
 
+    pub(crate) async fn refresh_servers(&self) -> Result<Vec<ServerSummary>> {
+        let account_token = self.token()?;
+        let response = self
+            .plex_headers(
+                self.protected_client
+                    .get(format!("{PLEX_TV}/api/v2/resources")),
+            )
+            .header("X-Plex-Token", account_token)
+            .query(&[
+                ("includeHttps", "1"),
+                ("includeRelay", "1"),
+                ("includeIPv6", "1"),
+            ])
+            .send()
+            .await?;
+        let resources = ensure_success(response, "读取 Plex 服务器失败")
+            .await?
+            .json::<Vec<Resource>>()
+            .await?;
+
+        let mut summaries = Vec::new();
+        let mut cache = HashMap::new();
+        for resource in resources {
+            if !resource.provides.split(',').any(|item| item == "server") {
+                continue;
+            }
+            let Some(token) = resource.access_token else {
+                continue;
+            };
+            let mut connections: Vec<CachedConnection> = resource
+                .connections
+                .into_iter()
+                .filter_map(|connection| {
+                    let base = validated_connection_base(&connection.uri).ok()?;
+                    if !connection.protocol.eq_ignore_ascii_case(base.scheme()) {
+                        return None;
+                    }
+                    Some(CachedConnection {
+                        secure: base.scheme() == "https",
+                        uri: base.to_string(),
+                        local: connection.local,
+                        relay: connection.relay,
+                    })
+                })
+                .collect();
+            connections.sort_by_key(|connection| {
+                let mut score = 0;
+                if connection.local {
+                    score -= 8;
+                }
+                if connection.secure {
+                    score -= 4;
+                }
+                if connection.relay {
+                    score += 3;
+                }
+                score
+            });
+            let connections = self
+                .prioritize_reachable_connections(&resource.client_identifier, &token, connections)
+                .await;
+            let Some(preferred) = connections.first() else {
+                continue;
+            };
+            summaries.push(ServerSummary {
+                id: resource.client_identifier.clone(),
+                name: resource.name,
+                owned: resource.owned,
+                home: resource.home,
+                source_title: resource.source_title,
+                connection_uri: preferred.uri.clone(),
+                local: preferred.local,
+                relay: preferred.relay,
+                secure: preferred.secure,
+            });
+            cache.insert(
+                resource.client_identifier,
+                CachedServer { token, connections },
+            );
+        }
+        summaries.sort_by_key(|server| (!server.owned, server.name.to_lowercase()));
+        *self
+            .servers
+            .write()
+            .map_err(|_| anyhow!("服务器缓存写入失败"))? = cache;
+        Ok(summaries)
+    }
+
     pub(crate) fn client_identifier(&self) -> &str {
         &self.client_identifier
     }
@@ -668,6 +835,7 @@ fn apply_plex_identity_headers(
 pub struct BootstrapResponse {
     client_identifier: String,
     authenticated: bool,
+    credential_status: CredentialStatus,
     account: Option<Account>,
     app_version: String,
     app_update_supported: bool,
@@ -675,6 +843,7 @@ pub struct BootstrapResponse {
     status_icon_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     status_icon_platform: Option<StatusIconPlatform>,
+    close_behavior: CloseBehavior,
     device_name: String,
     brand_preset: BrandPreset,
 }
@@ -890,12 +1059,14 @@ pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse,
     Ok(BootstrapResponse {
         client_identifier: state.client_identifier.clone(),
         authenticated: token.is_some(),
+        credential_status: state.credential_status(),
         account,
         app_version: PRODUCT_VERSION.to_string(),
         app_update_supported: crate::app_update::is_supported(),
         auto_update_enabled: state.auto_update_enabled(),
         status_icon_enabled: state.status_icon_enabled(),
         status_icon_platform: status_icon_platform(),
+        close_behavior: state.close_behavior(),
         device_name: state.device_name(),
         brand_preset: state.brand_preset(),
     })
@@ -959,6 +1130,8 @@ pub async fn poll_pin(
             .token
             .write()
             .map_err(|_| "登录状态写入失败".to_string())? = Some(token.to_string());
+        state.set_credential_status(CredentialStatus::Available);
+        crate::diagnostics::record("账号", format_args!("credential_store=available"));
         true
     } else {
         false
@@ -986,6 +1159,8 @@ pub async fn logout(
         Ok(mut token) => *token = None,
         Err(_) => cleanup_warnings.push("登录状态写入失败".to_string()),
     }
+    state.set_credential_status(CredentialStatus::Missing);
+    crate::diagnostics::record("账号", format_args!("credential_store=missing"));
     match state.servers.write() {
         Ok(mut servers) => servers.clear(),
         Err(_) => cleanup_warnings.push("服务器缓存写入失败".to_string()),
@@ -1001,95 +1176,7 @@ pub async fn logout(
 
 #[tauri::command]
 pub async fn discover_servers(state: State<'_, PlexState>) -> Result<Vec<ServerSummary>, String> {
-    let account_token = state.token().map_err(display_error)?;
-    let response = state
-        .plex_headers(
-            state
-                .protected_client
-                .get(format!("{PLEX_TV}/api/v2/resources")),
-        )
-        .header("X-Plex-Token", account_token)
-        .query(&[
-            ("includeHttps", "1"),
-            ("includeRelay", "1"),
-            ("includeIPv6", "1"),
-        ])
-        .send()
-        .await
-        .map_err(display_error)?;
-    let resources = ensure_success(response, "读取 Plex 服务器失败")
-        .await
-        .map_err(display_error)?
-        .json::<Vec<Resource>>()
-        .await
-        .map_err(display_error)?;
-
-    let mut summaries = Vec::new();
-    let mut cache = HashMap::new();
-    for resource in resources {
-        if !resource.provides.split(',').any(|item| item == "server") {
-            continue;
-        }
-        let Some(token) = resource.access_token else {
-            continue;
-        };
-        let mut connections: Vec<CachedConnection> = resource
-            .connections
-            .into_iter()
-            .filter_map(|connection| {
-                let base = validated_connection_base(&connection.uri).ok()?;
-                if !connection.protocol.eq_ignore_ascii_case(base.scheme()) {
-                    return None;
-                }
-                Some(CachedConnection {
-                    secure: base.scheme() == "https",
-                    uri: base.to_string(),
-                    local: connection.local,
-                    relay: connection.relay,
-                })
-            })
-            .collect();
-        connections.sort_by_key(|connection| {
-            let mut score = 0;
-            if connection.local {
-                score -= 8;
-            }
-            if connection.secure {
-                score -= 4;
-            }
-            if connection.relay {
-                score += 3;
-            }
-            score
-        });
-        let connections = state
-            .prioritize_reachable_connections(&resource.client_identifier, &token, connections)
-            .await;
-        let Some(preferred) = connections.first() else {
-            continue;
-        };
-        summaries.push(ServerSummary {
-            id: resource.client_identifier.clone(),
-            name: resource.name,
-            owned: resource.owned,
-            home: resource.home,
-            source_title: resource.source_title,
-            connection_uri: preferred.uri.clone(),
-            local: preferred.local,
-            relay: preferred.relay,
-            secure: preferred.secure,
-        });
-        cache.insert(
-            resource.client_identifier,
-            CachedServer { token, connections },
-        );
-    }
-    summaries.sort_by_key(|server| (!server.owned, server.name.to_lowercase()));
-    *state
-        .servers
-        .write()
-        .map_err(|_| "服务器缓存写入失败".to_string())? = cache;
-    Ok(summaries)
+    state.refresh_servers().await.map_err(display_error)
 }
 
 #[tauri::command]
@@ -1657,6 +1744,15 @@ pub fn set_status_icon_enabled(
         return Err(display_error(error));
     }
     Ok(enabled)
+}
+
+#[tauri::command]
+pub fn set_close_behavior(
+    behavior: CloseBehavior,
+    state: State<'_, PlexState>,
+) -> Result<CloseBehavior, String> {
+    state.save_close_behavior(behavior).map_err(display_error)?;
+    Ok(behavior)
 }
 
 #[tauri::command]
@@ -2705,8 +2801,8 @@ fn string_field(value: &Value, key: &str) -> String {
 }
 
 #[cfg(not(debug_assertions))]
-fn keyring_entry() -> Result<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(Into::into)
+fn keyring_entry() -> std::result::Result<keyring::Entry, keyring::Error> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
 }
 
 /// Development-only plaintext fallback: read the Plex account token from a
@@ -2725,15 +2821,39 @@ fn dev_token_fallback_path() -> PathBuf {
 }
 
 #[cfg(debug_assertions)]
-fn read_dev_token_fallback() -> Option<String> {
-    let token = fs::read_to_string(dev_token_fallback_path())
-        .ok()?
-        .trim()
-        .to_string();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
+fn read_dev_token_fallback() -> StoredCredential {
+    match fs::read_to_string(dev_token_fallback_path()) {
+        Ok(value) => {
+            let token = value.trim().to_string();
+            if token.is_empty() {
+                StoredCredential {
+                    token: None,
+                    status: CredentialStatus::Missing,
+                }
+            } else {
+                StoredCredential {
+                    token: Some(token),
+                    status: CredentialStatus::Available,
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoredCredential {
+            token: None,
+            status: CredentialStatus::Missing,
+        },
+        Err(error) => {
+            crate::diagnostics::record(
+                "账号",
+                format_args!(
+                    "credential_store_error=development_file kind={:?}",
+                    error.kind()
+                ),
+            );
+            StoredCredential {
+                token: None,
+                status: CredentialStatus::Unavailable,
+            }
+        }
     }
 }
 
@@ -2830,15 +2950,65 @@ fn write_dev_token_fallback(token: &str) -> Result<(), String> {
 /// Dev builds store credentials only in the plaintext fallback file and never
 /// touch the Keychain; release builds use the Keychain exclusively.
 #[cfg(debug_assertions)]
-fn read_account_token() -> Option<String> {
+fn read_account_token() -> StoredCredential {
     read_dev_token_fallback()
 }
 
 #[cfg(not(debug_assertions))]
-fn read_account_token() -> Option<String> {
-    keyring_entry()
-        .ok()
-        .and_then(|entry| entry.get_password().ok())
+fn read_account_token() -> StoredCredential {
+    let entry = match keyring_entry() {
+        Ok(entry) => entry,
+        Err(error) => {
+            crate::diagnostics::record(
+                "账号",
+                format_args!(
+                    "credential_store_error=entry category={}",
+                    keyring_error_category(&error)
+                ),
+            );
+            return StoredCredential {
+                token: None,
+                status: CredentialStatus::Unavailable,
+            };
+        }
+    };
+    match entry.get_password() {
+        Ok(token) if !token.is_empty() => StoredCredential {
+            token: Some(token),
+            status: CredentialStatus::Available,
+        },
+        Ok(_) | Err(keyring::Error::NoEntry) => StoredCredential {
+            token: None,
+            status: CredentialStatus::Missing,
+        },
+        Err(error) => {
+            crate::diagnostics::record(
+                "账号",
+                format_args!(
+                    "credential_store_error=read category={}",
+                    keyring_error_category(&error)
+                ),
+            );
+            StoredCredential {
+                token: None,
+                status: CredentialStatus::Unavailable,
+            }
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn keyring_error_category(error: &keyring::Error) -> &'static str {
+    match error {
+        keyring::Error::PlatformFailure(_) => "platform_failure",
+        keyring::Error::NoStorageAccess(_) => "no_storage_access",
+        keyring::Error::NoEntry => "no_entry",
+        keyring::Error::BadEncoding(_) => "bad_encoding",
+        keyring::Error::TooLong(_, _) => "attribute_too_long",
+        keyring::Error::Invalid(_, _) => "invalid_attribute",
+        keyring::Error::Ambiguous(_) => "ambiguous",
+        _ => "unknown",
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -2870,10 +3040,15 @@ fn delete_account_token() -> Result<(), String> {
 
 #[cfg(not(debug_assertions))]
 fn delete_account_token() -> Result<(), String> {
-    if let Ok(entry) = keyring_entry() {
-        let _ = entry.delete_credential();
+    let entry = keyring_entry()
+        .map_err(|error| format!("无法打开系统凭据存储（{}）", keyring_error_category(&error)))?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!(
+            "无法删除系统凭据（{}）",
+            keyring_error_category(&error)
+        )),
     }
-    Ok(())
 }
 
 async fn ensure_success(response: Response, context: &str) -> Result<Response> {
@@ -2957,13 +3132,13 @@ mod tests {
     }
 
     #[test]
-    fn persisted_config_migrates_device_name_and_removes_retired_preferences() {
+    fn persisted_config_migrates_device_name_and_preserves_close_behavior() {
         let mut raw = serde_json::from_str::<Value>(
             r#"{"clientIdentifier":"client-1","closeBehavior":"tray","syncRecentPlays":true,"audioCacheLimitGib":10,"brandPreset":"plex"}"#,
         )
         .expect("old config should remain readable");
         assert!(strip_retired_config_values(&mut raw));
-        assert!(raw.get("closeBehavior").is_none());
+        assert_eq!(raw["closeBehavior"], "tray");
         assert!(raw.get("syncRecentPlays").is_none());
         assert!(raw.get("audioCacheLimitGib").is_none());
         let mut config: PersistedConfig =
@@ -2973,13 +3148,14 @@ mod tests {
         assert!(!config.device_name.is_empty());
         assert!(normalize_device_name(&config.device_name).is_ok());
         assert_eq!(config.brand_preset, BrandPreset::Amber);
+        assert_eq!(config.close_behavior, CloseBehavior::Tray);
         assert!(config.status_icon_enabled);
         assert!(config.auto_update_enabled);
         let serialized = serde_json::to_value(config).expect("config should serialize");
         assert_eq!(serialized["statusIconEnabled"], true);
         assert_eq!(serialized["autoUpdateEnabled"], true);
         assert!(serialized.get("audioCacheLimitGib").is_none());
-        assert!(serialized.get("closeBehavior").is_none());
+        assert_eq!(serialized["closeBehavior"], "tray");
         assert!(serialized.get("syncRecentPlays").is_none());
     }
 
@@ -3243,6 +3419,10 @@ mod tests {
 
     #[test]
     fn config_defaults_keep_required_local_preferences() {
+        assert_eq!(
+            PersistedConfig::default().close_behavior,
+            CloseBehavior::Tray
+        );
         assert!(PersistedConfig::default().status_icon_enabled);
         assert!(PersistedConfig::default().auto_update_enabled);
         assert!(!PersistedConfig::default().device_name.is_empty());

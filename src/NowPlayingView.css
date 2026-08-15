@@ -370,6 +370,39 @@
   color: var(--now-playing-text);
 }
 
+.now-playing-window-controls {
+  --window-control-size: 32px;
+  --window-control-icon-size: 18px;
+  height: var(--window-control-size);
+  gap: 9px;
+  margin-left: 0;
+  /* The expanded frame has 28px of side padding while the Windows titlebar
+     toolbar reserves 18px; keep the right button edge on the same guide. */
+  margin-right: -10px;
+  padding-left: 9px;
+  border-left-color: var(--now-playing-border-strong);
+}
+
+.now-playing-window-controls .window-control {
+  color: var(--now-playing-muted);
+}
+
+.now-playing-window-controls .window-control:hover,
+.now-playing-window-controls .window-control:focus-visible {
+  color: var(--now-playing-text);
+  background: var(--now-playing-surface-strong);
+}
+
+.now-playing-window-controls .window-control:focus-visible {
+  outline-color: var(--now-playing-accent);
+}
+
+.now-playing-window-controls .window-control--close:hover,
+.now-playing-window-controls .window-control--close:focus-visible {
+  color: #fff;
+  background: #c93636;
+}
+
 .now-playing-icon-button {
   display: inline-flex;
   align-items: center;

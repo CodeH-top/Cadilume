@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, checkAppUpdate, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, installAppUpdate, movePlaylistItem, nativeAudioClearQueue, nativeAudioSetArtwork, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setAutoUpdateEnabled, setBrandPreset, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
+import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, checkAppUpdate, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, installAppUpdate, movePlaylistItem, nativeAudioClearQueue, nativeAudioSetArtwork, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setAutoUpdateEnabled, setBrandPreset, setCloseBehavior, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -51,6 +51,16 @@ describe("music metadata helpers", () => {
   it("uses Plex parent hierarchy for labels", () => {
     expect(trackArtist(track)).toBe("Artist");
     expect(trackAlbum(track)).toBe("Album");
+  });
+});
+
+describe("window close behavior", () => {
+  it("persists the selected close behavior through the native command", async () => {
+    invokeMock.mockResolvedValueOnce("tray");
+
+    await expect(setCloseBehavior("tray")).resolves.toBe("tray");
+
+    expect(invokeMock).toHaveBeenCalledWith("set_close_behavior", { behavior: "tray" });
   });
 });
 

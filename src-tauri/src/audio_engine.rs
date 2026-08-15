@@ -677,6 +677,15 @@ where
             }
         }
     };
+    crate::diagnostics::record(
+        "音频",
+        format_args!(
+            "decoder_first_pcm=true sample_rate={} channels={} samples={}",
+            sample_rate,
+            channels,
+            initial.samples.len()
+        ),
+    );
     Ok((
         ThreadedDecoderSource {
             receiver,
@@ -1502,6 +1511,127 @@ fn renderer_requires_heartbeat(is_visible: bool, is_minimized: bool) -> bool {
     is_visible && !is_minimized
 }
 
+fn output_device_label(device: &cpal::Device) -> String {
+    use cpal::traits::DeviceTrait;
+    device
+        .description()
+        .map(|description| description.name().to_string())
+        .unwrap_or_else(|_| "未知输出设备".to_string())
+}
+
+fn is_usable_output_device(device: &cpal::Device) -> bool {
+    use cpal::traits::DeviceTrait;
+    !device
+        .description()
+        .ok()
+        .and_then(|description| description.driver().map(str::to_owned))
+        .is_some_and(|driver| driver.eq_ignore_ascii_case("null"))
+}
+
+fn open_device_sink<E>(
+    device: cpal::Device,
+    error_callback: E,
+) -> Result<MixerDeviceSink, rodio::DeviceSinkError>
+where
+    E: FnMut(cpal::StreamError) + Send + Clone + 'static,
+{
+    DeviceSinkBuilder::from_device(device)?
+        .with_error_callback(error_callback)
+        .open_sink_or_fallback()
+}
+
+fn open_output_sink<E>(device_id: &str, error_callback: E) -> anyhow::Result<MixerDeviceSink>
+where
+    E: FnMut(cpal::StreamError) + Send + Clone + 'static,
+{
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = cpal::default_host();
+    if !device_id.is_empty() {
+        let stable_id = device_id.parse::<cpal::DeviceId>().ok();
+        let device = stable_id
+            .as_ref()
+            .and_then(|id| host.device_by_id(id))
+            .or_else(|| {
+                // One-time migration for preferences written before cpal's
+                // stable DeviceId replaced the human-readable name.
+                host.output_devices().ok()?.find(|device| {
+                    device
+                        .description()
+                        .map(|description| description.name() == device_id)
+                        .unwrap_or(false)
+                })
+            })
+            .ok_or_else(|| anyhow::anyhow!("找不到所选输出设备"))?;
+        let label = output_device_label(&device);
+        let sink = open_device_sink(device, error_callback)
+            .map_err(|error| anyhow::anyhow!("打开所选输出设备失败: {error}"))?;
+        crate::diagnostics::record("音频", format_args!("output_device=selected label={label}"));
+        return Ok(sink);
+    }
+
+    let default_device = host.default_output_device();
+    let default_id = default_device
+        .as_ref()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string());
+    let mut first_error = None;
+    if let Some(device) = default_device {
+        let label = output_device_label(&device);
+        match open_device_sink(device, error_callback.clone()) {
+            Ok(sink) => {
+                crate::diagnostics::record(
+                    "音频",
+                    format_args!("output_device=default label={label}"),
+                );
+                return Ok(sink);
+            }
+            Err(error) => {
+                crate::diagnostics::record(
+                    "音频",
+                    format_args!("output_device_default_failed label={label} error={error}"),
+                );
+                first_error = Some(error.to_string());
+            }
+        }
+    }
+
+    let devices = host
+        .output_devices()
+        .map_err(|error| anyhow::anyhow!("枚举音频输出设备失败: {error}"))?;
+    for device in devices {
+        let id = device.id().ok().map(|id| id.to_string());
+        if id.is_some() && id == default_id {
+            continue;
+        }
+        if !is_usable_output_device(&device) {
+            continue;
+        }
+        let label = output_device_label(&device);
+        match open_device_sink(device, error_callback.clone()) {
+            Ok(sink) => {
+                crate::diagnostics::record(
+                    "音频",
+                    format_args!("output_device=fallback label={label}"),
+                );
+                return Ok(sink);
+            }
+            Err(error) => {
+                crate::diagnostics::record(
+                    "音频",
+                    format_args!("output_device_fallback_failed label={label} error={error}"),
+                );
+                first_error.get_or_insert_with(|| error.to_string());
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "没有可打开的音频输出设备: {}",
+        first_error.unwrap_or_else(|| "系统未报告可用输出设备".to_string())
+    ))
+}
+
 impl NativeAudioEngine {
     #[allow(dead_code)]
     pub fn new(cache_root: PathBuf) -> anyhow::Result<Self> {
@@ -1530,40 +1660,21 @@ impl NativeAudioEngine {
         device_id: &str,
         health: Arc<NativeAudioHealth>,
     ) -> anyhow::Result<Self> {
-        use cpal::traits::{DeviceTrait, HostTrait};
-        let builder = if device_id.is_empty() {
-            DeviceSinkBuilder::from_default_device()
-                .map_err(|e| anyhow::anyhow!("打开默认音频设备失败: {e}"))?
-        } else {
-            let host = cpal::default_host();
-            let stable_id = device_id.parse::<cpal::DeviceId>().ok();
-            let device = stable_id
-                .as_ref()
-                .and_then(|id| host.device_by_id(id))
-                .or_else(|| {
-                    // One-time migration for preferences written before cpal's
-                    // stable DeviceId replaced the human-readable name.
-                    host.output_devices().ok()?.find(|device| {
-                        device
-                            .description()
-                            .map(|description| description.name() == device_id)
-                            .unwrap_or(false)
-                    })
-                })
-                .ok_or_else(|| anyhow::anyhow!("找不到所选输出设备"))?;
-            DeviceSinkBuilder::from_device(device)
-                .map_err(|e| anyhow::anyhow!("打开所选输出设备失败: {e}"))?
-        };
         let health_for_stream = Arc::clone(&health);
         let output_recovery_pending = Arc::new(AtomicBool::new(false));
         let recovery_pending_for_stream = Arc::clone(&output_recovery_pending);
-        let mut sink = builder
-            .with_error_callback(move |error| {
-                health_for_stream.record_output_stream_error(&recovery_pending_for_stream);
-                eprintln!("[原生] 音频输出流错误，等待自动恢复：{error}");
-            })
-            .open_stream()
-            .map_err(|e| anyhow::anyhow!("音频流启动失败: {e}"))?;
+        // `from_device` starts with rodio's low-latency fixed buffer. CoreAudio
+        // can reject that exact size for Bluetooth, aggregate, and some HDMI
+        // devices even though the device has a perfectly valid output format.
+        // Let rodio retry the device's supported configurations before
+        // reporting a hard playback failure. This is especially important in
+        // optimized packaged builds where the first stream is opened only when
+        // the user starts the first track.
+        let mut sink = open_output_sink(device_id, move |error| {
+            health_for_stream.record_output_stream_error(&recovery_pending_for_stream);
+            eprintln!("[原生] 音频输出流错误，等待自动恢复：{error}");
+        })
+        .map_err(|e| anyhow::anyhow!("音频流启动失败（已尝试设备支持的配置）: {e}"))?;
         // Engine replacement and app shutdown intentionally drop this owned
         // stream after playback has already been stopped.
         sink.log_on_drop(false);
@@ -2710,7 +2821,10 @@ impl NativeAudioEngine {
                                     "deviceId": device_id,
                                 }),
                             );
-                            eprintln!("[原生] 音频输出流已自动恢复");
+                            crate::diagnostics::record(
+                                "音频",
+                                format_args!("output_stream_recovery=success"),
+                            );
                             break;
                         }
                         Ok(None) => {
@@ -2724,7 +2838,10 @@ impl NativeAudioEngine {
                                 .health
                                 .output_recovery_failures
                                 .fetch_add(1, Ordering::SeqCst);
-                            eprintln!("[原生] 音频输出流自动恢复失败：{error}");
+                            crate::diagnostics::record(
+                                "音频",
+                                format_args!("output_stream_recovery=failed error={error}"),
+                            );
                             next_output_recovery_at = now + output_recovery_delay;
                             output_recovery_delay =
                                 (output_recovery_delay * 2).min(Duration::from_secs(30));

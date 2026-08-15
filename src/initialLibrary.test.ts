@@ -3,6 +3,7 @@ import {
   isInitialLibrarySnapshotScopeActive,
   loadInitialLibraryData,
   type InitialLibrarySource,
+  withStartupTimeout,
 } from "./initialLibrary";
 import type { LibrarySection, PlexHub, PlexItem, PlexPlaylist, PlexServer } from "./types";
 
@@ -149,5 +150,38 @@ describe("initial library loading", () => {
     });
 
     await expect(loadInitialLibraryData("server-b", librarySource)).rejects.toThrow("server-a 不可用");
+  });
+
+  it("keeps the first screen available when optional startup sources fail", async () => {
+    const librarySource = source({
+      getInitialLibraryArtists: vi.fn(async () => { throw new Error("artist index stalled"); }),
+      getRecommendationHubs: vi.fn(async () => { throw new Error("recommendations unavailable"); }),
+      getRecentAlbums: vi.fn(async () => { throw new Error("recent albums unavailable"); }),
+    });
+
+    await expect(loadInitialLibraryData(undefined, librarySource)).resolves.toMatchObject({
+      serverId: "server-a",
+      sections: [{ key: "music" }],
+      libraryArtists: [],
+      libraryArtistsComplete: false,
+      home: { recentAlbums: [], hubs: [] },
+      homeComplete: false,
+    });
+  });
+
+  it("turns a stalled startup operation into a retryable timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = withStartupTimeout(
+        () => new Promise<never>(() => undefined),
+        1000,
+        "startup timed out",
+      );
+      const rejection = expect(pending).rejects.toThrow("startup timed out");
+      await vi.advanceTimersByTimeAsync(1000);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
