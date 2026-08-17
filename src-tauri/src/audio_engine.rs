@@ -737,11 +737,88 @@ fn prepare_segment_decoder(
     })
 }
 
+enum AudioMixerSink {
+    Device(MixerDeviceSink),
+    #[cfg(test)]
+    Test(TestMixerSink),
+}
+
+impl AudioMixerSink {
+    fn mixer(&self) -> &rodio::mixer::Mixer {
+        match self {
+            Self::Device(sink) => sink.mixer(),
+            #[cfg(test)]
+            Self::Test(sink) => &sink.mixer,
+        }
+    }
+}
+
+/// Unit tests exercise playback timing without opening CoreAudio/WASAPI.
+/// Hosted Windows runners expose a virtual audio endpoint whose native stream
+/// can terminate the whole test process, while a clocked mixer preserves the
+/// same Player/decoder/gapless behavior deterministically.
+#[cfg(test)]
+struct TestMixerSink {
+    mixer: rodio::mixer::Mixer,
+    shutdown: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(test)]
+impl TestMixerSink {
+    fn new() -> anyhow::Result<Self> {
+        const CHANNELS: u16 = 2;
+        const SAMPLE_RATE: u32 = 48_000;
+        const TICK: Duration = Duration::from_millis(10);
+        const SAMPLES_PER_TICK: usize =
+            (CHANNELS as usize * SAMPLE_RATE as usize * TICK.as_millis() as usize) / 1_000;
+
+        let (mixer, mut source) = rodio::mixer::mixer(
+            std::num::NonZeroU16::new(CHANNELS).expect("test channels are non-zero"),
+            std::num::NonZeroU32::new(SAMPLE_RATE).expect("test sample rate is non-zero"),
+        );
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_for_worker = Arc::clone(&shutdown);
+        let worker = std::thread::Builder::new()
+            .name("cadilume-test-mixer".to_string())
+            .spawn(move || {
+                while !shutdown_for_worker.load(Ordering::SeqCst) {
+                    let tick_started = std::time::Instant::now();
+                    for _ in 0..SAMPLES_PER_TICK {
+                        let _ = source.next();
+                    }
+                    if shutdown_for_worker.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::park_timeout(TICK.saturating_sub(tick_started.elapsed()));
+                }
+            })?;
+        Ok(Self {
+            mixer,
+            shutdown,
+            worker: Some(worker),
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestMixerSink {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
+    }
+}
+
 /// Native playback engine (rodio + cpal) owned by the Tauri app.
 pub struct NativeAudioEngine {
-    #[allow(dead_code)]
-    sink: MixerDeviceSink,
+    // Player controls must be dropped before the output stream so the native
+    // callback cannot observe a partially torn-down playback source.
     player: Mutex<Arc<Player>>,
+    #[allow(dead_code)]
+    sink: AudioMixerSink,
     segment_cache: SegmentCache,
     playback_generation: Arc<AtomicU64>,
     artwork_generation: Arc<AtomicU64>,
@@ -1633,25 +1710,16 @@ where
 }
 
 impl NativeAudioEngine {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(cache_root: PathBuf) -> anyhow::Result<Self> {
         let segment_cache =
             SegmentCache::new(cache_root).map_err(|error| anyhow::anyhow!(error))?;
-        Self::new_with_segment_cache_and_health(
+        let health = Arc::new(NativeAudioHealth::default());
+        Self::new_with_mixer_sink(
             segment_cache,
-            "",
-            Arc::new(NativeAudioHealth::default()),
-        )
-    }
-
-    #[cfg(test)]
-    fn new_with_device(cache_root: PathBuf, device_id: &str) -> anyhow::Result<Self> {
-        let segment_cache =
-            SegmentCache::new(cache_root).map_err(|error| anyhow::anyhow!(error))?;
-        Self::new_with_segment_cache_and_health(
-            segment_cache,
-            device_id,
-            Arc::new(NativeAudioHealth::default()),
+            AudioMixerSink::Test(TestMixerSink::new()?),
+            health,
+            Arc::new(AtomicBool::new(false)),
         )
     }
 
@@ -1678,12 +1746,26 @@ impl NativeAudioEngine {
         // Engine replacement and app shutdown intentionally drop this owned
         // stream after playback has already been stopped.
         sink.log_on_drop(false);
+        Self::new_with_mixer_sink(
+            segment_cache,
+            AudioMixerSink::Device(sink),
+            health,
+            output_recovery_pending,
+        )
+    }
+
+    fn new_with_mixer_sink(
+        segment_cache: SegmentCache,
+        sink: AudioMixerSink,
+        health: Arc<NativeAudioHealth>,
+        output_recovery_pending: Arc<AtomicBool>,
+    ) -> anyhow::Result<Self> {
         let player = Arc::new(Player::connect_new(sink.mixer()));
         // 引擎不做默认音量：rodio Player 默认 1.0（100%），实际音量由前端
         // 缓存记录并在加载时同步（见 loadNativeTrack 的 nativeAudioSetVolume）。
         Ok(Self {
-            sink,
             player: Mutex::new(player),
+            sink,
             segment_cache,
             playback_generation: Arc::new(AtomicU64::new(0)),
             artwork_generation: Arc::new(AtomicU64::new(0)),
@@ -4979,8 +5061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_device_switch_resumes_playback_from_position() {
-        use cpal::traits::{DeviceTrait, HostTrait};
+    async fn output_engine_rebuild_resumes_playback_from_position() {
         let wav = unique_temp_path("device-switch.wav");
         let next_wav = unique_temp_path("device-switch-next.wav");
         write_test_wav(&wav);
@@ -5022,13 +5103,7 @@ mod tests {
             Some(2)
         );
 
-        let host = cpal::default_host();
-        let device_id = host
-            .default_output_device()
-            .and_then(|device| device.id().ok())
-            .map(|id| id.to_string())
-            .unwrap_or_default();
-        let rebuilt = NativeAudioEngine::new_with_device(cache_root.clone(), &device_id).unwrap();
+        let rebuilt = NativeAudioEngine::new(cache_root.clone()).unwrap();
         rebuilt
             .restore_playback_snapshot(&snapshot)
             .await
