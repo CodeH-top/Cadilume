@@ -434,6 +434,14 @@ impl Source for ThreadedDecoderSource {
     }
 
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        // Keep the target lock across epoch publication and stale-buffer
+        // recycling. Otherwise the worker can observe the new epoch before
+        // its seek target exists and decode old-position PCM as the new epoch.
+        let mut seek_target = self
+            .state
+            .seek_target
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let epoch = self.state.seek_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(chunk) = self.current.take() {
             self.release_chunk(chunk);
@@ -446,11 +454,8 @@ impl Source for ThreadedDecoderSource {
         self.state.finished.store(false, Ordering::SeqCst);
         self.state.underflowing.store(false, Ordering::SeqCst);
         self.state.set_position_base(pos);
-        *self
-            .state
-            .seek_target
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some((epoch, pos));
+        *seek_target = Some((epoch, pos));
+        drop(seek_target);
         self.state.notify_worker();
         if let Some(control) = self.state.reader_control.as_ref() {
             control.interrupt_reader();
