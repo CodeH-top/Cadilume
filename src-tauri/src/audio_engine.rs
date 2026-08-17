@@ -770,8 +770,6 @@ impl TestMixerSink {
         const CHANNELS: u16 = 2;
         const SAMPLE_RATE: u32 = 48_000;
         const TICK: Duration = Duration::from_millis(10);
-        const SAMPLES_PER_TICK: usize =
-            (CHANNELS as usize * SAMPLE_RATE as usize * TICK.as_millis() as usize) / 1_000;
 
         let (mixer, mut source) = rodio::mixer::mixer(
             std::num::NonZeroU16::new(CHANNELS).expect("test channels are non-zero"),
@@ -782,15 +780,25 @@ impl TestMixerSink {
         let worker = std::thread::Builder::new()
             .name("cadilume-test-mixer".to_string())
             .spawn(move || {
+                let clock_started = std::time::Instant::now();
+                let samples_per_second = CHANNELS as u128 * SAMPLE_RATE as u128;
+                let mut emitted_samples = 0u128;
                 while !shutdown_for_worker.load(Ordering::SeqCst) {
-                    let tick_started = std::time::Instant::now();
-                    for _ in 0..SAMPLES_PER_TICK {
+                    // Derive the target from an absolute clock. Parallel test
+                    // load can delay a worker well beyond one tick; catching
+                    // up here preserves media time instead of accumulating
+                    // scheduler drift and making gapless assertions flaky.
+                    let elapsed = clock_started.elapsed();
+                    let target_samples = elapsed.as_nanos() * samples_per_second / 1_000_000_000;
+                    let due_samples = target_samples.saturating_sub(emitted_samples);
+                    for _ in 0..usize::try_from(due_samples).unwrap_or(usize::MAX) {
                         let _ = source.next();
                     }
+                    emitted_samples = target_samples;
                     if shutdown_for_worker.load(Ordering::SeqCst) {
                         break;
                     }
-                    std::thread::park_timeout(TICK.saturating_sub(tick_started.elapsed()));
+                    std::thread::park_timeout(TICK);
                 }
             })?;
         Ok(Self {
