@@ -92,13 +92,13 @@ Cadilume 是一个面向 macOS 与 Windows 的 Plex 音乐桌面客户端，目�
 
 ## 下载与更新
 
-`Release macOS` GitHub Actions 工作流只允许手动触发，并且只构建 macOS arm64。运行时填写 `0.2.0` 这类稳定版本（也接受 `v0.2.0` 或 `V0.2.0`），工作流会先把该版本同步到全部应用清单再构建。默认模式仅把 DMG 与 updater 文件保存为 workflow artifacts；从 `main` 主动勾选发布时，工作流还会创建并推送 `release: v0.2.0` 提交，先向草稿上传全部资产，确认 DMG、updater 归档、签名和更新清单齐全后，才公开并冻结规范化的 `v0.2.0` [GitHub Release](https://github.com/CodeH-top/Cadilume/releases)。普通 push、合并与创建标签都不会自动运行该工作流。
+`Build desktop` GitHub Actions 工作流只允许手动触发，并行构建 macOS arm64 与 Windows x64。运行前必须先把同一个稳定版本人工更新到 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 `src-tauri/Cargo.lock` 中的 Cadilume 包条目，并随源代码提交；运行时可填写 `0.2.2`、`v0.2.2` 或 `V0.2.2`，该输入只用于校验，工作流不会改写或提交版本文件。默认模式把 DMG、NSIS 安装包、应用和两端签名 updater 文件保存为 workflow artifacts；从 `main` 主动勾选发布时，工作流会等待两端全部通过，确认本次构建提交仍是远端最新 `main`，再向草稿上传两端资产、生成唯一的双平台 `latest.json`，完整校验后才公开并冻结规范化的 `v0.2.2` [GitHub Release](https://github.com/CodeH-top/Cadilume/releases)。普通 push、合并与创建标签都不会自动运行该工作流。
 
 发行构建通过 **设置 → 应用更新** 检查该清单。自动检查默认开启，也可以关闭；下载安装仍须由用户明确点击，因为安装完成后 Cadilume 会重启。Debug 与浏览器预览构建无法调用 updater，也无法修改该偏好。
 
-> 当前 macOS CI 使用 ad-hoc 签名且未公证，macOS 可能要求用户在“隐私与安全性”中手动放行。面向普通用户的正式公开分发仍需 Apple Developer ID Application 证书、hardened runtime、公证和票据装订。
+> 当前 macOS CI 使用 ad-hoc 签名且未公证。Windows CI 会生成带 Tauri updater 签名的 NSIS 包，但安装器尚未做 Authenticode 签名，也仍需 Windows 10/11 实机验收。面向普通用户正式分发时，macOS 仍需 Developer ID、公证和票据装订；Windows 仍需 Authenticode 签名与时间戳。
 
-Windows x64 NSIS 安装包和便携 ZIP 仍处于计划阶段，尚未发布。安装版与便携版需要不同的更新替换语义，实施步骤和真机验收门禁见 [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md)。维护者密钥用途、GitHub Secrets 和发布步骤见 [`docs/RELEASING.md`](docs/RELEASING.md)。
+统一工作流现已生成 Windows x64 NSIS 安装包及对应 updater 归档。便携 ZIP 仍是独立的后续通道，不能直接消费 NSIS updater 条目；剩余真机与签名门禁见 [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md)。维护者密钥用途、GitHub Secrets 和发布步骤见 [`docs/RELEASING.md`](docs/RELEASING.md)。
 
 ## 部署与运行
 
@@ -125,7 +125,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build --debug --no-bundle
 ```
 
-创建发布标签前，先确认三处应用版本一致：
+运行发布构建前，先确认已提交的四处应用版本一致：
 
 ```bash
 pnpm verify:release-version
@@ -155,7 +155,7 @@ pnpm verify:windows:cross
 
 交叉门禁会编译 Windows 代码路径和测试二进制，并链接 debug Windows PE 可执行文件；它不会运行这些二进制，也不能验收 Windows 运行时集成与安装器。`verify:windows:bundle` 会在 Windows 上生成用于本地验收的未签名 debug NSIS 安装包。正式公开分发时，请分别配置 Apple Developer ID、公证与票据装订，或 Windows 代码签名。
 
-GitHub macOS 发布工作流位于 [`.github/workflows/release-macos.yml`](.github/workflows/release-macos.yml)；公开发布必须从 `main` 手动执行，输入的稳定版本会先同步到应用清单，并作为 release 提交、规范标签和 Release 版本的唯一来源。
+GitHub 双平台统一工作流位于 [`.github/workflows/build-desktop.yml`](.github/workflows/build-desktop.yml)；公开发布必须从 `main` 手动执行且两端全部通过，输入的稳定版本必须与已提交的应用版本一致。工作流直接发布已验证的源提交，不创建或推送版本提交。
 
 ## 主要依赖
 

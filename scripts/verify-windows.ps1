@@ -30,7 +30,9 @@ try {
     Invoke-Step "前端单元测试" { pnpm test }
     Invoke-Step "前端生产构建" { pnpm build }
     Invoke-Step "Rust 格式检查" { cargo fmt --manifest-path src-tauri/Cargo.toml --check }
-    Invoke-Step "Rust 测试" { cargo test --manifest-path src-tauri/Cargo.toml --locked }
+    # Native audio tests create real WASAPI streams. Serial execution prevents
+    # overlapping teardown callbacks from crashing the Windows test process.
+    Invoke-Step "Rust 测试" { cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1 }
     Invoke-Step "Rust Windows Release 检查" { cargo check --manifest-path src-tauri/Cargo.toml --release --locked }
     Invoke-Step "Tauri Windows 构建" {
         if ($Bundle) {

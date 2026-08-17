@@ -76,11 +76,11 @@ pnpm verify:windows:bundle
 1. Windows 工具链和仓库表面检查
 2. `pnpm install --frozen-lockfile`（除非传入 `-SkipInstall`）
 3. TypeScript 检查、前端测试和构建
-4. `cargo fmt --check`、Rust 测试与 release 检查（覆盖 Credential Manager 路径）
+4. `cargo fmt --check`、单线程 Rust 测试与 release 检查（覆盖 Credential Manager 路径；单线程避免多个真实 WASAPI 流在测试退出时并发销毁）
 5. Tauri Windows debug 构建
 6. 可选的 NSIS 生成和 `git diff --check`
 
-GitHub Actions 的 `windows-latest` runner 会自动执行完整 NSIS 门禁并上传未签名 debug 安装包。它验证 MSVC/Windows SDK、Tauri 资源和 NSIS 配置，但不替代本地音频设备验收。
+统一 `Build desktop` GitHub Actions 的 `windows-latest` job 会执行完整 Windows 门禁并构建 release NSIS/updater；非发布模式把它们保存为 workflow artifacts，公开模式只有 macOS 与 Windows 都成功后才进入汇总发布。它验证 MSVC/Windows SDK、Tauri 资源、updater 签名和 NSIS 配置，但不替代本地音频设备与窗口交互验收。
 
 macOS 上可用已安装的 `cargo-xwin` 做交叉检查：
 

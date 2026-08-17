@@ -1,0 +1,455 @@
+name: Build desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 校验两端制品后创建公开 GitHub Release
+        required: true
+        type: boolean
+        default: false
+      release_version:
+        description: 校验版本，必须与仓库已提交版本一致（例如 0.2.2、v0.2.2 或 V0.2.2）
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-desktop
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Verify release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.release_version.outputs.version }}
+      tag: ${{ steps.release_version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify committed release version
+        id: release_version
+        env:
+          CADILUME_RELEASE_VERSION: ${{ inputs.release_version }}
+          CADILUME_PUBLISH: ${{ inputs.publish }}
+        run: pnpm verify:release-version
+
+      - name: Verify release tag availability
+        env:
+          CADILUME_PUBLISH: ${{ inputs.publish }}
+          CADILUME_RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${CADILUME_PUBLISH}" == "true" ]] && git ls-remote --exit-code --tags origin "refs/tags/${CADILUME_RELEASE_TAG}" >/dev/null 2>&1; then
+            existing_release_is_draft="$(gh release view "${CADILUME_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null || true)"
+            if [[ "${existing_release_is_draft}" != "true" ]]; then
+              echo "::error::发布标签 ${CADILUME_RELEASE_TAG} 已存在，且不属于可恢复的草稿 Release"
+              exit 1
+            fi
+            echo "::notice::将恢复同标签的现有草稿 Release"
+          fi
+
+  build-macos:
+    name: Build macOS arm64
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 75
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Setup Rust arm64 target
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+          rustup target add aarch64-apple-darwin
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: macos-arm64-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            macos-arm64-cargo-
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify committed release version
+        env:
+          CADILUME_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          CADILUME_PUBLISH: ${{ inputs.publish }}
+        run: pnpm verify:release-version
+
+      - name: Run frontend validation
+        run: |
+          pnpm check
+          pnpm test
+          pnpm build
+
+      - name: Run macOS Rust validation
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Verify updater signing key
+        run: |
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]]; then
+            echo "::error::缺少 TAURI_SIGNING_PRIVATE_KEY，无法生成 macOS updater 签名"
+            exit 1
+          fi
+
+      - name: Build macOS app, DMG, and updater
+        run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json --ci
+
+      - name: Verify packaged macOS application and DMG
+        env:
+          CADILUME_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          bundle_root="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          apps=("${bundle_root}/macos/"*.app)
+          dmgs=("${bundle_root}/dmg/"*.dmg)
+          updater_archives=("${bundle_root}/macos/"*.app.tar.gz)
+          updater_signatures=("${bundle_root}/macos/"*.app.tar.gz.sig)
+          if [[ ${#apps[@]} -ne 1 || ${#dmgs[@]} -ne 1 ]]; then
+            echo "::error::应生成且仅生成一个 macOS .app 和一个 DMG"
+            exit 1
+          fi
+          if [[ ${#updater_archives[@]} -ne 1 || ${#updater_signatures[@]} -ne 1 ]]; then
+            echo "::error::缺少完整的 macOS updater 归档或签名"
+            exit 1
+          fi
+
+          app="${apps[0]}"
+          dmg="${dmgs[0]}"
+          executable="${app}/Contents/MacOS/Cadilume"
+          info_plist="${app}/Contents/Info.plist"
+          test -x "${executable}"
+          test -f "${app}/Contents/Resources/icon.icns"
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${info_plist}")" == "top.codeh.cadilume" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${info_plist}")" == "${CADILUME_RELEASE_VERSION}" ]]
+          lipo -verify_arch arm64 "${executable}"
+          codesign --verify --deep --strict --verbose=2 "${app}"
+
+          linked_libraries="$(otool -L "${executable}")"
+          grep -q '/System/Library/Frameworks/CoreAudio.framework' <<<"${linked_libraries}"
+          grep -q '/System/Library/Frameworks/AudioToolbox.framework' <<<"${linked_libraries}"
+          if grep -Eq '/(opt/homebrew|opt/local|usr/local)/' <<<"${linked_libraries}"; then
+            echo "::error::发行程序链接了禁止的外部运行依赖"
+            printf '%s\n' "${linked_libraries}"
+            exit 1
+          fi
+
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "${mount_dir}" -quiet >/dev/null 2>&1 || true
+            rmdir "${mount_dir}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          hdiutil attach "${dmg}" -readonly -nobrowse -mountpoint "${mount_dir}" -quiet
+          dmg_apps=("${mount_dir}/"*.app)
+          if [[ ${#dmg_apps[@]} -ne 1 ]]; then
+            echo "::error::DMG 内应包含且仅包含一个 .app"
+            exit 1
+          fi
+          dmg_app="${dmg_apps[0]}"
+          dmg_executable="${dmg_app}/Contents/MacOS/Cadilume"
+          test -x "${dmg_executable}"
+          codesign --verify --deep --strict --verbose=2 "${dmg_app}"
+          cmp "${executable}" "${dmg_executable}"
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${dmg_app}/Contents/Info.plist")" == "top.codeh.cadilume" ]]
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cadilume-macos-arm64
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          compression-level: 0
+
+  build-windows:
+    name: Build Windows x64
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Setup Rust MSVC
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-msvc --profile minimal --component rustfmt
+          rustup default stable-msvc
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            src-tauri\target
+          key: windows-x64-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            windows-x64-cargo-
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify committed release version
+        shell: pwsh
+        env:
+          CADILUME_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          CADILUME_PUBLISH: ${{ inputs.publish }}
+        run: pnpm verify:release-version
+
+      - name: Run Windows validation
+        shell: pwsh
+        run: .\scripts\verify-windows.ps1 -SkipInstall
+
+      - name: Verify updater signing key
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "缺少 TAURI_SIGNING_PRIVATE_KEY，无法生成 Windows updater 签名"
+          }
+
+      - name: Build Windows NSIS installer and updater
+        shell: pwsh
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.release.conf.json --ci
+
+      - name: Verify Windows installer and updater
+        shell: pwsh
+        env:
+          CADILUME_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $bundleRoot = "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis"
+          $installers = @(Get-ChildItem $bundleRoot -Filter "*-setup.exe" -File)
+          $archives = @(Get-ChildItem $bundleRoot -Filter "*.nsis.zip" -File)
+          $signatures = @(Get-ChildItem $bundleRoot -Filter "*.nsis.zip.sig" -File)
+          if ($installers.Count -ne 1 -or $archives.Count -ne 1 -or $signatures.Count -ne 1) {
+            throw "Windows 应恰好生成一个 NSIS 安装器、一个 updater 归档和一个签名"
+          }
+          if ($installers[0].Name -notmatch [regex]::Escape($env:CADILUME_RELEASE_VERSION)) {
+            throw "Windows 安装器文件名没有包含已校验版本 $env:CADILUME_RELEASE_VERSION"
+          }
+          if ($signatures[0].Length -eq 0) {
+            throw "Windows updater 签名不能为空"
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cadilume-windows-x64
+          path: |
+            src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*-setup.exe
+            src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.nsis.zip
+            src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.nsis.zip.sig
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish immutable desktop release
+    if: ${{ inputs.publish }}
+    needs: [prepare, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download validated desktop artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cadilume-*
+          path: desktop-artifacts
+          merge-multiple: false
+
+      - name: Verify release source commit
+        id: release_source
+        env:
+          CADILUME_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          CADILUME_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          CADILUME_PUBLISH: "true"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch origin --prune --tags
+          release_sha="$(git rev-parse HEAD)"
+          remote_main_sha="$(git rev-parse origin/main)"
+          if [[ "${release_sha}" != "${remote_main_sha}" ]]; then
+            echo "::error::main 在桌面构建期间已更新，请从最新 main 重新运行"
+            exit 1
+          fi
+
+          pnpm verify:release-version
+          existing_draft_target="$(gh release view "${CADILUME_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish --jq 'select(.isDraft) | .targetCommitish' 2>/dev/null || true)"
+          if [[ -n "${existing_draft_target}" && "${existing_draft_target}" != "${release_sha}" ]]; then
+            echo "::error::现有草稿指向 ${existing_draft_target}，本次已验证的发布源提交为 ${release_sha}；请先处理旧草稿"
+            exit 1
+          fi
+          echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create draft and upload desktop assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CADILUME_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          CADILUME_RELEASE_SHA: ${{ steps.release_source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          existing_release="$(gh release view "${CADILUME_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish --jq '[.isDraft, .targetCommitish] | @tsv' 2>/dev/null || true)"
+          if [[ -n "${existing_release}" ]]; then
+            IFS=$'\t' read -r existing_is_draft existing_target <<<"${existing_release}"
+            if [[ "${existing_is_draft}" != "true" ]]; then
+              echo "::error::${CADILUME_RELEASE_TAG} 已公开，不能覆盖不可变 Release"
+              exit 1
+            fi
+            if [[ "${existing_target}" != "${CADILUME_RELEASE_SHA}" ]]; then
+              echo "::error::现有草稿指向 ${existing_target}，本次构建指向 ${CADILUME_RELEASE_SHA}；拒绝混用不同提交的制品"
+              exit 1
+            fi
+            echo "::notice::复用 ${CADILUME_RELEASE_TAG} 的现有草稿"
+          else
+            gh release create "${CADILUME_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${CADILUME_RELEASE_SHA}" \
+              --title "Cadilume ${CADILUME_RELEASE_TAG}" \
+              --notes "macOS arm64 and Windows x64 release. The macOS build is currently ad-hoc signed and not notarized; the Windows build is not Authenticode-signed." \
+              --generate-notes \
+              --draft
+          fi
+
+          mapfile -d '' release_assets < <(find desktop-artifacts -type f \( \
+            -name '*.dmg' -o \
+            -name '*.app.tar.gz' -o \
+            -name '*.app.tar.gz.sig' -o \
+            -name '*-setup.exe' -o \
+            -name '*.nsis.zip' -o \
+            -name '*.nsis.zip.sig' \
+          \) -print0)
+          if [[ "${#release_assets[@]}" -ne 6 ]]; then
+            echo "::error::期望上传 6 个桌面 Release 文件，实际为 ${#release_assets[@]}"
+            printf '%s\n' "${release_assets[@]}"
+            exit 1
+          fi
+          gh release upload "${CADILUME_RELEASE_TAG}" "${release_assets[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
+
+      - name: Generate and upload combined updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CADILUME_ARTIFACT_ROOT: desktop-artifacts
+          CADILUME_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          CADILUME_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          pnpm create:update-manifest
+          gh release upload "${CADILUME_RELEASE_TAG}" latest.json --repo "${GITHUB_REPOSITORY}" --clobber
+
+      - name: Verify assets and publish immutable Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CADILUME_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          asset_names="$(gh release view "${CADILUME_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          asset_count="$(awk 'NF { count += 1 } END { print count + 0 }' <<<"${asset_names}")"
+          if [[ "${asset_count}" -ne 7 ]]; then
+            echo "::error::草稿 Release 应恰好包含 7 个资产，实际为 ${asset_count}"
+            printf '%s\n' "${asset_names}"
+            exit 1
+          fi
+          for required_pattern in '\.dmg$' '\.app\.tar\.gz$' '\.app\.tar\.gz\.sig$' '-setup\.exe$' '\.nsis\.zip$' '\.nsis\.zip\.sig$' '^latest\.json$'; do
+            if ! grep -Eq -- "${required_pattern}" <<<"${asset_names}"; then
+              echo "::error::草稿 Release 缺少必要资产（${required_pattern}），保持草稿且不公开"
+              exit 1
+            fi
+          done
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const manifest = JSON.parse(readFileSync("latest.json", "utf8"));
+            for (const target of ["darwin-aarch64", "darwin-aarch64-app", "windows-x86_64", "windows-x86_64-nsis"]) {
+              if (!manifest.platforms?.[target]?.url || !manifest.platforms?.[target]?.signature) {
+                throw new Error("latest.json 缺少 " + target);
+              }
+            }
+          '
+          gh release edit "${CADILUME_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false

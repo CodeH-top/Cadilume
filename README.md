@@ -92,13 +92,13 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 
 ## Downloads and updates
 
-The manually triggered `Release macOS` GitHub Actions workflow builds macOS arm64 only. Enter a stable version such as `0.2.0` (`v0.2.0` and `V0.2.0` are also accepted); the workflow applies it to all application manifests before building. Its default mode stores DMG and updater files as workflow artifacts. When publish is enabled from `main`, the workflow also creates and pushes a `release: v0.2.0` commit, uploads every asset to a draft, verifies the DMG and signed updater set, and only then publishes the canonical immutable `v0.2.0` [GitHub Release](https://github.com/CodeH-top/Cadilume/releases). Pushes, merges, and tag creation do not run this workflow automatically.
+The manually triggered `Build desktop` GitHub Actions workflow builds macOS arm64 and Windows x64 in parallel. Before running it, update and commit the same stable version in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the Cadilume package entry in `src-tauri/Cargo.lock`. Enter that committed version as `0.2.2`, `v0.2.2`, or `V0.2.2`; the input is validation-only, and the workflow never rewrites or commits version files. Its default mode stores the DMG, NSIS installer, applications, and signed updater files as workflow artifacts. When publish is enabled from `main`, the workflow waits for both platforms, verifies that the built commit is still the current remote `main`, uploads both platforms to a draft, generates one combined `latest.json`, verifies every asset, and only then publishes the canonical immutable `v0.2.2` [GitHub Release](https://github.com/CodeH-top/Cadilume/releases). Pushes, merges, and tag creation do not run this workflow automatically.
 
 Release builds check that manifest through **Settings → App Update**. Automatic checking is enabled by default and can be turned off. Downloading and installing still requires an explicit user action because Cadilume restarts after installation. Debug and browser-preview builds cannot call the updater or change its preference.
 
-> Current macOS CI builds are ad-hoc signed and are not notarized. macOS may require manual approval in Privacy & Security. Normal public distribution still requires an Apple Developer ID Application certificate, hardened runtime, notarization, and stapling.
+> Current macOS CI builds are ad-hoc signed and are not notarized. Windows CI produces a Tauri-updater-signed NSIS package, but the installer is not Authenticode-signed and still requires real Windows 10/11 acceptance. Normal public distribution requires Apple Developer ID signing, notarization, and stapling on macOS, plus Authenticode signing and timestamping on Windows.
 
-Windows x64 NSIS and portable ZIP releases are planned but are not published yet. The installer and portable updater have different replacement semantics; see [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md) for the implementation and real-device acceptance gates. Maintainer key roles, GitHub secrets, and the release procedure are documented in [`docs/RELEASING.md`](docs/RELEASING.md).
+The unified workflow now produces the Windows x64 NSIS installer and its updater archive. A portable ZIP remains a separate future channel because it cannot safely consume the NSIS updater entry; see [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md) for the remaining real-device and signing gates. Maintainer key roles, GitHub secrets, and the release procedure are documented in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Deploy and run
 
@@ -125,7 +125,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build --debug --no-bundle
 ```
 
-Before tagging a release, verify that all three application version sources agree:
+Before running a release build, verify that all four committed application version sources agree:
 
 ```bash
 pnpm verify:release-version
@@ -155,7 +155,7 @@ pnpm verify:windows:cross
 
 The cross-platform gate compiles the Windows code paths and test binaries, then links a debug Windows PE executable. It does not run those binaries or validate Windows runtime integrations and the installer. `verify:windows:bundle` produces an unsigned debug NSIS installer for local acceptance on Windows. Public distribution should use Apple Developer ID signing, notarization, and stapling on macOS, or code signing on Windows.
 
-The GitHub macOS release workflow is defined in [`.github/workflows/release-macos.yml`](.github/workflows/release-macos.yml). Publishing is manual, is restricted to `main`, and rejects a `vX.Y.Z` tag when the tag and application version differ.
+The unified GitHub desktop workflow is defined in [`.github/workflows/build-desktop.yml`](.github/workflows/build-desktop.yml). Publishing is manual, is restricted to `main`, requires both platforms to pass, and rejects an input version that differs from the committed application version. It publishes the verified source commit directly and never creates or pushes a version commit.
 
 ## Main dependencies
 
