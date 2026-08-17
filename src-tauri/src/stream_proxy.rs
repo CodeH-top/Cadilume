@@ -100,11 +100,11 @@ impl StreamTarget {
         })
     }
 
-    /// Pin auto quality before issuing a ticket. A ticket can serve many Range
-    /// requests and must therefore keep one media representation throughout
-    /// its lifetime, even if connection ordering changes later.
-    fn resolve_for_connection(&mut self, connection: &StreamConnectionSnapshot) -> String {
-        let effective = effective_quality(&self.quality, connection);
+    /// Pin automatic quality to the original Part before issuing a ticket. A
+    /// ticket can serve many Range requests and must keep one representation
+    /// throughout its lifetime; topology never selects a media format.
+    fn resolve_quality(&mut self) -> String {
+        let effective = effective_quality(&self.quality);
         self.quality = effective.clone();
         self.public_bitrate_marker = public_bitrate_marker(&effective);
         effective
@@ -418,7 +418,7 @@ pub fn stream_url(
     if server.connections.is_empty() {
         return Err("服务器没有可用连接".to_string());
     }
-    let effective = target.resolve_for_connection(&server.connections[0]);
+    let effective = target.resolve_quality();
     let connection_kind = if server.connections[0].local {
         "local"
     } else if server.connections[0].relay {
@@ -1138,11 +1138,8 @@ fn build_upstream_urls(
     }
 
     if target.quality != "original" {
-        let bitrate = target
-            .quality
-            .parse::<u16>()
-            .map_err(|_| anyhow!("无效的转码码率"))?
-            .clamp(64, 320)
+        let bitrate = public_bitrate_marker(&target.quality)
+            .ok_or_else(|| anyhow!("无效的转码码率"))?
             .to_string();
         for path in [
             // Plex Web's own music transcoder uses `/music/:/transcode/universal/start`
@@ -1165,13 +1162,12 @@ fn build_upstream_urls(
                 .append_pair("fastSeek", "1")
                 .append_pair("directPlay", "0")
                 .append_pair("directStream", "0")
-                .append_pair("directStreamAudio", "1")
+                .append_pair("directStreamAudio", "0")
                 .append_pair("container", "mp3")
                 .append_pair("audioCodec", "mp3")
                 .append_pair("audioChannels", "2")
                 .append_pair("location", if connection.local { "lan" } else { "wan" })
                 .append_pair("musicBitrate", &bitrate)
-                .append_pair("maxAudioBitrate", &bitrate)
                 .append_pair("session", &target.session_id)
                 .append_pair("offset", "0")
                 .append_pair("copyts", "1")
@@ -1245,11 +1241,9 @@ fn same_origin(left: &Url, right: &Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
-fn effective_quality(quality: &str, connection: &StreamConnectionSnapshot) -> String {
+fn effective_quality(quality: &str) -> String {
     match quality {
-        "auto" if connection.local => "original".to_string(),
-        "auto" if connection.relay => "192".to_string(),
-        "auto" => "320".to_string(),
+        "auto" => "original".to_string(),
         quality => quality.to_string(),
     }
 }
@@ -1446,10 +1440,10 @@ mod tests {
     }
 
     #[test]
-    fn auto_quality_is_resolved_before_ticket_and_pinned() {
+    fn auto_quality_is_original_first_and_pinned_across_topologies() {
         let local = connection("http://192.168.1.5:32400", true, false);
         let mut local_target = target("auto");
-        assert_eq!(local_target.resolve_for_connection(&local), "original");
+        assert_eq!(local_target.resolve_quality(), "original");
         assert_eq!(local_target.quality, "original");
         let urls = build_upstream_urls(&local_target, &local, "client-1").unwrap();
         assert_eq!(urls.len(), 1);
@@ -1457,22 +1451,19 @@ mod tests {
 
         let remote = connection("http://media.example.com:10324", false, false);
         let mut remote_target = target("auto");
-        assert_eq!(remote_target.resolve_for_connection(&remote), "320");
-        assert_eq!(remote_target.public_bitrate_marker, Some(320));
+        assert_eq!(remote_target.resolve_quality(), "original");
+        assert_eq!(remote_target.public_bitrate_marker, None);
         let urls = build_upstream_urls(&remote_target, &remote, "client-1").unwrap();
-        assert!(urls.iter().all(|url| url.path().contains("transcode")));
-        assert!(urls
-            .iter()
-            .all(|url| url.query().unwrap().contains("musicBitrate=320")));
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].path().starts_with("/library/parts/"));
 
         let relay = connection("https://relay.example.com", false, true);
         let mut relay_target = target("auto");
-        assert_eq!(relay_target.resolve_for_connection(&relay), "192");
-        assert_eq!(relay_target.public_bitrate_marker, Some(192));
+        assert_eq!(relay_target.resolve_quality(), "original");
+        assert_eq!(relay_target.public_bitrate_marker, None);
         let urls = build_upstream_urls(&relay_target, &relay, "client-1").unwrap();
-        assert!(urls
-            .iter()
-            .all(|url| url.query().unwrap().contains("musicBitrate=192")));
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].path().starts_with("/library/parts/"));
 
         assert!(build_upstream_urls(&target("auto"), &remote, "client-1").is_err());
 
@@ -1655,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_urls_stay_on_discovered_server_and_never_include_token() {
+    fn upstream_urls_stay_on_discovered_server_and_use_exact_transcode_rates() {
         let direct = target("original");
         let urls = build_upstream_urls(
             &direct,
@@ -1669,33 +1660,52 @@ mod tests {
         );
         assert!(!urls[0].as_str().contains("X-Plex-Token"));
 
-        let transcoded = target("320");
-        let urls = build_upstream_urls(
-            &transcoded,
-            &connection("https://music.example.test:32400", false, false),
-            "client-id",
-        )
-        .unwrap();
-        assert_eq!(urls.len(), 2);
-        assert!(urls[0].path().ends_with("/universal/start"));
-        assert!(urls[1].path().ends_with("/universal/start.mp3"));
-        let query = urls[0].query().unwrap();
-        assert!(query.contains("musicBitrate=320"));
-        assert!(query.contains("directStreamAudio=1"));
-        assert!(query.contains("fastSeek=1"));
-        assert!(query.contains("container=mp3"));
-        assert!(query.contains("audioCodec=mp3"));
-        assert!(query.contains("audioChannels=2"));
-        assert!(query.contains("X-Plex-Chunked=1"));
-        assert!(!query.contains("X-Plex-Token"));
-        assert_eq!(
-            urls[0]
-                .query_pairs()
-                .find(|(name, _)| name == "X-Plex-Client-Profile-Extra")
-                .map(|(_, value)| value.into_owned())
-                .as_deref(),
-            Some(TRANSCODE_PROFILE)
-        );
+        for rate in [320_u16, 256, 192] {
+            let expected_rate = rate.to_string();
+            let urls = build_upstream_urls(
+                &target(&expected_rate),
+                &connection("https://music.example.test:32400", false, false),
+                "client-id",
+            )
+            .unwrap();
+            assert_eq!(urls.len(), 2);
+            assert!(urls[0].path().ends_with("/universal/start"));
+            assert!(urls[1].path().ends_with("/universal/start.mp3"));
+            let query = urls[0].query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(
+                query.get("musicBitrate").map(|value| value.as_ref()),
+                Some(expected_rate.as_str())
+            );
+            assert_eq!(
+                query.get("directStreamAudio").map(|value| value.as_ref()),
+                Some("0")
+            );
+            assert!(!query.contains_key("maxAudioBitrate"));
+            assert_eq!(query.get("fastSeek").map(|value| value.as_ref()), Some("1"));
+            assert_eq!(
+                query.get("container").map(|value| value.as_ref()),
+                Some("mp3")
+            );
+            assert_eq!(
+                query.get("audioCodec").map(|value| value.as_ref()),
+                Some("mp3")
+            );
+            assert_eq!(
+                query.get("audioChannels").map(|value| value.as_ref()),
+                Some("2")
+            );
+            assert_eq!(
+                query.get("X-Plex-Chunked").map(|value| value.as_ref()),
+                Some("1")
+            );
+            assert!(!query.contains_key("X-Plex-Token"));
+            assert_eq!(
+                query
+                    .get("X-Plex-Client-Profile-Extra")
+                    .map(|value| value.as_ref()),
+                Some(TRANSCODE_PROFILE)
+            );
+        }
         assert!(!TRANSCODE_PROFILE.contains("replace=true"));
     }
 
@@ -1872,40 +1882,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_quality_matches_connection_kind() {
-        assert_eq!(
-            effective_quality("auto", &connection("https://local.test", true, false)),
-            "original"
-        );
-        assert_eq!(
-            effective_quality("auto", &connection("https://remote.test", false, false)),
-            "320"
-        );
-        assert_eq!(
-            effective_quality("auto", &connection("https://relay.test", false, true)),
-            "192"
-        );
-        assert_eq!(
-            public_bitrate_marker(&effective_quality(
-                "auto",
-                &connection("https://remote.test", false, false)
-            )),
-            Some(320)
-        );
-        assert_eq!(
-            public_bitrate_marker(&effective_quality(
-                "auto",
-                &connection("https://relay.test", false, true)
-            )),
-            Some(192)
-        );
-        assert_eq!(
-            public_bitrate_marker(&effective_quality(
-                "auto",
-                &connection("https://local.test", true, false)
-            )),
-            None
-        );
+    fn auto_quality_is_independent_from_connection_kind() {
+        assert_eq!(effective_quality("auto"), "original");
+        assert_eq!(effective_quality("original"), "original");
+        assert_eq!(effective_quality("320"), "320");
+        assert_eq!(public_bitrate_marker(&effective_quality("auto")), None);
     }
 
     #[test]

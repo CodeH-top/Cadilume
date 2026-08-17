@@ -3,6 +3,7 @@ export type CloseBehavior = "panel" | "tray" | "quit";
 export type CredentialStatus = "available" | "missing" | "unavailable";
 export type LibraryView = "home" | "albums" | "artists" | "tracks" | "search" | "settings";
 export type StreamQuality = "auto" | "original" | "320" | "256" | "192";
+export const DEFAULT_STREAM_QUALITY: StreamQuality = "original";
 export type ThemeMode = "light" | "dark";
 /** Fixed Cadilume visual presets. These are visual-only and never change the active media provider. */
 export type BrandPreset = "amber" | "verdant" | "azure";

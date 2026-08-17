@@ -214,8 +214,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .app-shell > .app-titlebar { grid-column: 1 / -1; grid-row: 1; }
 .sidebar { grid-column: 1; grid-row: 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); background: var(--sidebar); padding: 0 12px 14px; }
 .brand, .login-brand { display: flex; align-items: center; gap: 10px; padding: 0 10px; font-size: 17px; font-weight: 750; letter-spacing: -0.01em; }
-.brand-mark { display: inline-grid; place-items: center; width: 31px; height: 31px; color: var(--accent-ink); background: var(--accent); border-radius: 9px; box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 26%, transparent); }
-.brand-mark.large { width: 48px; height: 48px; border-radius: 14px; }
+.brand-mark { display: block; flex: 0 0 auto; width: 31px; height: 31px; object-fit: contain; user-select: none; -webkit-user-drag: none; filter: drop-shadow(0 8px 12px color-mix(in srgb, var(--accent) 24%, transparent)); }
+.brand-mark.large { width: 48px; height: 48px; }
 .sidebar > nav:not(.sidebar-playlists) { flex: 0 0 auto; margin-top: 18px; }
 .nav-label { margin: 0 10px 8px; color: var(--muted-faint); font-size: 12px; font-weight: 750; text-transform: uppercase; letter-spacing: 0.12em; }
 .nav-item { width: 100%; height: 38px; border: 0; display: flex; align-items: center; gap: 11px; padding: 0 11px; color: var(--muted-strong); background: transparent; border-radius: 8px; text-align: left; text-decoration: none; font-size: 13px; font-weight: 650; transition: color 160ms ease, background 160ms ease; }
@@ -949,7 +949,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .splash-brand > span:last-child { display: grid; gap: 2px; }
 .splash-brand strong { color: var(--text); font-size: 16px; }
 .splash-brand small { color: var(--muted); font-size: 12px; }
-.splash-mark { width: 48px; height: 48px; margin: 0; border-radius: 14px; }
+.splash-mark { width: 48px; height: 48px; margin: 0; }
 .splash-stage { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 .splash-stage-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); animation: splash-pulse 1.6s ease-in-out infinite; }
 .splash-main { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(330px, 0.9fr) minmax(420px, 1.1fr); align-items: center; gap: clamp(52px, 7vw, 96px); }
@@ -957,7 +957,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .splash-orbit { position: absolute; border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border)); border-radius: 50%; }
 .splash-orbit-one { width: 296px; height: 296px; animation: splash-orbit 18s linear infinite; }
 .splash-orbit-two { width: 232px; height: 232px; border-style: dashed; opacity: 0.8; animation: splash-orbit-reverse 13s linear infinite; }
-.splash-disc { width: 136px; height: 136px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 48%, transparent); border-radius: 50%; color: var(--accent-ink); background: var(--accent); box-shadow: 0 18px 40px color-mix(in srgb, var(--accent) 28%, transparent), inset 0 0 0 12px color-mix(in srgb, #fff 10%, transparent); }
+.splash-disc { width: 136px; height: 136px; display: block; object-fit: contain; user-select: none; -webkit-user-drag: none; filter: drop-shadow(0 18px 28px color-mix(in srgb, var(--accent) 28%, transparent)); }
 .splash-signal { position: absolute; right: 0; bottom: 25px; display: flex; align-items: center; gap: 4px; height: 70px; padding: 0 9px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--panel) 84%, transparent); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.16); }
 .splash-signal span { width: 4px; min-height: 8px; border-radius: 99px; background: var(--accent); opacity: 0.8; animation: splash-signal 1.2s ease-in-out infinite alternate; }
 .splash-signal span:nth-child(2n) { animation-delay: -0.4s; }

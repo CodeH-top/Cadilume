@@ -138,7 +138,7 @@ import type {
   StreamQuality,
   ThemeMode,
 } from "./types";
-import { formatDuration, trackAlbum, trackArtist } from "./types";
+import { DEFAULT_STREAM_QUALITY, formatDuration, trackAlbum, trackArtist } from "./types";
 import { queueNavigationAvailability, readPersistedPlaybackSession, usePlayer, type PlaybackFailure } from "./usePlayer";
 import { detectOutputPlatform, useOutputDevices } from "./useOutputDevices";
 import { useLyrics } from "./useLyrics";
@@ -178,11 +178,6 @@ const LIBRARY_TRACK_PAGE_SIZE = 50;
 const SOURCE_SYNC_OVERLAY_MINIMUM_MS = 600;
 const SIDE_PANEL_MOTION_MS = 220;
 const STARTUP_TIMEOUT_MS = 45_000;
-const APP_ICON_URLS: Record<BrandPreset, string> = {
-  amber: "/app-icon.svg",
-  verdant: "/app-icon-verdant.svg",
-  azure: "/app-icon-azure.svg",
-};
 type ConnectionKind = "local" | "remote" | "relay" | "disconnected";
 type ResolvedTheme = ThemeMode;
 type ThemeTransitionOrigin = { x: number; y: number };
@@ -411,21 +406,21 @@ function MainApplication({
     </>
   );
 
-  if (uiPreview === "splash") return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen /></AppFrame>);
+  if (uiPreview === "splash") return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} /></AppFrame>);
   if (uiPreview === "login") {
-    return withNotifications(<AppFrame brandPreset={brandPreset}><LoginScreen clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>);
+    return withNotifications(<AppFrame brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>);
   }
   if (uiPreview === "notifications") return withNotifications(<AppFrame brandPreset={brandPreset}><NotificationFixture /></AppFrame>);
-  if (!session && !error) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen /></AppFrame>);
-  if (!session) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>);
+  if (!session && !error) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} /></AppFrame>);
+  if (!session) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>);
   if (session.credentialStatus === "unavailable") {
-    return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError message="无法访问系统凭据存储。请解锁系统钥匙串或凭据管理器后重试。" retry={retryLoad} /></AppFrame>);
+    return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message="无法访问系统凭据存储。请解锁系统钥匙串或凭据管理器后重试。" retry={retryLoad} /></AppFrame>);
   }
   if (!session.authenticated || !session.account) {
-    return withNotifications(<AppFrame brandPreset={brandPreset}><LoginScreen clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
+    return withNotifications(<AppFrame brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
   }
-  if (error) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError message={error} retry={retryLoad} /></AppFrame>);
-  if (!initialLibrary) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen /></AppFrame>);
+  if (error) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message={error} retry={retryLoad} /></AppFrame>);
+  if (!initialLibrary) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} /></AppFrame>);
   return withNotifications(<AppFrame integrated brandPreset={brandPreset}><MusicShell initialSession={session} initialLibrary={initialLibrary} themeMode={themeMode} resolvedTheme={resolvedTheme} brandPreset={brandPreset} onThemeMode={onThemeMode} onBrandPreset={onBrandPreset} appUpdater={appUpdater} notify={notifications.notify} /></AppFrame>);
 }
 
@@ -520,7 +515,7 @@ function AppTitlebar({ children, inactive = false, brandPreset = "amber" }: { ch
       <div className="app-titlebar__drag-region" data-tauri-drag-region aria-hidden="true" />
       <div className="app-titlebar__content">
         <div className="app-titlebar__brand">
-          <img className="app-titlebar__brand-mark" src={APP_ICON_URLS[brandPreset]} alt="" aria-hidden="true" />
+          <BrandIcon className="app-titlebar__brand-mark" preset={brandPreset} size={25} />
           <strong>Cadilume</strong>
         </div>
         {(children || isWindows) && (
@@ -623,7 +618,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   const [statusIconSaving, setStatusIconSaving] = useState(false);
   const [closeBehavior, setCloseBehavior] = useState<CloseBehavior>(initialSession.closeBehavior);
   const [deviceName, setDeviceName] = useState(initialSession.deviceName);
-  const [quality, setQuality] = useState<StreamQuality>(() => readStoredQuality(initialPlaybackSession?.quality));
+  const [quality, setQuality] = useState<StreamQuality>(readStoredQuality);
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>();
   const [nativeCacheStatus, setNativeCacheStatus] = useState<NativeAudioCacheStatus>();
   const [cacheStatusError, setCacheStatusError] = useState<string>();
@@ -4194,7 +4189,7 @@ function SettingsView(props: ContentViewProps) {
       </SettingsGroup>}
       <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放">
         <div className="settings-stack">
-          <div className="field-row"><span><strong>音频质量</strong><small>选择 PMS 返回原始流或兼容质量。</small></span><SettingsSelect label="音频质量" value={props.quality} placeholder="选择音频质量" disabled={false} options={[{ value: "auto", label: "自动" }, { value: "original", label: "始终原始质量" }, { value: "320", label: "320 kbps" }, { value: "256", label: "256 kbps" }, { value: "192", label: "192 kbps" }]} onValueChange={(value) => props.onQuality(value as StreamQuality)} /></div>
+          <div className="field-row"><span><strong>音频质量</strong><small>默认播放原始流；MP3 档位由 PMS 按所选码率转码。</small></span><SettingsSelect label="音频质量" value={props.quality} placeholder="选择音频质量" disabled={false} options={[{ value: "original", label: "原始质量（默认）" }, { value: "auto", label: "自动兼容（原始优先）" }, { value: "320", label: "MP3 · 320 kbps" }, { value: "256", label: "MP3 · 256 kbps" }, { value: "192", label: "MP3 · 192 kbps" }]} onValueChange={(value) => props.onQuality(value as StreamQuality)} /></div>
           {props.outputDevices.platform === "windows" && <WindowsOutputSetting output={props.outputDevices} />}
           <div className="toggle-row">
             <span><strong>预缓冲下一首</strong><small>提前加载队列中的下一首。</small></span>
@@ -5142,14 +5137,14 @@ function PlayerLyricsAction({ hasTrack, canToggleLyrics, lyricsOpen, onToggle }:
   );
 }
 
-function LoginScreen({ clientIdentifier, onAuthenticated }: { clientIdentifier: string; onAuthenticated: () => void | Promise<void> }) {
+function LoginScreen({ brandPreset, clientIdentifier, onAuthenticated }: { brandPreset: BrandPreset; clientIdentifier: string; onAuthenticated: () => void | Promise<void> }) {
   const login = usePlexLogin(clientIdentifier, onAuthenticated);
 
   return (
     <main className="login-screen">
       <section className="login-card">
         <div className="login-card-heading">
-          <div className="login-brand"><span className="brand-mark large"><BrandIcon size={28} /></span><span>Cadilume</span></div>
+          <div className="login-brand"><BrandIcon className="brand-mark large" preset={brandPreset} size={48} /><span>Cadilume</span></div>
           <span className="login-status"><Radio size={14} />安全连接</span>
         </div>
         <div className="login-title-block">
@@ -5402,15 +5397,15 @@ function SearchLoadingState({ query }: { query: string }) {
   );
 }
 
-function SplashScreen() {
+function SplashScreen({ brandPreset }: { brandPreset: BrandPreset }) {
   return (
     <main className="splash-screen" data-testid="splash-screen">
       <section className="splash-content" aria-live="polite" aria-busy="true">
-        <div className="splash-header"><div className="splash-brand"><span className="brand-mark splash-mark"><BrandIcon size={32} /></span><span><strong>Cadilume</strong><small>桌面音乐空间</small></span></div><span className="splash-stage"><span className="splash-stage-dot" />正在启动</span></div>
+        <div className="splash-header"><div className="splash-brand"><BrandIcon className="brand-mark splash-mark" preset={brandPreset} size={48} /><span><strong>Cadilume</strong><small>桌面音乐空间</small></span></div><span className="splash-stage"><span className="splash-stage-dot" />正在启动</span></div>
         <div className="splash-main">
           <div className="splash-visual" aria-hidden="true">
             <div className="splash-orbit splash-orbit-one" /><div className="splash-orbit splash-orbit-two" />
-            <div className="splash-disc"><BrandIcon size={54} /></div>
+            <BrandIcon className="splash-disc" preset={brandPreset} size={136} />
             <div className="splash-signal">{Array.from({ length: 9 }, (_, index) => <span key={index} style={{ height: `${18 + ((index * 17) % 48)}px` }} />)}</div>
           </div>
           <div className="splash-copy">
@@ -5425,8 +5420,8 @@ function SplashScreen() {
   );
 }
 
-function FatalError({ message, retry }: { message: string; retry: () => void }) {
-  return <main className="fatal-screen"><span className="brand-mark large"><BrandIcon size={28} /></span><h1>无法启动 Cadilume</h1><p>{message}</p><button className="primary-button" onClick={retry}><RefreshCw size={17} />重试</button></main>;
+function FatalError({ brandPreset, message, retry }: { brandPreset: BrandPreset; message: string; retry: () => void }) {
+  return <main className="fatal-screen"><BrandIcon className="brand-mark large" preset={brandPreset} size={48} /><h1>无法启动 Cadilume</h1><p>{message}</p><button className="primary-button" onClick={retry}><RefreshCw size={17} />重试</button></main>;
 }
 
 function readNowPlayingMode(): NowPlayingMode {
@@ -5437,14 +5432,14 @@ function readNowPlayingMode(): NowPlayingMode {
   }
 }
 
-function readStoredQuality(fallback: StreamQuality = "auto"): StreamQuality {
+function readStoredQuality(): StreamQuality {
   try {
     const stored = localStorage.getItem("cadilume-quality");
     return stored === "auto" || stored === "original" || stored === "320" || stored === "256" || stored === "192"
       ? stored
-      : fallback;
+      : DEFAULT_STREAM_QUALITY;
   } catch {
-    return fallback;
+    return DEFAULT_STREAM_QUALITY;
   }
 }
 

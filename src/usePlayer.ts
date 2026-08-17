@@ -769,10 +769,9 @@ export function nativeAudioCacheQuality(
 }
 
 /**
- * Return strictly lower compatibility qualities after one native load failed.
- * Each explicit bitrate receives its own loopback ticket and native-cache
- * identity. A bitrate marker still prevents retrying a successful explicit
- * transcode after a later runtime failure.
+ * Automatic compatibility starts with the original Part and then descends
+ * through exact PMS transcode rates. An explicit original/bitrate selection is
+ * strict and never silently changes to another representation.
  */
 export function playbackFallbackQualities(
   requestedQuality: StreamQuality,
@@ -780,6 +779,7 @@ export function playbackFallbackQualities(
   source: string,
   attemptedQualities: readonly StreamQuality[] = [],
 ): FallbackStreamQuality[] {
+  if (requestedQuality !== "auto") return [];
   const effective = sourceStreamQuality(source);
   const activeFallback = FALLBACK_QUALITY_ORDER.includes(activeQuality as FallbackStreamQuality)
     ? activeQuality as FallbackStreamQuality
@@ -787,9 +787,7 @@ export function playbackFallbackQualities(
   const current = effective ?? activeFallback;
   const candidates = current
     ? FALLBACK_QUALITY_ORDER.slice(FALLBACK_QUALITY_ORDER.indexOf(current) + 1)
-    : requestedQuality === "auto" || requestedQuality === "original"
-      ? FALLBACK_QUALITY_ORDER
-      : [];
+    : FALLBACK_QUALITY_ORDER;
   return candidates.filter((quality) => !attemptedQualities.includes(quality));
 }
 
