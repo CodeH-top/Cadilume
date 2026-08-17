@@ -170,7 +170,7 @@ jobs:
           test -f "${app}/Contents/Resources/icon.icns"
           [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${info_plist}")" == "top.codeh.cadilume" ]]
           [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${info_plist}")" == "${CADILUME_RELEASE_VERSION}" ]]
-          lipo -verify_arch arm64 "${executable}"
+          lipo "${executable}" -verify_arch arm64
           codesign --verify --deep --strict --verbose=2 "${app}"
 
           linked_libraries="$(otool -L "${executable}")"
