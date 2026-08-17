@@ -87,6 +87,9 @@ PMS Part / universal transcode
 
 - 当前曲目和已预排曲目各有一个独立解码 worker；worker 执行 symphonia 解码并写入
   固定 1024 frame、按声道对齐的 PCM chunk。
+- 每首曲目的解码源在 append 到共享 `rodio::Player` 队列前，分别连续转换为当前设备
+  mixer 的固定声道数与采样率；媒体进度仍按曲目自身采样率统计。这样 48 kHz 与 44.1 kHz
+  相邻时不会让首曲时钟泄漏到下一首并造成整曲变速、变调。
 - 队列按采样率计算但硬限制为最多约 4 秒、最多 512 个 chunk；实时 Source 只执行
   `try_recv`，不会等待磁盘、网络、锁或 codec。
 - 欠载时 Source 补完整静音 frame 保持声道对齐，状态机随即暂停 Player；累计达到约
@@ -167,8 +170,9 @@ PMS Part / universal transcode
 ## 窗口与发布
 
 - 主窗口默认/最小尺寸为 `1280x820`，保留原生标题栏、macOS 交通灯、阴影和全屏行为。
-- 初始化状态使用全窗、无卡片的单一可视化区域；内容只避开顶部 52px 拖拽/交通灯安全区，
-  不生成居中的卡片边框、圆角或阴影。
+- 启动与未登录状态都使用全窗、无独立标题栏的单一可视化区域；macOS 只保留顶部 52px
+  拖拽/交通灯安全区，Windows 只保留顶部 60px 拖拽区与右上角悬浮窗口控制，不为品牌图标
+  或窗口控制额外占一整行。
 - 关闭主窗口统一最小化并继续播放；菜单栏/通知区域图标是独立持久化偏好。Dock、任务栏
   或状态图标可恢复窗口，状态图标菜单提供播放/暂停与显式退出。
 - macOS 发布需 Developer ID、hardened runtime、notarization 和 stapling；Windows 发布

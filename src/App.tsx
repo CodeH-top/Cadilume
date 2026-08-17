@@ -408,7 +408,7 @@ function MainApplication({
 
   if (uiPreview === "splash") return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} /></AppFrame>);
   if (uiPreview === "login") {
-    return withNotifications(<AppFrame brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>);
+    return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>);
   }
   if (uiPreview === "notifications") return withNotifications(<AppFrame brandPreset={brandPreset}><NotificationFixture /></AppFrame>);
   if (!session && !error) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} /></AppFrame>);
@@ -417,7 +417,7 @@ function MainApplication({
     return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message="无法访问系统凭据存储。请解锁系统钥匙串或凭据管理器后重试。" retry={retryLoad} /></AppFrame>);
   }
   if (!session.authenticated || !session.account) {
-    return withNotifications(<AppFrame brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
+    return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
   }
   if (error) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message={error} retry={retryLoad} /></AppFrame>);
   if (!initialLibrary) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} /></AppFrame>);
@@ -431,15 +431,20 @@ function AppFrame({ children, integrated = false, fullBleed = false, brandPreset
   brandPreset?: BrandPreset;
 }) {
   const isWindows = detectOutputPlatform(navigator) === "windows";
-  const showTitlebar = !integrated && (!fullBleed || isWindows);
+  const showTitlebar = !integrated && !fullBleed;
   return (
     <div
-      className={`app-frame ${integrated ? "is-integrated" : ""} ${fullBleed ? "is-full-bleed" : ""} ${isWindows && fullBleed ? "is-windows-full-bleed" : ""}`.trim()}
+      className={`app-frame ${integrated ? "is-integrated" : ""} ${fullBleed ? "is-full-bleed" : ""}`.trim()}
       data-platform={isWindows ? "windows" : detectOutputPlatform(navigator)}
     >
       {showTitlebar
         ? <AppTitlebar brandPreset={brandPreset} />
-        : fullBleed && <div className="app-frame__full-bleed-drag-region" data-tauri-drag-region aria-hidden="true" />}
+        : fullBleed && (
+          <>
+            <div className="app-frame__full-bleed-drag-region" data-tauri-drag-region aria-hidden="true" />
+            {isWindows && <WindowsWindowControls className="app-frame__full-bleed-window-controls" />}
+          </>
+        )}
       <div className="app-frame-content">{children}</div>
       <TooltipLayer />
     </div>

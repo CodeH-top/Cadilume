@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::{redirect::Policy, Client};
-use rodio::source::SeekError;
+use rodio::source::{SeekError, UniformSourceIterator};
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -124,6 +124,21 @@ impl<S: Source> Source for HandoffMarker<S> {
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
         self.inner.try_seek(pos)
     }
+}
+
+/// Convert every decoded track to the fixed device format before it enters
+/// rodio's shared Player queue. Without this per-track boundary, a gapless
+/// 48 kHz -> 44.1 kHz transition keeps the first track's clock and plays the
+/// second track too fast and too high-pitched.
+fn normalize_source_for_output<S>(
+    source: S,
+    channels: rodio::ChannelCount,
+    sample_rate: rodio::SampleRate,
+) -> UniformSourceIterator<S>
+where
+    S: Source,
+{
+    UniformSourceIterator::new(source, channels, sample_rate)
 }
 
 struct DecodedChunk {
@@ -756,6 +771,14 @@ impl AudioMixerSink {
             Self::Test(sink) => &sink.mixer,
         }
     }
+
+    fn output_format(&self) -> (rodio::ChannelCount, rodio::SampleRate) {
+        match self {
+            Self::Device(sink) => (sink.config().channel_count(), sink.config().sample_rate()),
+            #[cfg(test)]
+            Self::Test(sink) => (sink.channels, sink.sample_rate),
+        }
+    }
 }
 
 /// Unit tests exercise playback timing without opening CoreAudio/WASAPI.
@@ -765,6 +788,8 @@ impl AudioMixerSink {
 #[cfg(test)]
 struct TestMixerSink {
     mixer: rodio::mixer::Mixer,
+    channels: rodio::ChannelCount,
+    sample_rate: rodio::SampleRate,
     shutdown: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -776,10 +801,10 @@ impl TestMixerSink {
         const SAMPLE_RATE: u32 = 48_000;
         const TICK: Duration = Duration::from_millis(10);
 
-        let (mixer, mut source) = rodio::mixer::mixer(
-            std::num::NonZeroU16::new(CHANNELS).expect("test channels are non-zero"),
-            std::num::NonZeroU32::new(SAMPLE_RATE).expect("test sample rate is non-zero"),
-        );
+        let channels = std::num::NonZeroU16::new(CHANNELS).expect("test channels are non-zero");
+        let sample_rate =
+            std::num::NonZeroU32::new(SAMPLE_RATE).expect("test sample rate is non-zero");
+        let (mixer, mut source) = rodio::mixer::mixer(channels, sample_rate);
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_worker = Arc::clone(&shutdown);
         let worker = std::thread::Builder::new()
@@ -808,6 +833,8 @@ impl TestMixerSink {
             })?;
         Ok(Self {
             mixer,
+            channels,
+            sample_rate,
             shutdown,
             worker: Some(worker),
         })
@@ -832,6 +859,8 @@ pub struct NativeAudioEngine {
     player: Mutex<Arc<Player>>,
     #[allow(dead_code)]
     sink: AudioMixerSink,
+    output_channels: rodio::ChannelCount,
+    output_sample_rate: rodio::SampleRate,
     segment_cache: SegmentCache,
     playback_generation: Arc<AtomicU64>,
     artwork_generation: Arc<AtomicU64>,
@@ -1773,12 +1802,22 @@ impl NativeAudioEngine {
         health: Arc<NativeAudioHealth>,
         output_recovery_pending: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
+        let (output_channels, output_sample_rate) = sink.output_format();
         let player = Arc::new(Player::connect_new(sink.mixer()));
+        crate::diagnostics::record(
+            "音频",
+            format_args!(
+                "mixer_format sample_rate={} channels={}",
+                output_sample_rate, output_channels
+            ),
+        );
         // 引擎不做默认音量：rodio Player 默认 1.0（100%），实际音量由前端
         // 缓存记录并在加载时同步（见 loadNativeTrack 的 nativeAudioSetVolume）。
         Ok(Self {
             player: Mutex::new(player),
             sink,
+            output_channels,
+            output_sample_rate,
             segment_cache,
             playback_generation: Arc::new(AtomicU64::new(0)),
             artwork_generation: Arc::new(AtomicU64::new(0)),
@@ -2252,7 +2291,11 @@ impl NativeAudioEngine {
             // changing devices cannot leak even a single audible callback.
             player.pause();
         }
-        player.append(decoder);
+        player.append(normalize_source_for_output(
+            decoder,
+            self.output_channels,
+            self.output_sample_rate,
+        ));
         if start_playing {
             player.play();
         }
@@ -2401,7 +2444,11 @@ impl NativeAudioEngine {
         if !start_playing {
             player.pause();
         }
-        player.append(decoder);
+        player.append(normalize_source_for_output(
+            decoder,
+            self.output_channels,
+            self.output_sample_rate,
+        ));
         if start_playing {
             player.play();
         }
@@ -2556,7 +2603,11 @@ impl NativeAudioEngine {
         let artwork_url = metadata.artwork_url.clone().unwrap_or_default();
         let started = Arc::new(AtomicBool::new(false));
         let marker = HandoffMarker {
-            inner: decoder,
+            inner: normalize_source_for_output(
+                decoder,
+                self.output_channels,
+                self.output_sample_rate,
+            ),
             started: Arc::clone(&started),
         };
         let _transition = self
@@ -3894,6 +3945,146 @@ mod tests {
         fn try_seek(&mut self, _pos: Duration) -> Result<(), SeekError> {
             Ok(())
         }
+    }
+
+    struct FiniteConstantSource {
+        remaining_samples: usize,
+        channels: rodio::ChannelCount,
+        sample_rate: rodio::SampleRate,
+        sample: f32,
+    }
+
+    impl Iterator for FiniteConstantSource {
+        type Item = f32;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.remaining_samples == 0 {
+                return None;
+            }
+            self.remaining_samples -= 1;
+            Some(self.sample)
+        }
+    }
+
+    impl Source for FiniteConstantSource {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+
+        fn channels(&self) -> rodio::ChannelCount {
+            self.channels
+        }
+
+        fn sample_rate(&self) -> rodio::SampleRate {
+            self.sample_rate
+        }
+
+        fn total_duration(&self) -> Option<Duration> {
+            Some(Duration::from_secs_f64(
+                self.remaining_samples as f64
+                    / self.channels.get() as f64
+                    / self.sample_rate.get() as f64,
+            ))
+        }
+    }
+
+    #[test]
+    fn player_mixer_preserves_44100_media_duration_at_48000_output() {
+        const SOURCE_RATE: u32 = 44_100;
+        const OUTPUT_RATE: u32 = 48_000;
+        const CHANNELS: u16 = 2;
+        let channels = std::num::NonZeroU16::new(CHANNELS).unwrap();
+        let source_rate = std::num::NonZeroU32::new(SOURCE_RATE).unwrap();
+        let output_rate = std::num::NonZeroU32::new(OUTPUT_RATE).unwrap();
+        let (source, state) = spawn_threaded_decoder(FiniteConstantSource {
+            remaining_samples: SOURCE_RATE as usize * CHANNELS as usize,
+            channels,
+            sample_rate: source_rate,
+            sample: 0.25,
+        })
+        .unwrap();
+        let decode_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !state.finished.load(Ordering::SeqCst) && std::time::Instant::now() < decode_deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(state.finished.load(Ordering::SeqCst));
+
+        let (mixer, mut output) = rodio::mixer::mixer(channels, output_rate);
+        let player = Player::connect_new(&mixer);
+        player.append(source);
+        let probe_samples = OUTPUT_RATE as usize * CHANNELS as usize * 2;
+        let mut last_media_sample = None;
+        for sample_index in 0..probe_samples {
+            if output.next().is_some_and(|sample| sample.abs() > 0.01) {
+                last_media_sample = Some(sample_index);
+            }
+        }
+        let emitted_media_samples = last_media_sample.map_or(0, |index| index + 1);
+        let expected_samples = OUTPUT_RATE as usize * CHANNELS as usize;
+        let difference = emitted_media_samples.abs_diff(expected_samples);
+
+        assert!(
+            difference <= 512,
+            "1 秒 44.1 kHz 媒体经 48 kHz 输出后应仍接近 1 秒：实际 {emitted_media_samples} samples，期望 {expected_samples}"
+        );
+    }
+
+    #[test]
+    fn player_queue_rebuilds_resampling_across_48000_to_44100_handoff() {
+        const OUTPUT_RATE: u32 = 48_000;
+        const CHANNELS: u16 = 2;
+        let channels = std::num::NonZeroU16::new(CHANNELS).unwrap();
+        let output_rate = std::num::NonZeroU32::new(OUTPUT_RATE).unwrap();
+        let prepare = |sample_rate: u32, sample: f32| {
+            let (source, state) = spawn_threaded_decoder(FiniteConstantSource {
+                remaining_samples: sample_rate as usize * CHANNELS as usize,
+                channels,
+                sample_rate: std::num::NonZeroU32::new(sample_rate).unwrap(),
+                sample,
+            })
+            .unwrap();
+            let decode_deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !state.finished.load(Ordering::SeqCst)
+                && std::time::Instant::now() < decode_deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(state.finished.load(Ordering::SeqCst));
+            source
+        };
+        let source_48000 = prepare(48_000, 0.5);
+        let source_44100 = prepare(44_100, 0.25);
+        let (mixer, mut output) = rodio::mixer::mixer(channels, output_rate);
+        let player = Player::connect_new(&mixer);
+        player.append(normalize_source_for_output(
+            source_48000,
+            channels,
+            output_rate,
+        ));
+        player.append(normalize_source_for_output(
+            source_44100,
+            channels,
+            output_rate,
+        ));
+
+        let probe_samples = OUTPUT_RATE as usize * CHANNELS as usize * 3;
+        let mut second_track_samples = 0usize;
+        for _ in 0..probe_samples {
+            if output
+                .next()
+                .is_some_and(|sample| (sample - 0.25).abs() < 0.01)
+            {
+                second_track_samples += 1;
+            }
+        }
+        let expected_samples = OUTPUT_RATE as usize * CHANNELS as usize;
+        let difference = second_track_samples.abs_diff(expected_samples);
+
+        assert!(
+            difference <= 1_024,
+            "48 kHz 后续接 44.1 kHz 曲目时必须为后者独立重采样：实际 {second_track_samples} samples，期望 {expected_samples}"
+        );
     }
 
     #[test]

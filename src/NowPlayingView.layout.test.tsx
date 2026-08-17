@@ -50,6 +50,35 @@ describe("expanded player controller layout", () => {
     expect(markup.slice(controllerStart)).not.toContain("歌词");
   });
 
+  it("marks only the playback-matched timed lyric as current", () => {
+    const markup = renderToStaticMarkup(
+      <NowPlayingView
+        open
+        track={{ title: "歌词状态验证", artist: "验证歌手", duration: 8_000 }}
+        playing
+        lyrics={{
+          document: {
+            format: "lrc",
+            timed: true,
+            offsetMs: 0,
+            lines: [
+              { id: "line-1", startMs: 0, endMs: 4_000, texts: ["上一句"] },
+              { id: "line-2", startMs: 4_000, endMs: 8_000, texts: ["当前句"] },
+            ],
+          },
+          activeIndex: 1,
+        }}
+        onSeek={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+    const activeLines = markup.match(/<button[^>]*class="[^"]*now-playing-lyric-line[^"]*is-active[^"]*"[^>]*>.*?<\/button>/g);
+
+    expect(activeLines).toHaveLength(1);
+    expect(activeLines?.[0]).toContain('aria-current="true"');
+    expect(activeLines?.[0]).toContain("当前句");
+  });
+
   it("keeps the close control left while the mode switch precedes the right-side appearance actions", () => {
     const markup = renderExpandedPlayer();
     const headerEnd = markup.indexOf("now-playing-content");
