@@ -3935,8 +3935,20 @@ mod tests {
             "欠载静音不得推进媒体时间轴"
         );
 
-        std::thread::sleep(Duration::from_millis(350));
-        assert_eq!(source.next(), Some(0.5), "解码恢复后应继续输出真实 PCM");
+        // The decoder intentionally sleeps for 300 ms, but a loaded CI runner
+        // may not schedule it again within an arbitrary extra 50 ms. Poll the
+        // non-blocking Source up to a bounded deadline so this assertion tests
+        // recovery semantics instead of scheduler timing.
+        let recovery_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let recovered_sample = loop {
+            match source.next() {
+                Some(0.0) if std::time::Instant::now() < recovery_deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                sample => break sample,
+            }
+        };
+        assert_eq!(recovered_sample, Some(0.5), "解码恢复后应继续输出真实 PCM");
     }
 
     #[test]
