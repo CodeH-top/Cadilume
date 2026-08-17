@@ -37,15 +37,18 @@ export function createUpdateManifest({ artifactRoot, repository, tag, version, p
   const files = collectFiles(artifactRoot);
   const macArchive = findSingle(files, ".app.tar.gz", "macOS updater 归档");
   const macSignature = findSingle(files, ".app.tar.gz.sig", "macOS updater 签名");
-  const windowsArchive = findSingle(files, ".nsis.zip", "Windows updater 归档");
-  const windowsSignature = findSingle(files, ".nsis.zip.sig", "Windows updater 签名");
+  const windowsInstaller = findSingle(files, "-setup.exe", "Windows NSIS updater 安装器");
+  const windowsSignature = findSingle(files, "-setup.exe.sig", "Windows updater 签名");
+  if (windowsSignature !== `${windowsInstaller}.sig`) {
+    throw new Error("Windows updater 签名与 NSIS 安装器不匹配");
+  }
   const macUpdate = {
     signature: readFileSync(macSignature, "utf8").trim(),
     url: releaseAssetUrl(repository, tag, macArchive),
   };
   const windowsUpdate = {
     signature: readFileSync(windowsSignature, "utf8").trim(),
-    url: releaseAssetUrl(repository, tag, windowsArchive),
+    url: releaseAssetUrl(repository, tag, windowsInstaller),
   };
   if (!macUpdate.signature || !windowsUpdate.signature) throw new Error("updater 签名不能为空");
 

@@ -13,8 +13,8 @@ function withArtifacts(callback) {
   mkdirSync(windows);
   writeFileSync(path.join(mac, "Cadilume.app.tar.gz"), "archive");
   writeFileSync(path.join(mac, "Cadilume.app.tar.gz.sig"), "mac-signature\n");
-  writeFileSync(path.join(windows, "Cadilume_0.2.2_x64-setup.nsis.zip"), "archive");
-  writeFileSync(path.join(windows, "Cadilume_0.2.2_x64-setup.nsis.zip.sig"), "windows-signature\n");
+  writeFileSync(path.join(windows, "Cadilume_0.2.2_x64-setup.exe"), "installer");
+  writeFileSync(path.join(windows, "Cadilume_0.2.2_x64-setup.exe.sig"), "windows-signature\n");
   try {
     callback(root);
   } finally {
@@ -38,7 +38,7 @@ test("creates one updater manifest for macOS arm64 and Windows x64", () => withA
   assert.equal(manifest.platforms["darwin-aarch64-app"], manifest.platforms["darwin-aarch64"]);
   assert.equal(manifest.platforms["windows-x86_64-nsis"], manifest.platforms["windows-x86_64"]);
   assert.match(manifest.platforms["darwin-aarch64"].url, /Cadilume\.app\.tar\.gz$/);
-  assert.match(manifest.platforms["windows-x86_64"].url, /setup\.nsis\.zip$/);
+  assert.match(manifest.platforms["windows-x86_64"].url, /setup\.exe$/);
 }));
 
 test("rejects mismatched versions and incomplete updater artifacts", () => withArtifacts((root) => {
@@ -56,4 +56,16 @@ test("rejects mismatched versions and incomplete updater artifacts", () => withA
     tag: "v0.2.2",
     version: "0.2.2",
   }), /macOS updater 归档/);
+}));
+
+test("rejects a Windows signature that does not match its NSIS installer", () => withArtifacts((root) => {
+  const windows = path.join(root, "windows");
+  rmSync(path.join(windows, "Cadilume_0.2.2_x64-setup.exe.sig"));
+  writeFileSync(path.join(windows, "Different_0.2.2_x64-setup.exe.sig"), "windows-signature\n");
+  assert.throws(() => createUpdateManifest({
+    artifactRoot: root,
+    repository: "CodeH-top/Cadilume",
+    tag: "v0.2.2",
+    version: "0.2.2",
+  }), /签名与 NSIS 安装器不匹配/);
 }));

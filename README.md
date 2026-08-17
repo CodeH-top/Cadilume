@@ -98,7 +98,7 @@ Release builds check that manifest through **Settings → App Update**. Automati
 
 > Current macOS CI builds are ad-hoc signed and are not notarized. Windows CI produces a Tauri-updater-signed NSIS package, but the installer is not Authenticode-signed and still requires real Windows 10/11 acceptance. Normal public distribution requires Apple Developer ID signing, notarization, and stapling on macOS, plus Authenticode signing and timestamping on Windows.
 
-The unified workflow now produces the Windows x64 NSIS installer and its updater archive. A portable ZIP remains a separate future channel because it cannot safely consume the NSIS updater entry; see [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md) for the remaining real-device and signing gates. Maintainer key roles, GitHub secrets, and the release procedure are documented in [`docs/RELEASING.md`](docs/RELEASING.md).
+The unified workflow now produces the Windows x64 NSIS installer, which is also Tauri's updater payload, plus its `.exe.sig` signature. A portable ZIP remains a separate future channel because it cannot safely consume the NSIS updater entry; see [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md) for the remaining real-device and signing gates. Maintainer key roles, GitHub secrets, and the release procedure are documented in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Deploy and run
 

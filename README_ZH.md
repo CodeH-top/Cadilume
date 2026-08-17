@@ -98,7 +98,7 @@ Cadilume 是一个面向 macOS 与 Windows 的 Plex 音乐桌面客户端，目�
 
 > 当前 macOS CI 使用 ad-hoc 签名且未公证。Windows CI 会生成带 Tauri updater 签名的 NSIS 包，但安装器尚未做 Authenticode 签名，也仍需 Windows 10/11 实机验收。面向普通用户正式分发时，macOS 仍需 Developer ID、公证和票据装订；Windows 仍需 Authenticode 签名与时间戳。
 
-统一工作流现已生成 Windows x64 NSIS 安装包及对应 updater 归档。便携 ZIP 仍是独立的后续通道，不能直接消费 NSIS updater 条目；剩余真机与签名门禁见 [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md)。维护者密钥用途、GitHub Secrets 和发布步骤见 [`docs/RELEASING.md`](docs/RELEASING.md)。
+统一工作流现已生成 Windows x64 NSIS 安装包（它同时也是 Tauri updater 载荷）及对应的 `.exe.sig` 签名。便携 ZIP 仍是独立的后续通道，不能直接消费 NSIS updater 条目；剩余真机与签名门禁见 [`docs/WINDOWS_RELEASE_PLAN.md`](docs/WINDOWS_RELEASE_PLAN.md)。维护者密钥用途、GitHub Secrets 和发布步骤见 [`docs/RELEASING.md`](docs/RELEASING.md)。
 
 ## 部署与运行
 

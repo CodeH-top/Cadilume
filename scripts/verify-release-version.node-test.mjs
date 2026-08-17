@@ -145,6 +145,8 @@ test("desktop workflow is unified and never mutates version control", () => {
   assert.doesNotMatch(workflow, /prepare:release-version|prepare-release-version/);
   assert.doesNotMatch(workflow, /\bgit\s+(?:add|commit|push)\b/);
   assert.doesNotMatch(workflow, /--no-sign/);
+  assert.doesNotMatch(workflow, /\.nsis\.zip/);
+  assert.match(workflow, /\*-setup\.exe\.sig/);
   assert.doesNotMatch(workflow, /release_commit|github-actions\[bot\]/);
   assert.match(workflow, /release_sha="\$\(git rev-parse HEAD\)"/);
   assert.equal(

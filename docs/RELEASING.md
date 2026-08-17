@@ -21,9 +21,9 @@ Cadilume 发布同时使用三套用途不同的凭据，不能相互替代：
 
 `.github/workflows/build-desktop.yml` 只接受手动触发，并行运行 macOS arm64 与 Windows x64，有两种模式：
 
-- 默认不勾选发布：构建 macOS `.app` / DMG 与 Windows NSIS，同时生成两端 updater 归档和签名；只保存为 workflow artifacts，不创建公开 Release。
+- 默认不勾选发布：构建 macOS `.app` / DMG、macOS updater 归档与签名，以及兼作 Windows updater 载荷的 NSIS `.exe` 与 `.exe.sig`；只保存为 workflow artifacts，不创建公开 Release。
 - 每次运行都填写稳定版本，例如 `0.2.2`；`v0.2.2` 与 `V0.2.2` 也会规范化为应用版本 `0.2.2` 和标签 `v0.2.2`。该输入只用于只读校验，必须与仓库中已提交的 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 `src-tauri/Cargo.lock` 完全一致；工作流不修改任何版本文件。
-- 明确勾选发布：只允许从 `main` 执行，而且 macOS 与 Windows 必须全部成功。工作流确认本次构建提交仍是远端最新 `main` 后，直接以该已验证的源提交创建草稿 Release，上传 DMG、macOS updater、Windows NSIS、Windows updater，并生成同时含 `darwin-aarch64` 与 `windows-x86_64-nsis` 的 `latest.json`。七个 Release 资产全部校验后才公开；仓库启用不可变 Release，公开动作会同时冻结关联标签与资产。工作流不会创建 release commit，也不会推送 `main` 或 `dev`。
+- 明确勾选发布：只允许从 `main` 执行，而且 macOS 与 Windows 必须全部成功。工作流确认本次构建提交仍是远端最新 `main` 后，直接以该已验证的源提交创建草稿 Release，上传 DMG、macOS updater 归档与签名、Windows NSIS 与签名，并生成同时含 `darwin-aarch64` 与 `windows-x86_64-nsis` 的 `latest.json`。这五个二进制/签名文件与 `latest.json` 共六个 Release 资产全部校验后才公开；仓库启用不可变 Release，公开动作会同时冻结关联标签与资产。工作流不会创建 release commit，也不会推送 `main` 或 `dev`。
 
 普通 push、分支合并和单独推送标签都不会触发 Release 构建。
 
@@ -34,6 +34,6 @@ Cadilume 发布同时使用三套用途不同的凭据，不能相互替代：
 1. 人工把目标稳定版本同步到 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 `src-tauri/Cargo.lock` 中的 Cadilume 包条目，运行 `pnpm verify:release-version`，然后把四份版本修改与准备发布的功能一起提交、合并到 `main` 并推送 GitHub；无需提前创建标签。
 2. 可先在 `main` 手动运行 `Build desktop`，填写已提交的版本但不勾选发布，下载并检查 macOS 与 Windows workflow artifacts；版本不一致时工作流直接失败，不会自动修正。
 3. 正式发布时再次从 `main` 手动运行工作流，填写同一版本并勾选发布。工作流运行完整门禁，把已验证源提交的所有资产上传到草稿并校验，再公开规范标签和不可变 Release；不会产生额外版本提交。
-4. 确认公开 Release 含 DMG、macOS updater 与签名、NSIS、Windows updater 与签名、`latest.json`；分别从上一发行版实测检查、下载、安装和重启。
+4. 确认公开 Release 含 DMG、macOS updater 归档与签名、兼作 Windows updater 载荷的 NSIS 与签名、`latest.json`；分别从上一发行版实测检查、下载、安装和重启。
 
 不要从未经统一工作流验证的构建手工拼装 `latest.json`，也不要把私钥、私钥口令或 Apple 证书导出文件加入 Release 资产。不可变 Release 一旦公开就不能补传、替换或删除单个资产；如果草稿阶段因临时上传或校验问题失败，可从该草稿对应的同一已验证源提交重新运行同一版本，工作流会复用草稿并替换同名资产。草稿指向不同提交时工作流会停止，不能混用制品，也不能先公开再补文件。

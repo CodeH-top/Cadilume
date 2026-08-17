@@ -288,16 +288,21 @@ jobs:
         run: |
           $bundleRoot = "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis"
           $installers = @(Get-ChildItem $bundleRoot -Filter "*-setup.exe" -File)
-          $archives = @(Get-ChildItem $bundleRoot -Filter "*.nsis.zip" -File)
-          $signatures = @(Get-ChildItem $bundleRoot -Filter "*.nsis.zip.sig" -File)
-          if ($installers.Count -ne 1 -or $archives.Count -ne 1 -or $signatures.Count -ne 1) {
-            throw "Windows 应恰好生成一个 NSIS 安装器、一个 updater 归档和一个签名"
+          $signatures = @(Get-ChildItem $bundleRoot -Filter "*-setup.exe.sig" -File)
+          if ($installers.Count -ne 1 -or $signatures.Count -ne 1) {
+            throw "Windows 应恰好生成一个 NSIS updater 安装器及其签名"
           }
           if ($installers[0].Name -notmatch [regex]::Escape($env:CADILUME_RELEASE_VERSION)) {
             throw "Windows 安装器文件名没有包含已校验版本 $env:CADILUME_RELEASE_VERSION"
           }
+          if ($installers[0].Length -eq 0) {
+            throw "Windows NSIS updater 安装器不能为空"
+          }
           if ($signatures[0].Length -eq 0) {
             throw "Windows updater 签名不能为空"
+          }
+          if ($signatures[0].FullName -ne "$($installers[0].FullName).sig") {
+            throw "Windows updater 签名与 NSIS 安装器不匹配"
           }
 
       - name: Upload Windows artifacts
@@ -306,8 +311,7 @@ jobs:
           name: cadilume-windows-x64
           path: |
             src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*-setup.exe
-            src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.nsis.zip
-            src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.nsis.zip.sig
+            src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*-setup.exe.sig
           if-no-files-found: error
           compression-level: 0
 
@@ -404,11 +408,10 @@ jobs:
             -name '*.app.tar.gz' -o \
             -name '*.app.tar.gz.sig' -o \
             -name '*-setup.exe' -o \
-            -name '*.nsis.zip' -o \
-            -name '*.nsis.zip.sig' \
+            -name '*-setup.exe.sig' \
           \) -print0)
-          if [[ "${#release_assets[@]}" -ne 6 ]]; then
-            echo "::error::期望上传 6 个桌面 Release 文件，实际为 ${#release_assets[@]}"
+          if [[ "${#release_assets[@]}" -ne 5 ]]; then
+            echo "::error::期望上传 5 个桌面 Release 文件，实际为 ${#release_assets[@]}"
             printf '%s\n' "${release_assets[@]}"
             exit 1
           fi
@@ -432,12 +435,12 @@ jobs:
           set -euo pipefail
           asset_names="$(gh release view "${CADILUME_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
           asset_count="$(awk 'NF { count += 1 } END { print count + 0 }' <<<"${asset_names}")"
-          if [[ "${asset_count}" -ne 7 ]]; then
-            echo "::error::草稿 Release 应恰好包含 7 个资产，实际为 ${asset_count}"
+          if [[ "${asset_count}" -ne 6 ]]; then
+            echo "::error::草稿 Release 应恰好包含 6 个资产，实际为 ${asset_count}"
             printf '%s\n' "${asset_names}"
             exit 1
           fi
-          for required_pattern in '\.dmg$' '\.app\.tar\.gz$' '\.app\.tar\.gz\.sig$' '-setup\.exe$' '\.nsis\.zip$' '\.nsis\.zip\.sig$' '^latest\.json$'; do
+          for required_pattern in '\.dmg$' '\.app\.tar\.gz$' '\.app\.tar\.gz\.sig$' '-setup\.exe$' '-setup\.exe\.sig$' '^latest\.json$'; do
             if ! grep -Eq -- "${required_pattern}" <<<"${asset_names}"; then
               echo "::error::草稿 Release 缺少必要资产（${required_pattern}），保持草稿且不公开"
               exit 1
