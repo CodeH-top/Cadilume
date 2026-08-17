@@ -138,6 +138,13 @@ jobs:
             exit 1
           fi
 
+      - name: Clean cached macOS bundle outputs
+        run: |
+          bundle_root="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          if [[ -d "${bundle_root}" ]]; then
+            find "${bundle_root}" -depth -delete
+          fi
+
       - name: Build macOS app, DMG, and updater
         run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json --ci
 
@@ -275,6 +282,14 @@ jobs:
         run: |
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
             throw "缺少 TAURI_SIGNING_PRIVATE_KEY，无法生成 Windows updater 签名"
+          }
+
+      - name: Clean cached Windows bundle outputs
+        shell: pwsh
+        run: |
+          $bundleRoot = "src-tauri\target\x86_64-pc-windows-msvc\release\bundle"
+          if (Test-Path -LiteralPath $bundleRoot) {
+            Remove-Item -LiteralPath $bundleRoot -Recurse -Force
           }
 
       - name: Build Windows NSIS installer and updater

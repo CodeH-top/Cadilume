@@ -147,6 +147,10 @@ test("desktop workflow is unified and never mutates version control", () => {
   assert.doesNotMatch(workflow, /--no-sign/);
   assert.doesNotMatch(workflow, /\.nsis\.zip/);
   assert.match(workflow, /\*-setup\.exe\.sig/);
+  assert.match(workflow, /Clean cached macOS bundle outputs/);
+  assert.match(workflow, /find "\$\{bundle_root\}" -depth -delete/);
+  assert.match(workflow, /Clean cached Windows bundle outputs/);
+  assert.match(workflow, /Remove-Item -LiteralPath \$bundleRoot -Recurse -Force/);
   assert.doesNotMatch(workflow, /release_commit|github-actions\[bot\]/);
   assert.match(workflow, /release_sha="\$\(git rev-parse HEAD\)"/);
   assert.equal(
