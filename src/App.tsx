@@ -923,9 +923,9 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   }, [bumpPlaylistMutation, loadPlaylistList, notify, serverId]);
 
   useEffect(() => {
-    if (initialServerSnapshotActive) return;
+    if (initialServerSnapshotActive && initialLibrary.playlistsComplete !== false) return;
     void loadPlaylistList();
-  }, [initialServerSnapshotActive, loadPlaylistList]);
+  }, [initialLibrary.playlistsComplete, initialServerSnapshotActive, loadPlaylistList]);
 
   const syncSources = async () => {
     setSourcesSyncing(true);

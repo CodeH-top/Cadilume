@@ -5,7 +5,7 @@ import {
   type InitialLibrarySource,
   withStartupTimeout,
 } from "./initialLibrary";
-import type { LibrarySection, PlexHub, PlexItem, PlexPlaylist, PlexServer } from "./types";
+import type { LibrarySection, PlexItem, PlexPlaylist, PlexServer } from "./types";
 
 const server = (id: string): PlexServer => ({
   id,
@@ -58,21 +58,12 @@ describe("initial library loading", () => {
     expect(isInitialLibrarySnapshotScopeActive(false, 1, "server-a", "server-a")).toBe(false);
   });
 
-  it("waits for every first-screen source and returns one coherent preferred-server snapshot", async () => {
-    const recentlyPlayed: PlexHub = {
-      title: "Recently Played",
-      identifier: "recentlyplayed",
-      type: "track",
-      items: [track("played")],
-    };
-    const recentAlbum = { ...track("album"), type: "album" };
+  it("returns the required preferred-server snapshot without waiting for optional home data", async () => {
     const librarySource = source({
       discoverServers: vi.fn(async () => [server("server-a"), server("server-b")]),
       getSections: vi.fn(async () => [section("music-b")]),
       getPlaylists: vi.fn(async () => [playlist("older", 1), playlist("newer", 2)]),
       getLibraryItems: vi.fn(async () => [track("artist-index")]),
-      getRecommendationHubs: vi.fn(async () => [recentlyPlayed]),
-      getRecentAlbums: vi.fn(async () => [recentAlbum]),
     });
 
     const result = await loadInitialLibraryData("server-b", librarySource);
@@ -80,13 +71,17 @@ describe("initial library loading", () => {
     expect(result).toMatchObject({
       serverId: "server-b",
       sectionKey: "music-b",
-      playlists: [{ ratingKey: "newer" }, { ratingKey: "older" }],
-      libraryArtists: [{ ratingKey: "artist-index" }],
-      home: { recentAlbums: [{ ratingKey: "album" }] },
+      playlists: [],
+      playlistsComplete: false,
+      libraryArtists: [],
+      libraryArtistsComplete: false,
+      home: { recentAlbums: [], hubs: [] },
+      homeComplete: false,
     });
-    expect(result.home.hubs.map((hub) => hub.title)).toEqual(["Recently Played", "最近加入的音乐"]);
     expect(librarySource.getSections).toHaveBeenCalledWith("server-b");
-    expect(librarySource.getLibraryItems).toHaveBeenCalledWith("server-b", "music-b", 8);
+    expect(librarySource.getLibraryItems).not.toHaveBeenCalled();
+    expect(librarySource.getRecommendationHubs).not.toHaveBeenCalled();
+    expect(librarySource.getRecentAlbums).not.toHaveBeenCalled();
   });
 
   it("treats no accessible server as a completed empty initialization", async () => {
@@ -103,7 +98,7 @@ describe("initial library loading", () => {
     expect(librarySource.getPlaylists).not.toHaveBeenCalled();
   });
 
-  it("loads playlists but skips library requests when the server exposes no music section", async () => {
+  it("returns quickly when the server exposes no music section", async () => {
     const librarySource = source({
       getSections: vi.fn(async () => []),
       getPlaylists: vi.fn(async () => [playlist("playlist-a", 1)]),
@@ -112,7 +107,8 @@ describe("initial library loading", () => {
     await expect(loadInitialLibraryData(undefined, librarySource)).resolves.toMatchObject({
       serverId: "server-a",
       sections: [],
-      playlists: [{ ratingKey: "playlist-a" }],
+      playlists: [],
+      playlistsComplete: false,
       libraryArtists: [],
       home: { recentAlbums: [], hubs: [] },
     });
@@ -125,22 +121,18 @@ describe("initial library loading", () => {
       if (serverId === "server-offline") throw new Error("首选服务器离线");
       return [section("music-online")];
     });
-    const getPlaylists = vi.fn(async (serverId: string) => (
-      serverId === "server-online" ? [playlist("available", 1)] : []
-    ));
     const librarySource = source({
       discoverServers: vi.fn(async () => [server("server-online"), server("server-offline")]),
       getSections,
-      getPlaylists,
     });
 
     await expect(loadInitialLibraryData("server-offline", librarySource)).resolves.toMatchObject({
       serverId: "server-online",
       sectionKey: "music-online",
-      playlists: [{ ratingKey: "available" }],
+      playlists: [],
+      playlistsComplete: false,
     });
     expect(getSections.mock.calls.map(([serverId]) => serverId)).toEqual(["server-offline", "server-online"]);
-    expect(getPlaylists.mock.calls.map(([serverId]) => serverId)).toEqual(["server-offline", "server-online"]);
   });
 
   it("keeps the initialization error when every discovered server fails", async () => {

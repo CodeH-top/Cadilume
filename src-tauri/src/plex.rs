@@ -50,6 +50,7 @@ const MAX_CACHE_MIME_BYTES: usize = 127;
 const MAX_DEVICE_NAME_CHARACTERS: usize = 80;
 const MAX_PLAYLIST_BATCH_TRACKS: usize = 10_000;
 const FALLBACK_DEVICE_NAME: &str = "Desktop";
+const BOOTSTRAP_ACCOUNT_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -494,6 +495,7 @@ impl PlexState {
         let response = self
             .plex_headers(self.protected_client.get(format!("{PLEX_TV}/api/v2/user")))
             .header("X-Plex-Token", token)
+            .timeout(BOOTSTRAP_ACCOUNT_TIMEOUT)
             .send()
             .await?;
         let response = ensure_success(response, "读取 Plex 账号失败").await?;
@@ -1078,11 +1080,24 @@ struct XmlLyricSpan {
 #[tauri::command]
 pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse, String> {
     let token = state.token().ok();
+    crate::diagnostics::record(
+        "账号",
+        format_args!("bootstrap_start credential={}", token.is_some()),
+    );
     let account = match token.as_deref() {
-        Some(token) => state.account(token).await.ok(),
+        Some(token) => match state.account(token).await {
+            Ok(account) => {
+                crate::diagnostics::record("账号", format_args!("bootstrap_account=available"));
+                Some(account)
+            }
+            Err(_) => {
+                crate::diagnostics::record("账号", format_args!("bootstrap_account=unavailable"));
+                None
+            }
+        },
         None => None,
     };
-    Ok(BootstrapResponse {
+    let response = BootstrapResponse {
         client_identifier: state.client_identifier.clone(),
         authenticated: token.is_some(),
         credential_status: state.credential_status(),
@@ -1095,7 +1110,16 @@ pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse,
         close_behavior: state.close_behavior(),
         device_name: state.device_name(),
         brand_preset: state.brand_preset(),
-    })
+    };
+    crate::diagnostics::record(
+        "账号",
+        format_args!(
+            "bootstrap_complete authenticated={} account={}",
+            response.authenticated,
+            response.account.is_some()
+        ),
+    );
+    Ok(response)
 }
 
 #[tauri::command]
