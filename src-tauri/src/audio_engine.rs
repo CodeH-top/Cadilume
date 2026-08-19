@@ -575,7 +575,11 @@ where
     let channel_capacity = chunk_capacity.saturating_sub(1).max(1);
     let chunk_samples = DECODE_CHUNK_FRAMES * channels.get() as usize;
     let (sender, receiver) = sync_channel::<DecodedChunk>(channel_capacity);
-    let (recycle_sender, recycle_receiver) = sync_channel::<Vec<f32>>(chunk_capacity);
+    // Keep a separate recycle pool large enough to absorb the current/channel
+    // buffers and one in-flight chunk while the realtime side drains them
+    // during a seek. The active PCM queue remains bounded by `chunk_capacity`.
+    let (recycle_sender, recycle_receiver) =
+        sync_channel::<Vec<f32>>(chunk_capacity.saturating_mul(2).saturating_add(2));
     let state = Arc::new(DecodeBufferState::new(
         sample_rate,
         chunk_capacity,

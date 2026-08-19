@@ -10,6 +10,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+#[cfg(target_os = "windows")]
+use std::fs::File;
+
 use anyhow::{anyhow, Context, Result};
 use chacha20poly1305::{
     aead::{Aead, Generate, KeyInit},
