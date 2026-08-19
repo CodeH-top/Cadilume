@@ -52,6 +52,14 @@ const HEARTBEAT_STALL_CONFIRMATION: Duration = Duration::from_secs(6);
 /// auto-routed engine verifies its observed default at a low fixed cadence.
 /// Explicit application device choices intentionally bypass this watcher.
 const DEFAULT_OUTPUT_FOLLOW_INTERVAL: Duration = Duration::from_secs(1);
+/// A native output stream can silently stop delivering callbacks after a long
+/// sleep or device-driver transition without invoking cpal's error callback.
+/// Rebuild only after a sustained lack of consumed PCM so normal buffering is
+/// never mistaken for a dead route.
+const OUTPUT_PROGRESS_STALL_TIMEOUT: Duration = Duration::from_secs(8);
+/// A long forwarder scheduling gap usually means system sleep/resume. Start a
+/// fresh observation then, giving CoreAudio a full recovery window first.
+const OUTPUT_PROGRESS_WATCHDOG_RESET_GAP: Duration = Duration::from_secs(2);
 static SHUFFLE_NONCE: AtomicU64 = AtomicU64::new(0x6a09_e667_f3bc_c909);
 
 fn loopback_http_client(timeout: Option<Duration>) -> Result<Client, String> {
@@ -1752,6 +1760,37 @@ fn output_has_started(
         })
 }
 
+/// Returns true only when a source that should be audible has not advanced its
+/// output-callback frame counter for a full watchdog interval. Buffering and
+/// user-paused playback deliberately clear the observation instead of
+/// rebuilding a healthy stream.
+fn output_progress_watchdog_should_recover(
+    desired_playing: bool,
+    has_player_source: bool,
+    buffer_paused: bool,
+    output_media_frames: Option<u64>,
+    observation: &mut Option<(u64, std::time::Instant)>,
+    now: std::time::Instant,
+) -> bool {
+    if !desired_playing || !has_player_source || buffer_paused {
+        *observation = None;
+        return false;
+    }
+    let Some(output_media_frames) = output_media_frames else {
+        *observation = None;
+        return false;
+    };
+    match *observation {
+        Some((observed_frames, first_seen)) if observed_frames == output_media_frames => {
+            now.saturating_duration_since(first_seen) >= OUTPUT_PROGRESS_STALL_TIMEOUT
+        }
+        _ => {
+            *observation = Some((output_media_frames, now));
+            false
+        }
+    }
+}
+
 /// As soon as the old route is known to be unusable, retract the prior output
 /// confirmation. The WebView must show recovery/loading until the replacement
 /// engine emits a fresh `playback-started` after consuming PCM.
@@ -3091,6 +3130,8 @@ impl NativeAudioEngine {
         let mut next_output_recovery_at = std::time::Instant::now();
         let mut output_recovery_delay = Duration::from_secs(1);
         let mut next_default_output_check = std::time::Instant::now();
+        let mut output_progress_observation = None;
+        let mut last_output_progress_watchdog_poll = std::time::Instant::now();
         // 引擎可能在同步 Tauri 命令（native_queue_set 等）里首次创建，
         // tokio::spawn 在无运行时上下文的主线程会 panic；用 Tauri 全局
         // 运行时可同时兼容同步/异步调用。
@@ -3101,6 +3142,12 @@ impl NativeAudioEngine {
                     break;
                 }
                 let now = std::time::Instant::now();
+                if now.saturating_duration_since(last_output_progress_watchdog_poll)
+                    >= OUTPUT_PROGRESS_WATCHDOG_RESET_GAP
+                {
+                    output_progress_observation = None;
+                }
+                last_output_progress_watchdog_poll = now;
                 if now >= next_default_output_check {
                     next_default_output_check = now + DEFAULT_OUTPUT_FOLLOW_INTERVAL;
                     let reconciliation =
@@ -3277,6 +3324,30 @@ impl NativeAudioEngine {
                             serde_json::json!({ "type": "buffering", "buffering": true }),
                         );
                     }
+                }
+                if output_progress_watchdog_should_recover(
+                    engine.desired_playing.load(Ordering::SeqCst),
+                    !player.empty(),
+                    engine.buffer_paused.load(Ordering::SeqCst),
+                    decode_state
+                        .as_ref()
+                        .map(|state| state.output_media_frames.load(Ordering::SeqCst)),
+                    &mut output_progress_observation,
+                    now,
+                ) && !engine.output_recovery_pending.swap(true, Ordering::SeqCst)
+                {
+                    publish_output_device_recovering(
+                        &engine,
+                        &app_for_task,
+                        "output-progress-stalled",
+                    );
+                    crate::diagnostics::record(
+                        "音频",
+                        format_args!(
+                            "output_progress_stalled=detected timeout_seconds={}",
+                            OUTPUT_PROGRESS_STALL_TIMEOUT.as_secs()
+                        ),
+                    );
                 }
                 if output_has_started(
                     engine.desired_playing.load(Ordering::SeqCst),
@@ -4508,6 +4579,53 @@ mod tests {
             !healthy_stream.load(Ordering::SeqCst),
             "旧输出流错误不能把新输出流标记为待恢复"
         );
+    }
+
+    #[test]
+    fn output_progress_watchdog_recovers_only_after_sustained_silence() {
+        let base = std::time::Instant::now();
+        let mut observation = None;
+        assert!(!output_progress_watchdog_should_recover(
+            true,
+            true,
+            false,
+            Some(24),
+            &mut observation,
+            base,
+        ));
+        assert!(!output_progress_watchdog_should_recover(
+            true,
+            true,
+            false,
+            Some(24),
+            &mut observation,
+            base + OUTPUT_PROGRESS_STALL_TIMEOUT - Duration::from_millis(1),
+        ));
+        assert!(output_progress_watchdog_should_recover(
+            true,
+            true,
+            false,
+            Some(24),
+            &mut observation,
+            base + OUTPUT_PROGRESS_STALL_TIMEOUT,
+        ));
+        assert!(!output_progress_watchdog_should_recover(
+            true,
+            true,
+            false,
+            Some(25),
+            &mut observation,
+            base + OUTPUT_PROGRESS_STALL_TIMEOUT,
+        ));
+        assert!(!output_progress_watchdog_should_recover(
+            true,
+            true,
+            true,
+            Some(25),
+            &mut observation,
+            base + OUTPUT_PROGRESS_STALL_TIMEOUT * 2,
+        ));
+        assert!(observation.is_none(), "缓冲期间不能触发输出流重建");
     }
 
     #[test]
