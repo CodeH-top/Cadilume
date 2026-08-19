@@ -29,10 +29,7 @@ use crate::{audio_engine::NativeAudioEngineSlot, stream_proxy::StreamProxy};
 const PRODUCT_NAME: &str = "Cadilume";
 const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PLEX_TV: &str = "https://plex.tv";
-#[cfg(not(debug_assertions))]
-const KEYRING_SERVICE: &str = "top.codeh.cadilume";
-#[cfg(not(debug_assertions))]
-const KEYRING_ACCOUNT: &str = "cadilume-account-token";
+const CREDENTIALS_FILE_NAME: &str = "credentials.json";
 const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ARTWORK_CACHE_BYTES: u64 = 512 * 1024 * 1024;
 const CACHE_NAMESPACE_DIR: &str = "cadilume";
@@ -139,6 +136,12 @@ impl CredentialStatus {
 struct StoredCredential {
     token: Option<String>,
     status: CredentialStatus,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedCredential {
+    account_token: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -297,6 +300,7 @@ pub(crate) struct StreamServerSnapshot {
 pub struct PlexState {
     protected_client: Client,
     config_path: PathBuf,
+    credential_path: PathBuf,
     cache_dir: PathBuf,
     cache_lock: RwLock<()>,
     config: Mutex<PersistedConfig>,
@@ -311,6 +315,7 @@ pub struct PlexState {
 impl PlexState {
     pub fn load(config_dir: PathBuf, app_cache_dir: PathBuf) -> Result<Self> {
         let config_path = config_dir.join("config.json");
+        let credential_path = config_dir.join(CREDENTIALS_FILE_NAME);
         let cache_dir = initialize_artwork_cache_dir(&app_cache_dir)?;
         let (mut config, mut should_persist_config) = match fs::read_to_string(&config_path) {
             Ok(raw) => {
@@ -334,9 +339,9 @@ impl PlexState {
             write_persisted_config(&config_path, &config)?;
         }
 
-        // Dev builds read only the plaintext fallback file; release builds use
-        // the Keychain exclusively. The two credential stores never mix.
-        let stored_credential = read_account_token();
+        // Keep the account token beside the app's other local data, matching
+        // Plexamp's desktop storage model. It never enters the WebView.
+        let stored_credential = read_account_token(&credential_path);
         crate::diagnostics::record(
             "账号",
             format_args!("credential_store={}", stored_credential.status.log_label()),
@@ -351,6 +356,7 @@ impl PlexState {
         Ok(Self {
             protected_client,
             config_path,
+            credential_path,
             cache_dir,
             cache_lock: RwLock::new(()),
             config: Mutex::new(config.clone()),
@@ -1125,7 +1131,7 @@ pub async fn poll_pin(
             .map_err(|_| "服务器缓存写入失败".to_string())?
             .clear();
         let _ = clear_artwork_for_account_change(&state);
-        store_account_token(token).map_err(display_error)?;
+        store_account_token(&state.credential_path, token).map_err(display_error)?;
         *state
             .token
             .write()
@@ -1147,7 +1153,7 @@ pub async fn logout(
 ) -> Result<(), String> {
     // Credential revocation is authoritative and must succeed before logout
     // mutates runtime state. Later cache and ticket cleanup remains best-effort.
-    delete_account_token()?;
+    delete_account_token(&state.credential_path)?;
     let mut cleanup_warnings = Vec::new();
     if let Err(error) = audio_engine.reset_and_clear_cache().await {
         cleanup_warnings.push(error);
@@ -2800,43 +2806,28 @@ fn string_field(value: &Value, key: &str) -> String {
         .to_string()
 }
 
-#[cfg(not(debug_assertions))]
-fn keyring_entry() -> std::result::Result<keyring::Entry, keyring::Error> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-}
-
-/// Development-only plaintext fallback: read the Plex account token from a
-/// local file outside the repository (default `~/.cadilume-dev-token`, or
-/// `CADILUME_DEV_TOKEN_FILE`). It must never be committed or logged; deleting
-/// the file restores Keychain-only mode.
-#[cfg(debug_assertions)]
-fn dev_token_fallback_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CADILUME_DEV_TOKEN_FILE") {
-        return PathBuf::from(path);
-    }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .unwrap_or_else(|| std::env::temp_dir().into_os_string());
-    PathBuf::from(home).join(".cadilume-dev-token")
-}
-
-#[cfg(debug_assertions)]
-fn read_dev_token_fallback() -> StoredCredential {
-    match fs::read_to_string(dev_token_fallback_path()) {
-        Ok(value) => {
-            let token = value.trim().to_string();
-            if token.is_empty() {
+fn read_account_token(path: &Path) -> StoredCredential {
+    match fs::read_to_string(path) {
+        Ok(raw) => match serde_json::from_str::<PersistedCredential>(&raw) {
+            Ok(credentials) if !credentials.account_token.trim().is_empty() => StoredCredential {
+                token: Some(credentials.account_token.trim().to_string()),
+                status: CredentialStatus::Available,
+            },
+            Ok(_) => StoredCredential {
+                token: None,
+                status: CredentialStatus::Missing,
+            },
+            Err(error) => {
+                crate::diagnostics::record(
+                    "账号",
+                    format_args!("credential_store_error=parse kind={error}"),
+                );
                 StoredCredential {
                     token: None,
-                    status: CredentialStatus::Missing,
-                }
-            } else {
-                StoredCredential {
-                    token: Some(token),
-                    status: CredentialStatus::Available,
+                    status: CredentialStatus::Unavailable,
                 }
             }
-        }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoredCredential {
             token: None,
             status: CredentialStatus::Missing,
@@ -2844,10 +2835,7 @@ fn read_dev_token_fallback() -> StoredCredential {
         Err(error) => {
             crate::diagnostics::record(
                 "账号",
-                format_args!(
-                    "credential_store_error=development_file kind={:?}",
-                    error.kind()
-                ),
+                format_args!("credential_store_error=read kind={:?}", error.kind()),
             );
             StoredCredential {
                 token: None,
@@ -2858,32 +2846,24 @@ fn read_dev_token_fallback() -> StoredCredential {
 }
 
 #[cfg(unix)]
-#[cfg(debug_assertions)]
-fn write_dev_token_file(path: &Path, token: &str) -> Result<(), String> {
+fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), String> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)
-        .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("收紧开发 token 文件权限失败: {e}"))?;
-    file.write_all(token.as_bytes())
-        .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
+        .map_err(|error| format!("写入 Plex 凭据文件失败: {error}"))?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("收紧 Plex 凭据文件权限失败: {error}"))?;
+    file.write_all(content)
+        .map_err(|error| format!("写入 Plex 凭据文件失败: {error}"))?;
     Ok(())
 }
 
-#[cfg(unix)]
-#[cfg(debug_assertions)]
-fn write_dev_token_fallback(token: &str) -> Result<(), String> {
-    write_dev_token_file(&dev_token_fallback_path(), token)
-}
-
 #[cfg(target_os = "windows")]
-#[cfg(debug_assertions)]
-fn write_dev_token_file(path: &Path, token: &str) -> Result<(), String> {
+fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
         core::{w, PCWSTR},
@@ -2900,7 +2880,7 @@ fn write_dev_token_file(path: &Path, token: &str) -> Result<(), String> {
     };
 
     let mut file =
-        std::fs::File::create(path).map_err(|error| format!("写入开发 token 文件失败: {error}"))?;
+        File::create(path).map_err(|error| format!("写入 Plex 凭据文件失败: {error}"))?;
     let path_wide = path
         .as_os_str()
         .encode_wide()
@@ -2914,7 +2894,7 @@ fn write_dev_token_file(path: &Path, token: &str) -> Result<(), String> {
             &mut descriptor,
             None,
         )
-        .map_err(|error| format!("创建开发 token 文件安全描述符失败: {error}"))?;
+        .map_err(|error| format!("创建 Plex 凭据文件安全描述符失败: {error}"))?;
         let permission_result = SetFileSecurityW(
             PCWSTR(path_wide.as_ptr()),
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
@@ -2922,132 +2902,36 @@ fn write_dev_token_file(path: &Path, token: &str) -> Result<(), String> {
         )
         .ok();
         let _ = LocalFree(HLOCAL(descriptor.0));
-        permission_result.map_err(|error| format!("收紧开发 token 文件权限失败: {error}"))?;
+        permission_result.map_err(|error| format!("收紧 Plex 凭据文件权限失败: {error}"))?;
     }
-    file.write_all(token.as_bytes())
-        .map_err(|error| format!("写入开发 token 文件失败: {error}"))?;
+    file.write_all(content)
+        .map_err(|error| format!("写入 Plex 凭据文件失败: {error}"))?;
     Ok(())
-}
-
-#[cfg(target_os = "windows")]
-#[cfg(debug_assertions)]
-fn write_dev_token_fallback(token: &str) -> Result<(), String> {
-    write_dev_token_file(&dev_token_fallback_path(), token)
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-#[cfg(debug_assertions)]
-fn write_dev_token_fallback(token: &str) -> Result<(), String> {
-    use std::io::Write;
-    let path = dev_token_fallback_path();
-    let mut file =
-        std::fs::File::create(&path).map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
-    file.write_all(token.as_bytes())
-        .map_err(|e| format!("写入开发 token 文件失败: {e}"))?;
-    Ok(())
+fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), String> {
+    fs::write(path, content).map_err(|error| format!("写入 Plex 凭据文件失败: {error}"))
 }
 
-/// Dev builds store credentials only in the plaintext fallback file and never
-/// touch the Keychain; release builds use the Keychain exclusively.
-#[cfg(debug_assertions)]
-fn read_account_token() -> StoredCredential {
-    read_dev_token_fallback()
-}
-
-#[cfg(not(debug_assertions))]
-fn read_account_token() -> StoredCredential {
-    let entry = match keyring_entry() {
-        Ok(entry) => entry,
-        Err(error) => {
-            crate::diagnostics::record(
-                "账号",
-                format_args!(
-                    "credential_store_error=entry category={}",
-                    keyring_error_category(&error)
-                ),
-            );
-            return StoredCredential {
-                token: None,
-                status: CredentialStatus::Unavailable,
-            };
-        }
+fn store_account_token(path: &Path, token: &str) -> Result<(), String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("Plex 登录 token 不能为空".to_string());
+    }
+    let credentials = PersistedCredential {
+        account_token: token.to_string(),
     };
-    match entry.get_password() {
-        Ok(token) if !token.is_empty() => StoredCredential {
-            token: Some(token),
-            status: CredentialStatus::Available,
-        },
-        Ok(_) | Err(keyring::Error::NoEntry) => StoredCredential {
-            token: None,
-            status: CredentialStatus::Missing,
-        },
-        Err(error) => {
-            crate::diagnostics::record(
-                "账号",
-                format_args!(
-                    "credential_store_error=read category={}",
-                    keyring_error_category(&error)
-                ),
-            );
-            StoredCredential {
-                token: None,
-                status: CredentialStatus::Unavailable,
-            }
-        }
-    }
+    let encoded = serde_json::to_vec(&credentials)
+        .map_err(|error| format!("序列化 Plex 凭据失败: {error}"))?;
+    write_restricted_file(path, &encoded)
 }
 
-#[cfg(not(debug_assertions))]
-fn keyring_error_category(error: &keyring::Error) -> &'static str {
-    match error {
-        keyring::Error::PlatformFailure(_) => "platform_failure",
-        keyring::Error::NoStorageAccess(_) => "no_storage_access",
-        keyring::Error::NoEntry => "no_entry",
-        keyring::Error::BadEncoding(_) => "bad_encoding",
-        keyring::Error::TooLong(_, _) => "attribute_too_long",
-        keyring::Error::Invalid(_, _) => "invalid_attribute",
-        keyring::Error::Ambiguous(_) => "ambiguous",
-        _ => "unknown",
-    }
-}
-
-#[cfg(debug_assertions)]
-fn store_account_token(token: &str) -> Result<(), String> {
-    write_dev_token_fallback(token)
-}
-
-#[cfg(not(debug_assertions))]
-fn store_account_token(token: &str) -> Result<(), String> {
-    keyring_entry()
-        .map_err(|e| e.to_string())?
-        .set_password(token)
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(debug_assertions)]
-fn delete_dev_token_file(path: &Path) -> Result<(), String> {
-    match std::fs::remove_file(path) {
+fn delete_account_token(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("删除开发 token 文件失败: {error}")),
-    }
-}
-
-#[cfg(debug_assertions)]
-fn delete_account_token() -> Result<(), String> {
-    delete_dev_token_file(&dev_token_fallback_path())
-}
-
-#[cfg(not(debug_assertions))]
-fn delete_account_token() -> Result<(), String> {
-    let entry = keyring_entry()
-        .map_err(|error| format!("无法打开系统凭据存储（{}）", keyring_error_category(&error)))?;
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(format!(
-            "无法删除系统凭据（{}）",
-            keyring_error_category(&error)
-        )),
+        Err(error) => Err(format!("删除 Plex 凭据文件失败: {error}")),
     }
 }
 
@@ -3094,41 +2978,63 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rewriting_existing_dev_token_tightens_permissions() {
+    fn rewriting_existing_credential_tightens_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         let cache = TestCache::new();
-        let path = cache.root.join("dev-token");
-        fs::write(&path, "old-token").expect("existing token should be created");
+        let path = cache.root.join(CREDENTIALS_FILE_NAME);
+        fs::write(&path, r#"{"accountToken":"old-token"}"#)
+            .expect("existing credential should be created");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
-            .expect("test token permissions should be relaxed");
+            .expect("test credential permissions should be relaxed");
 
-        write_dev_token_file(&path, "new-token").expect("token rewrite should succeed");
+        store_account_token(&path, "new-token").expect("credential rewrite should succeed");
 
-        assert_eq!(fs::read_to_string(&path).unwrap(), "new-token");
+        assert_eq!(
+            read_account_token(&path).token.as_deref(),
+            Some("new-token")
+        );
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    fn deleting_dev_token_is_idempotent_and_reports_non_file_targets() {
+    fn deleting_credential_is_idempotent_and_reports_non_file_targets() {
         let cache = TestCache::new();
-        let token = cache.root.join("dev-token");
-        fs::write(&token, "token").expect("test token should be created");
+        let token = cache.root.join(CREDENTIALS_FILE_NAME);
+        store_account_token(&token, "token").expect("test credential should be created");
 
-        delete_dev_token_file(&token).expect("existing token should be removed");
-        delete_dev_token_file(&token).expect("missing token should count as logged out");
+        delete_account_token(&token).expect("existing credential should be removed");
+        delete_account_token(&token).expect("missing credential should count as logged out");
         assert!(!token.exists());
 
-        let directory = cache.root.join("token-directory");
+        let directory = cache.root.join("credential-directory");
         fs::create_dir(&directory).expect("non-file target should be created");
-        let error = delete_dev_token_file(&directory)
+        let error = delete_account_token(&directory)
             .expect_err("a non-file target must not be reported as deleted");
-        assert!(error.starts_with("删除开发 token 文件失败:"));
+        assert!(error.starts_with("删除 Plex 凭据文件失败:"));
         assert!(directory.is_dir());
+    }
+
+    #[test]
+    fn account_credential_round_trips_as_local_json() {
+        let cache = TestCache::new();
+        let path = cache.root.join(CREDENTIALS_FILE_NAME);
+
+        store_account_token(&path, "  account-token  ")
+            .expect("credential should be stored in app data");
+
+        assert_eq!(
+            read_account_token(&path).token.as_deref(),
+            Some("account-token")
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&fs::read_to_string(&path).unwrap()).unwrap()
+                ["accountToken"],
+            "account-token"
+        );
     }
 
     #[test]

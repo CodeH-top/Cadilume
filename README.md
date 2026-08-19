@@ -65,7 +65,10 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 
 ### Account and privacy
 
-- Release builds store account credentials in macOS Keychain or Windows Credential Manager.
+- Release and debug builds store the Plex account token in the app configuration directory's
+  owner-only `credentials.json`, following the desktop app-data model used by Plexamp. The
+  file is `0600` on Unix and uses a current-user-only ACL on Windows; it is not exposed to the
+  WebView or written to logs.
 - Server tokens, upstream media addresses, and artwork addresses are not exposed directly to the interface layer or written to logs.
 - Every request continues to follow Plex Media Server access controls and subscription boundaries.
 - Playback, decoding, and caching ship with the application. Users do not need FFmpeg, libmpv, BASS, Homebrew, or a separate background service.
@@ -172,7 +175,6 @@ The unified GitHub desktop workflow is defined in [`.github/workflows/build-desk
 | cpal | 0.17.3 | CoreAudio / WASAPI device access |
 | symphonia | 0.5.5 | Audio format probing and decoding |
 | reqwest / axum | 0.13 / 0.8 | Plex requests and the secure local media proxy |
-| keyring | 3.6.3 | Operating-system credential storage |
 
 See [`package.json`](package.json), [`pnpm-lock.yaml`](pnpm-lock.yaml), [`src-tauri/Cargo.toml`](src-tauri/Cargo.toml), and [`src-tauri/Cargo.lock`](src-tauri/Cargo.lock) for the complete dependency list and locked versions.
 

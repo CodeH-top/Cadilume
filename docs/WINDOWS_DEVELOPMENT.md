@@ -1,6 +1,6 @@
 # Windows 开发与调试
 
-Cadilume 的 Windows 首要目标是 `x86_64-pc-windows-msvc`。Windows 端与 macOS 共用 React/Plex 业务层，播放、缓存、解码、输出设备和系统媒体控制仍由 Rust 负责。当前仓库能在 macOS 上做静态检查和 `cargo-xwin` 交叉链接；WASAPI、SMTC、Credential Manager、通知区域和安装器必须在 Windows runner 或真实 Windows 机器上验收。
+Cadilume 的 Windows 首要目标是 `x86_64-pc-windows-msvc`。Windows 端与 macOS 共用 React/Plex 业务层，播放、缓存、解码、输出设备和系统媒体控制仍由 Rust 负责。当前仓库能在 macOS 上做静态检查和 `cargo-xwin` 交叉链接；WASAPI、SMTC、应用数据凭据文件、通知区域和安装器必须在 Windows runner 或真实 Windows 机器上验收。
 
 ## 1. 开发机要求
 
@@ -47,13 +47,13 @@ pnpm tauri dev
 
 Windows debug 构建会显示主窗口，并在任务栏保留恢复入口；这样关闭窗口后可以从任务栏恢复，即使用户关闭了通知区域图标。Windows 使用无原生装饰的 Cadilume 自定义标题栏，左侧居中显示放大的品牌，右侧提供最小化、最大化/还原和关闭按钮。关闭主窗口仍然是原生最小化，不会停止播放。发布构建在初始化完成后显示主窗口。
 
-开发态账号 token 只写入：
+真实 PMS 回归测试使用的 token 只写入：
 
 ```text
 %USERPROFILE%\.cadilume-dev-token
 ```
 
-这是为了避免调试时弹出系统凭据授权；debug 文件不应复制到仓库、提交或写入日志。Release 构建不读取该文件，只使用 Windows Credential Manager。可通过 `CADILUME_DEV_TOKEN_FILE` 临时指定调试文件路径。切换账号或退出账号时，应用会清理对应调试凭据和 Rust 内存中的服务器 token。
+该文件只供被忽略的真实 PMS 回归测试读取，不是应用登录态；不应复制到仓库、提交或写入日志。Cadilume 登录后会把账号 token 写入应用配置目录的 `credentials.json`，Windows 文件 ACL 仅允许当前用户访问。可通过 `CADILUME_DEV_TOKEN_FILE` 临时指定回归测试文件路径。切换账号或退出账号时，应用会清理凭据文件和 Rust 内存中的服务器 token。
 
 调试时优先看运行 `pnpm tauri dev` 的终端输出。播放日志只包含经过清理的状态，不包含 PMS 地址、媒体路径、票据或 token。需要更完整的 Rust 堆栈时，在同一个 PowerShell 会话设置 `RUST_BACKTRACE=1`；不要把 token 放进 `RUST_LOG`、命令行参数或 issue 文字中。
 
@@ -76,7 +76,7 @@ pnpm verify:windows:bundle
 1. Windows 工具链和仓库表面检查
 2. `pnpm install --frozen-lockfile`（除非传入 `-SkipInstall`）
 3. TypeScript 检查、前端测试和构建
-4. `cargo fmt --check`、单线程 Rust 测试与 release 检查（覆盖 Credential Manager 路径；单线程避免多个真实 WASAPI 流在测试退出时并发销毁）
+4. `cargo fmt --check`、单线程 Rust 测试与 release 检查（覆盖 Windows 凭据文件 ACL 路径；单线程避免多个真实 WASAPI 流在测试退出时并发销毁）
 5. Tauri Windows debug 构建
 6. 可选的 NSIS 生成和 `git diff --check`
 
@@ -88,7 +88,7 @@ macOS 上可用已安装的 `cargo-xwin` 做交叉检查：
 pnpm verify:windows:cross
 ```
 
-该命令串行执行 `check:windows:cross`、`test:windows:cross` 与 `build:windows:cross`，依次覆盖 Windows `cfg` 和 WinRT API、测试二进制构建以及 Tauri Windows PE 链接。它不会运行 Windows 测试二进制，也不能证明 WASAPI、SMTC UI、Credential Manager、通知区域或 NSIS 安装器在真实 Windows 会话中工作。裸 `cargo check --target x86_64-pc-windows-msvc` 不够，它会在需要原生 C/Windows SDK 的依赖上失败；使用 `cargo-xwin` 或 Windows runner。
+该命令串行执行 `check:windows:cross`、`test:windows:cross` 与 `build:windows:cross`，依次覆盖 Windows `cfg` 和 WinRT API、测试二进制构建以及 Tauri Windows PE 链接。它不会运行 Windows 测试二进制，也不能证明 WASAPI、SMTC UI、凭据文件 ACL、通知区域或 NSIS 安装器在真实 Windows 会话中工作。裸 `cargo check --target x86_64-pc-windows-msvc` 不够，它会在需要原生 C/Windows SDK 的依赖上失败；使用 `cargo-xwin` 或 Windows runner。
 
 ## 5. Windows 实机验收清单
 
@@ -120,7 +120,7 @@ pnpm verify:windows:cross
 ### 账号、网络与缓存
 
 - [ ] PIN 登录通过系统浏览器完成，WebView 和日志中没有账号 token。
-- [ ] Release 构建的 token 只出现在当前 Windows 用户的 Credential Manager 中。
+- [ ] Release 构建的 token 只出现在应用配置目录的 `credentials.json` 中，且 ACL 只允许当前 Windows 用户访问。
 - [ ] 共享服务器请求使用该服务器专属 token；不能因 Windows 路径或编码变化丢失 ACL。
 - [ ] 本地 loopback 音频/封面代理可工作，Windows Defender 不要求开放非 loopback 端口。
 - [ ] `%LOCALAPPDATA%` 下缓存、配置和临时文件可创建；账号切换后票据和旧授权缓存被撤销。
@@ -145,8 +145,8 @@ pnpm verify:windows:cross
 | 播放无声 | 先运行应用内输出设备检查，切回“系统默认”，确认 Windows 音量混合器没有把 Cadilume 静音 |
 | 设备切换后静音 | 拔插设备后重新枚举；删除失效的输出设备偏好并重启 debug 进程 |
 | SMTC 没有条目 | 确认应用已开始播放，检查 Windows 媒体面板；SMTC 绑定需要主窗口 HWND，必须在 Tauri 窗口创建后初始化 |
-| 调试登录状态异常 | 删除 `%USERPROFILE%\.cadilume-dev-token` 后重新登录；不要删除 Credential Manager 中的 release 条目来排查 debug |
+| 应用登录状态异常 | 删除应用配置目录中的 `credentials.json` 后重新登录；真实 PMS 回归测试另查 `%USERPROFILE%\.cadilume-dev-token` |
 
 ## 7. 发行边界
 
-Windows 运行时不依赖 Homebrew、FFmpeg、libmpv、BASS、sidecar 或独立后台服务。WASAPI、SMTC、WebView2 和 Credential Manager 是系统能力；Rust 播放及协议依赖编译进 Cadilume。正式包仍需要 Windows 代码签名，未签名 debug NSIS 只作为开发和上机验收制品。
+Windows 运行时不依赖 Homebrew、FFmpeg、libmpv、BASS、sidecar 或独立后台服务。WASAPI、SMTC、WebView2 和 Windows 文件 ACL 是系统能力；Rust 播放及协议依赖编译进 Cadilume。正式包仍需要 Windows 代码签名，未签名 debug NSIS 只作为开发和上机验收制品。
