@@ -15,12 +15,13 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::{redirect::Policy, Client};
-use rodio::source::{SeekError, UniformSourceIterator};
+use rodio::source::SeekError;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio_cache::{CachePriority, SegmentCache, SegmentControl, SegmentReader};
+use crate::audio_resampler::preprocess_source_for_output;
 
 /// Decoder workers feed fixed, frame-aligned chunks to the real-time output.
 const DECODE_CHUNK_FRAMES: usize = 1024;
@@ -136,21 +137,6 @@ impl<S: Source> Source for HandoffMarker<S> {
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
         self.inner.try_seek(pos)
     }
-}
-
-/// Convert every decoded track to the fixed device format before it enters
-/// rodio's shared Player queue. Without this per-track boundary, a gapless
-/// 48 kHz -> 44.1 kHz transition keeps the first track's clock and plays the
-/// second track too fast and too high-pitched.
-fn normalize_source_for_output<S>(
-    source: S,
-    channels: rodio::ChannelCount,
-    sample_rate: rodio::SampleRate,
-) -> UniformSourceIterator<S>
-where
-    S: Source,
-{
-    UniformSourceIterator::new(source, channels, sample_rate)
 }
 
 struct DecodedChunk {
@@ -545,7 +531,33 @@ where
     spawn_threaded_decoder_with_health(source, None, Arc::new(NativeAudioHealth::default()))
 }
 
+#[cfg(test)]
 fn spawn_threaded_decoder_with_health<S>(
+    source: S,
+    reader_control: Option<Arc<SegmentControl>>,
+    health: Arc<NativeAudioHealth>,
+) -> Result<(ThreadedDecoderSource, Arc<DecodeBufferState>), String>
+where
+    S: Source + Send + 'static,
+{
+    spawn_threaded_decoder_source_with_health(source, reader_control, health)
+}
+
+fn spawn_threaded_decoder_for_output<S>(
+    source: S,
+    target_channels: rodio::ChannelCount,
+    target_sample_rate: rodio::SampleRate,
+    reader_control: Option<Arc<SegmentControl>>,
+    health: Arc<NativeAudioHealth>,
+) -> Result<(ThreadedDecoderSource, Arc<DecodeBufferState>), String>
+where
+    S: Source<Item = f32> + Send + 'static,
+{
+    let source = preprocess_source_for_output(source, target_channels, target_sample_rate)?;
+    spawn_threaded_decoder_source_with_health(source, reader_control, health)
+}
+
+fn spawn_threaded_decoder_source_with_health<S>(
     mut source: S,
     reader_control: Option<Arc<SegmentControl>>,
     health: Arc<NativeAudioHealth>,
@@ -750,6 +762,8 @@ struct PreparedSegmentDecoder {
 fn prepare_segment_decoder(
     mut reader: SegmentReader,
     metadata_duration_ms: Option<u64>,
+    target_channels: rodio::ChannelCount,
+    target_sample_rate: rodio::SampleRate,
     health: Arc<NativeAudioHealth>,
 ) -> Result<PreparedSegmentDecoder, String> {
     let control = reader.control();
@@ -767,8 +781,13 @@ fn prepare_segment_decoder(
         .total_duration()
         .map(|duration| duration.as_secs_f64())
         .or_else(|| metadata_duration_ms.map(|milliseconds| milliseconds as f64 / 1_000.0));
-    let (decoder, decode_state) =
-        spawn_threaded_decoder_with_health(decoder, Some(control), health)?;
+    let (decoder, decode_state) = spawn_threaded_decoder_for_output(
+        decoder,
+        target_channels,
+        target_sample_rate,
+        Some(control),
+        health,
+    )?;
     Ok(PreparedSegmentDecoder {
         decoder,
         decode_state,
@@ -2464,8 +2483,13 @@ impl NativeAudioEngine {
                     .duration_ms
                     .map(|milliseconds| milliseconds as f64 / 1000.0)
             });
-        let (decoder, decode_state) =
-            spawn_threaded_decoder_with_health(decoder, None, Arc::clone(&self.health))?;
+        let (decoder, decode_state) = spawn_threaded_decoder_for_output(
+            decoder,
+            self.output_channels,
+            self.output_sample_rate,
+            None,
+            Arc::clone(&self.health),
+        )?;
         let player = self
             .player
             .lock()
@@ -2490,11 +2514,7 @@ impl NativeAudioEngine {
             // changing devices cannot leak even a single audible callback.
             player.pause();
         }
-        player.append(normalize_source_for_output(
-            decoder,
-            self.output_channels,
-            self.output_sample_rate,
-        ));
+        player.append(decoder);
         if start_playing {
             player.play();
         }
@@ -2582,9 +2602,17 @@ impl NativeAudioEngine {
         let metadata_duration_ms = metadata_for_source
             .as_ref()
             .and_then(|metadata| metadata.duration_ms);
+        let target_channels = self.output_channels;
+        let target_sample_rate = self.output_sample_rate;
         let health = Arc::clone(&self.health);
         let mut prepare_task = tauri::async_runtime::spawn_blocking(move || {
-            prepare_segment_decoder(reader, metadata_duration_ms, health)
+            prepare_segment_decoder(
+                reader,
+                metadata_duration_ms,
+                target_channels,
+                target_sample_rate,
+                health,
+            )
         });
         let prepared = match tokio::time::timeout(prepare_timeout, &mut prepare_task).await {
             Ok(Ok(Ok(prepared))) => prepared,
@@ -2643,11 +2671,7 @@ impl NativeAudioEngine {
         if !start_playing {
             player.pause();
         }
-        player.append(normalize_source_for_output(
-            decoder,
-            self.output_channels,
-            self.output_sample_rate,
-        ));
+        player.append(decoder);
         if start_playing {
             player.play();
         }
@@ -2724,8 +2748,16 @@ impl NativeAudioEngine {
             let control = reader.control();
             self.register_segment_prepare(generation, Arc::clone(&control))?;
             let health = Arc::clone(&self.health);
+            let target_channels = self.output_channels;
+            let target_sample_rate = self.output_sample_rate;
             let mut prepare_task = tauri::async_runtime::spawn_blocking(move || {
-                prepare_segment_decoder(reader, metadata_duration_ms, health)
+                prepare_segment_decoder(
+                    reader,
+                    metadata_duration_ms,
+                    target_channels,
+                    target_sample_rate,
+                    health,
+                )
             });
             let prepared =
                 match tokio::time::timeout(SEGMENT_DECODE_PREPARE_TIMEOUT, &mut prepare_task).await
@@ -2792,9 +2824,14 @@ impl NativeAudioEngine {
             let decoded_total = decoder
                 .total_duration()
                 .map(|duration| duration.as_secs_f64());
-            let (decoder, decode_state) =
-                spawn_threaded_decoder_with_health(decoder, None, Arc::clone(&self.health))
-                    .map_err(|error| format!("预排{error}"))?;
+            let (decoder, decode_state) = spawn_threaded_decoder_for_output(
+                decoder,
+                self.output_channels,
+                self.output_sample_rate,
+                None,
+                Arc::clone(&self.health),
+            )
+            .map_err(|error| format!("预排{error}"))?;
             (decoder, decode_state, decoded_total)
         };
         let total = decoded_total
@@ -2802,11 +2839,7 @@ impl NativeAudioEngine {
         let artwork_url = metadata.artwork_url.clone().unwrap_or_default();
         let started = Arc::new(AtomicBool::new(false));
         let marker = HandoffMarker {
-            inner: normalize_source_for_output(
-                decoder,
-                self.output_channels,
-                self.output_sample_rate,
-            ),
+            inner: decoder,
             started: Arc::clone(&started),
         };
         let _transition = self
@@ -3538,6 +3571,13 @@ pub struct NativeOutputDevice {
 
 #[tauri::command]
 pub fn native_audio_output_devices() -> Result<Vec<NativeOutputDevice>, String> {
+    if cfg!(target_os = "macos") {
+        return Ok(vec![NativeOutputDevice {
+            device_id: String::new(),
+            label: "系统默认".to_string(),
+            is_default: true,
+        }]);
+    }
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
     let mut devices = vec![NativeOutputDevice {
@@ -3567,6 +3607,10 @@ pub async fn native_audio_set_output_device(
     state: tauri::State<'_, NativeAudioEngineSlot>,
     device_id: String,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _ = device_id;
+    #[cfg(target_os = "macos")]
+    let device_id = String::new();
     state.set_output_device(&app, device_id).await
 }
 
@@ -4274,12 +4318,18 @@ mod tests {
         let channels = std::num::NonZeroU16::new(CHANNELS).unwrap();
         let source_rate = std::num::NonZeroU32::new(SOURCE_RATE).unwrap();
         let output_rate = std::num::NonZeroU32::new(OUTPUT_RATE).unwrap();
-        let (source, state) = spawn_threaded_decoder(FiniteConstantSource {
-            remaining_samples: SOURCE_RATE as usize * CHANNELS as usize,
+        let (source, state) = spawn_threaded_decoder_for_output(
+            FiniteConstantSource {
+                remaining_samples: SOURCE_RATE as usize * CHANNELS as usize,
+                channels,
+                sample_rate: source_rate,
+                sample: 0.25,
+            },
             channels,
-            sample_rate: source_rate,
-            sample: 0.25,
-        })
+            output_rate,
+            None,
+            Arc::new(NativeAudioHealth::default()),
+        )
         .unwrap();
         let decode_deadline = std::time::Instant::now() + Duration::from_secs(2);
         while !state.finished.load(Ordering::SeqCst) && std::time::Instant::now() < decode_deadline
@@ -4315,12 +4365,18 @@ mod tests {
         let channels = std::num::NonZeroU16::new(CHANNELS).unwrap();
         let output_rate = std::num::NonZeroU32::new(OUTPUT_RATE).unwrap();
         let prepare = |sample_rate: u32, sample: f32| {
-            let (source, state) = spawn_threaded_decoder(FiniteConstantSource {
-                remaining_samples: sample_rate as usize * CHANNELS as usize,
+            let (source, state) = spawn_threaded_decoder_for_output(
+                FiniteConstantSource {
+                    remaining_samples: sample_rate as usize * CHANNELS as usize,
+                    channels,
+                    sample_rate: std::num::NonZeroU32::new(sample_rate).unwrap(),
+                    sample,
+                },
                 channels,
-                sample_rate: std::num::NonZeroU32::new(sample_rate).unwrap(),
-                sample,
-            })
+                output_rate,
+                None,
+                Arc::new(NativeAudioHealth::default()),
+            )
             .unwrap();
             let decode_deadline = std::time::Instant::now() + Duration::from_secs(2);
             while !state.finished.load(Ordering::SeqCst)
@@ -4335,16 +4391,8 @@ mod tests {
         let source_44100 = prepare(44_100, 0.25);
         let (mixer, mut output) = rodio::mixer::mixer(channels, output_rate);
         let player = Player::connect_new(&mixer);
-        player.append(normalize_source_for_output(
-            source_48000,
-            channels,
-            output_rate,
-        ));
-        player.append(normalize_source_for_output(
-            source_44100,
-            channels,
-            output_rate,
-        ));
+        player.append(source_48000);
+        player.append(source_44100);
 
         let probe_samples = OUTPUT_RATE as usize * CHANNELS as usize * 3;
         let mut second_track_samples = 0usize;

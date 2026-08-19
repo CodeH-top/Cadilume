@@ -4195,7 +4195,7 @@ function SettingsView(props: ContentViewProps) {
       <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放">
         <div className="settings-stack">
           <div className="field-row"><span><strong>音频质量</strong><small>默认播放原始流；MP3 档位由 PMS 按所选码率转码。</small></span><SettingsSelect label="音频质量" value={props.quality} placeholder="选择音频质量" disabled={false} options={[{ value: "original", label: "原始质量（默认）" }, { value: "auto", label: "自动兼容（原始优先）" }, { value: "320", label: "MP3 · 320 kbps" }, { value: "256", label: "MP3 · 256 kbps" }, { value: "192", label: "MP3 · 192 kbps" }]} onValueChange={(value) => props.onQuality(value as StreamQuality)} /></div>
-          {isDesktopRuntime() && (props.outputDevices.platform === "windows" || props.outputDevices.platform === "macos") && <OutputDeviceSetting output={props.outputDevices} />}
+          {isDesktopRuntime() && props.outputDevices.platform === "windows" && <OutputDeviceSetting output={props.outputDevices} />}
           <div className="toggle-row">
             <span><strong>预缓冲下一首</strong><small>提前加载队列中的下一首。</small></span>
             <label className="toggle-switch" aria-label="预缓冲下一首"><input type="checkbox" checked={props.prebufferNext} onChange={(event) => props.onPrebufferNext(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /></label>

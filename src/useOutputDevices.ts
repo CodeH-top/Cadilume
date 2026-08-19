@@ -73,7 +73,7 @@ export function useOutputDevices(
     desktopRuntime,
     window.isSecureContext,
     supportsSinkSelection(),
-  );
+  ) && platform !== "macos";
   const canUseSystemPicker = !desktopRuntime && typeof mediaDevices?.selectAudioOutput === "function";
   const [devices, setDevices] = useState<OutputDevice[]>([
     { deviceId: "", label: "系统默认", isDefault: true },
@@ -84,11 +84,22 @@ export function useOutputDevices(
 
   useEffect(() => {
     if (activeOutputDeviceId === undefined) return;
+    if (platform === "macos") {
+      setSelectedDeviceId("");
+      writeOutputDevicePreference("");
+      return;
+    }
     setSelectedDeviceId(activeOutputDeviceId);
     writeOutputDevicePreference(activeOutputDeviceId);
-  }, [activeOutputDeviceId]);
+  }, [activeOutputDeviceId, platform]);
 
   const refresh = useCallback(async () => {
+    if (platform === "macos") {
+      setDevices([{ deviceId: "", label: "系统默认", isDefault: true }]);
+      setSelectedDeviceId("");
+      writeOutputDevicePreference("");
+      return;
+    }
     if (!desktopRuntime && !mediaDevices?.enumerateDevices) return;
     setLoading(true);
     try {
@@ -119,9 +130,14 @@ export function useOutputDevices(
     } finally {
       setLoading(false);
     }
-  }, [desktopRuntime, mediaDevices, setOutputSinkId]);
+  }, [desktopRuntime, mediaDevices, platform, setOutputSinkId]);
 
   const selectDevice = useCallback(async (deviceId: string) => {
+    if (platform === "macos") {
+      writeOutputDevicePreference("");
+      setSelectedDeviceId("");
+      return false;
+    }
     setMessage(undefined);
     let applied = false;
     try {
@@ -146,9 +162,10 @@ export function useOutputDevices(
     writeOutputDevicePreference("");
     setMessage("所选设备当前不可用，已回退到系统默认输出。");
     return false;
-  }, [setOutputSinkId]);
+  }, [platform, setOutputSinkId]);
 
   const requestSystemDevice = useCallback(async () => {
+    if (platform === "macos") return;
     if (!mediaDevices?.selectAudioOutput) {
       setMessage("当前 WebView 不支持系统设备选择器，可直接从下方设备列表选择。");
       return;
@@ -170,10 +187,16 @@ export function useOutputDevices(
     } finally {
       setLoading(false);
     }
-  }, [mediaDevices, refresh, selectDevice, selectedDeviceId]);
+  }, [mediaDevices, platform, refresh, selectDevice, selectedDeviceId]);
 
   useEffect(() => {
-    if (desktopRuntime) {
+    if (desktopRuntime && platform === "macos") {
+      writeOutputDevicePreference("");
+      setSelectedDeviceId("");
+      setDevices([{ deviceId: "", label: "系统默认", isDefault: true }]);
+      return;
+    }
+    if (desktopRuntime && platform === "windows") {
       let cancelled = false;
       const restore = async () => {
         const stored = readOutputDevicePreference();
@@ -200,9 +223,8 @@ export function useOutputDevices(
         if (!cancelled) await refresh();
       };
       void restore();
-      // cpal does not expose one portable hot-plug callback. Revalidate explicit
-      // routes on both desktop platforms so unplugging a device returns to the
-      // system default instead of leaving a silent output stream behind.
+      // Revalidate explicit Windows routes so unplugging a device returns to
+      // the system default instead of leaving a silent output stream behind.
       const refreshTimer = window.setInterval(() => {
         if (!cancelled) void refresh();
       }, 5_000);

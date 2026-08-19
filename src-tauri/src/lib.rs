@@ -1,6 +1,7 @@
 mod app_update;
 mod audio_cache;
 mod audio_engine;
+mod audio_resampler;
 mod diagnostics;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod now_playing;
