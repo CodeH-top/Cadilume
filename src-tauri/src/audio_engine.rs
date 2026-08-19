@@ -181,6 +181,10 @@ struct DecodeBufferState {
     resume_chunks: usize,
     underflow_frames: AtomicU64,
     played_media_frames: AtomicU64,
+    /// Monotonic count of frames consumed by the output callback. Unlike
+    /// `played_media_frames`, seeking must not reset this because it is used
+    /// to prove that a new playback start reached CoreAudio.
+    output_media_frames: AtomicU64,
     position_base_micros: AtomicU64,
     sample_rate_hz: u32,
     seek_epoch: AtomicU64,
@@ -216,6 +220,7 @@ impl DecodeBufferState {
             resume_chunks,
             underflow_frames: AtomicU64::new(0),
             played_media_frames: AtomicU64::new(0),
+            output_media_frames: AtomicU64::new(0),
             position_base_micros: AtomicU64::new(0),
             sample_rate_hz: sample_rate.get(),
             seek_epoch: AtomicU64::new(0),
@@ -296,6 +301,8 @@ impl DecodeBufferState {
         let frames = samples / channels.max(1);
         self.played_media_frames
             .fetch_add(frames as u64, Ordering::Relaxed);
+        self.output_media_frames
+            .fetch_add(frames as u64, Ordering::SeqCst);
     }
 
     fn set_position_base(&self, position: Duration) {
@@ -882,6 +889,9 @@ pub struct NativeAudioEngine {
     /// Becomes true only after the output callback has consumed actual PCM.
     /// Decoder preparation alone must not make the UI claim playback started.
     playback_started: Arc<AtomicBool>,
+    /// Output-frame count that was current when playback was last requested.
+    /// The next `playback-started` event needs to observe a greater value.
+    playback_start_frame: Arc<AtomicU64>,
     buffer_paused: Arc<AtomicBool>,
     accepting_work: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
@@ -1733,10 +1743,13 @@ fn output_has_started(
     desired_playing: bool,
     has_player_source: bool,
     decode_state: Option<&Arc<DecodeBufferState>>,
+    playback_start_frame: u64,
 ) -> bool {
     desired_playing
         && has_player_source
-        && decode_state.is_some_and(|state| state.played_media_frames.load(Ordering::SeqCst) > 0)
+        && decode_state.is_some_and(|state| {
+            state.output_media_frames.load(Ordering::SeqCst) > playback_start_frame
+        })
 }
 
 /// As soon as the old route is known to be unusable, retract the prior output
@@ -1751,7 +1764,7 @@ fn publish_output_device_recovering(
         && engine.desired_playing.load(Ordering::SeqCst)
         && !engine.player().empty();
     if playing {
-        engine.playback_started.store(false, Ordering::SeqCst);
+        engine.require_fresh_pcm_confirmation();
     }
     let _ = app.emit(
         "native-audio://event",
@@ -1956,6 +1969,7 @@ impl NativeAudioEngine {
             decode_state: Arc::new(Mutex::new(None)),
             desired_playing: Arc::new(AtomicBool::new(false)),
             playback_started: Arc::new(AtomicBool::new(false)),
+            playback_start_frame: Arc::new(AtomicU64::new(0)),
             buffer_paused: Arc::new(AtomicBool::new(false)),
             accepting_work: Arc::new(AtomicBool::new(true)),
             stopped: Arc::new(AtomicBool::new(false)),
@@ -2055,6 +2069,7 @@ impl NativeAudioEngine {
         self.ended_sent.store(true, Ordering::SeqCst);
         self.desired_playing.store(false, Ordering::SeqCst);
         self.playback_started.store(false, Ordering::SeqCst);
+        self.playback_start_frame.store(0, Ordering::SeqCst);
         self.buffer_paused.store(false, Ordering::SeqCst);
         if let Ok(mut observation) = self.heartbeat_stale_observation.lock() {
             *observation = None;
@@ -2077,6 +2092,25 @@ impl NativeAudioEngine {
             generation,
             decode_states,
         }
+    }
+
+    /// Require new audio to reach the output callback before exposing this
+    /// playback request. This also covers a user resuming after a device route
+    /// was rebuilt while paused.
+    fn require_fresh_pcm_confirmation(&self) {
+        let output_frame = self
+            .decode_state
+            .lock()
+            .ok()
+            .and_then(|state| {
+                state
+                    .as_ref()
+                    .map(|state| state.output_media_frames.load(Ordering::SeqCst))
+            })
+            .unwrap_or(0);
+        self.playback_start_frame
+            .store(output_frame, Ordering::SeqCst);
+        self.playback_started.store(false, Ordering::SeqCst);
     }
 
     fn begin_playback_transition(&self) -> u64 {
@@ -3248,6 +3282,7 @@ impl NativeAudioEngine {
                     engine.desired_playing.load(Ordering::SeqCst),
                     !player.empty(),
                     decode_state.as_ref(),
+                    engine.playback_start_frame.load(Ordering::SeqCst),
                 ) && !engine.playback_started.swap(true, Ordering::SeqCst)
                 {
                     let item = current_queue_identity(&engine.queue);
@@ -3678,6 +3713,7 @@ pub async fn native_audio_play(
     let engine = state
         .current()
         .ok_or_else(|| "当前没有可恢复的播放".to_string())?;
+    engine.require_fresh_pcm_confirmation();
     engine.desired_playing.store(true, Ordering::SeqCst);
     engine.player().play();
     Ok(())
@@ -4503,11 +4539,14 @@ mod tests {
             None,
             Arc::new(NativeAudioHealth::default()),
         ));
-        assert!(!output_has_started(true, true, Some(&state)));
-        assert!(!output_has_started(false, true, Some(&state)));
-        assert!(!output_has_started(true, false, Some(&state)));
-        state.played_media_frames.store(1, Ordering::SeqCst);
-        assert!(output_has_started(true, true, Some(&state)));
+        assert!(!output_has_started(true, true, Some(&state), 0));
+        assert!(!output_has_started(false, true, Some(&state), 0));
+        assert!(!output_has_started(true, false, Some(&state), 0));
+        state.output_media_frames.store(1, Ordering::SeqCst);
+        assert!(output_has_started(true, true, Some(&state), 0));
+        assert!(!output_has_started(true, true, Some(&state), 1));
+        state.output_media_frames.store(2, Ordering::SeqCst);
+        assert!(output_has_started(true, true, Some(&state), 1));
     }
 
     #[test]

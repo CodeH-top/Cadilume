@@ -1477,7 +1477,13 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             await loadAt(indexRef.current, true, resumeProgressRef.current ?? progressRef.current);
           } else {
             await nativeAudioPlay();
-            setPlaying(true);
+            // A resumed engine may have been rebuilt while paused after an
+            // output-device change. Wait for Rust's next PCM confirmation
+            // rather than claiming it is playing as soon as the command
+            // returns.
+            setPlaying(false);
+            setBuffering(false);
+            setPlaybackLoading(true);
           }
         } catch {
           setPlaying(false);
