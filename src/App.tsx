@@ -414,7 +414,7 @@ function MainApplication({
   if (!session && !error) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} /></AppFrame>);
   if (!session) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>);
   if (session.credentialStatus === "unavailable") {
-    return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message="无法访问系统凭据存储。请解锁系统钥匙串或凭据管理器后重试。" retry={retryLoad} /></AppFrame>);
+    return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message="无法读取应用数据中的 Plex 登录文件，请检查应用数据目录权限后重试。" retry={retryLoad} /></AppFrame>);
   }
   if (!session.authenticated || !session.account) {
     return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
