@@ -9,8 +9,6 @@ mod plex;
 mod stream_proxy;
 mod window;
 
-use std::fs;
-
 use audio_engine::NativeAudioEngineSlot;
 use plex::PlexState;
 use stream_proxy::StreamProxy;
@@ -46,12 +44,13 @@ pub fn run() {
             );
             let config_dir = app.path().app_config_dir()?;
             let cache_dir = app.path().app_cache_dir()?;
-            fs::create_dir_all(&config_dir)?;
-            let plex_state = PlexState::load(config_dir, cache_dir)?;
-            let status_icon_enabled = plex_state.status_icon_enabled();
+            // Construct only the in-memory shell on the setup thread. Config,
+            // encrypted credentials, artwork-cache recovery, and the macOS
+            // computer name are loaded by the worker below so opening the
+            // window never waits on filesystem or subprocess I/O.
+            let plex_state = PlexState::new(config_dir, cache_dir)?;
             app.manage(plex_state);
             let native_cache = app.path().app_cache_dir()?.join("native-audio");
-            fs::create_dir_all(&native_cache)?;
             app.manage(NativeAudioEngineSlot::new(native_cache));
             #[cfg(target_os = "macos")]
             now_playing::install(app.handle().clone());
@@ -67,7 +66,23 @@ pub fn run() {
                 // URIs, paths, tokens, tickets, or private track identifiers.
                 eprintln!("[播放] {}", event.payload());
             });
-            window::set_status_icon_enabled(app.handle(), status_icon_enabled)?;
+            let initialization_handle = app.handle().clone();
+            std::thread::Builder::new()
+                .name("cadilume-startup".to_string())
+                .spawn(move || {
+                    let state = initialization_handle.state::<PlexState>();
+                    let result = state.initialize();
+                    let error = result.as_ref().err().map(ToString::to_string);
+                    state.finish_initialization(error.clone());
+                    if let Some(error) = error {
+                        diagnostics::record("启动", format_args!("后台初始化失败 error={error}"));
+                    }
+                    let _ = window::set_status_icon_enabled(
+                        &initialization_handle,
+                        state.status_icon_enabled(),
+                    );
+                })
+                .map_err(|error| format!("无法启动后台初始化线程：{error}"))?;
             // macOS development keeps the window hidden so a hot reload does
             // not steal focus; Dock Reopen and the status icon reveal it.
             // Windows has no Dock-Reopen equivalent, so the debug window must
@@ -80,6 +95,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             plex::bootstrap,
+            plex::refresh_account,
             plex::create_pin,
             plex::cancel_pin,
             plex::poll_pin,

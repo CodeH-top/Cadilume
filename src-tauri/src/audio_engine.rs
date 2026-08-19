@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{
     sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
 };
+use std::sync::OnceLock;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -20,7 +21,9 @@ use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::audio_cache::{CachePriority, SegmentCache, SegmentControl, SegmentReader};
+use crate::audio_cache::{
+    CachePriority, SegmentCache, SegmentControl, SegmentReader, AUDIO_CACHE_LIMIT_BYTES,
+};
 use crate::audio_resampler::preprocess_source_for_output;
 
 /// Decoder workers feed fixed, frame-aligned chunks to the real-time output.
@@ -1273,7 +1276,8 @@ struct PlaybackSnapshot {
 
 /// Lazy engine slot so the device stream opens on first use.
 pub struct NativeAudioEngineSlot {
-    segment_cache: SegmentCache,
+    cache_root: PathBuf,
+    segment_cache: OnceLock<Result<SegmentCache, String>>,
     inner: Mutex<Option<Arc<NativeAudioEngine>>>,
     preferred_device: Mutex<Option<String>>,
     preferred_volume: Mutex<Option<f32>>,
@@ -1292,10 +1296,9 @@ impl Drop for SlotMaintenanceGuard<'_> {
 
 impl NativeAudioEngineSlot {
     pub fn new(cache_root: PathBuf) -> Self {
-        let segment_cache = SegmentCache::new(cache_root.clone())
-            .unwrap_or_else(|error| panic!("初始化分段音频缓存失败: {error}"));
         Self {
-            segment_cache,
+            cache_root,
+            segment_cache: OnceLock::new(),
             inner: Mutex::new(None),
             preferred_device: Mutex::new(None),
             preferred_volume: Mutex::new(None),
@@ -1306,11 +1309,22 @@ impl NativeAudioEngineSlot {
     }
 
     pub fn cache_limit_bytes(&self) -> u64 {
-        self.segment_cache.limit_bytes()
+        AUDIO_CACHE_LIMIT_BYTES
     }
 
     fn segment_cache_status(&self) -> crate::audio_cache::CacheStatus {
-        self.segment_cache.status()
+        self.segment_cache
+            .get()
+            .and_then(|cache| cache.as_ref().ok())
+            .map(SegmentCache::status)
+            .unwrap_or_default()
+    }
+
+    fn segment_cache(&self) -> Result<&SegmentCache, String> {
+        self.segment_cache
+            .get_or_init(|| SegmentCache::new(self.cache_root.clone()))
+            .as_ref()
+            .map_err(Clone::clone)
     }
 
     fn current(&self) -> Option<Arc<NativeAudioEngine>> {
@@ -1370,7 +1384,7 @@ impl NativeAudioEngineSlot {
             engine.stopped.store(true, Ordering::SeqCst);
             cleanup?;
         }
-        self.segment_cache.clear()?;
+        self.segment_cache()?.clear()?;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         crate::now_playing::clear();
         Ok(())
@@ -1402,7 +1416,7 @@ impl NativeAudioEngineSlot {
             .unwrap_or(None);
         let engine = Arc::new(
             NativeAudioEngine::new_with_segment_cache_and_health(
-                self.segment_cache.clone(),
+                self.segment_cache()?.clone(),
                 preferred_device.as_deref().unwrap_or(""),
                 Arc::clone(&self.health),
             )
@@ -1524,7 +1538,7 @@ impl NativeAudioEngineSlot {
         let snapshot = old.capture_playback_snapshot();
         let new_engine = Arc::new(
             NativeAudioEngine::new_with_segment_cache_and_health(
-                self.segment_cache.clone(),
+                self.segment_cache()?.clone(),
                 &device_id,
                 Arc::clone(&self.health),
             )

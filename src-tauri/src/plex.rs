@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, State};
+use tokio::sync::Notify;
 use url::Url;
 use uuid::Uuid;
 
@@ -314,25 +315,75 @@ pub struct PlexState {
     credential_path: PathBuf,
     credential_key_path: PathBuf,
     legacy_credential_path: PathBuf,
+    cache_root: PathBuf,
     cache_dir: PathBuf,
     cache_lock: RwLock<()>,
     config: Mutex<PersistedConfig>,
-    client_identifier: String,
+    client_identifier: RwLock<String>,
     status_icon_enabled: AtomicBool,
     auto_update_enabled: AtomicBool,
     credential_status: RwLock<CredentialStatus>,
     token: RwLock<Option<String>>,
     servers: RwLock<HashMap<String, CachedServer>>,
+    initialized: AtomicBool,
+    initialization_error: Mutex<Option<String>>,
+    ready: Notify,
 }
 
 impl PlexState {
-    pub fn load(config_dir: PathBuf, app_cache_dir: PathBuf) -> Result<Self> {
+    pub fn new(config_dir: PathBuf, app_cache_dir: PathBuf) -> Result<Self> {
         let config_path = config_dir.join("config.json");
         let credential_path = config_dir.join(CREDENTIALS_FILE_NAME);
         let credential_key_path = config_dir.join(CREDENTIALS_KEY_FILE_NAME);
         let legacy_credential_path = config_dir.join(LEGACY_CREDENTIALS_FILE_NAME);
-        let cache_dir = initialize_artwork_cache_dir(&app_cache_dir)?;
-        let (mut config, mut should_persist_config) = match fs::read_to_string(&config_path) {
+        let cache_root = app_cache_dir;
+        let cache_dir = cache_root.join(CACHE_NAMESPACE_DIR).join(ARTWORK_CACHE_DIR);
+        let config = PersistedConfig {
+            client_identifier: Uuid::new_v4().to_string(),
+            close_behavior: default_close_behavior(),
+            status_icon_enabled: default_status_icon_enabled(),
+            auto_update_enabled: default_auto_update_enabled(),
+            // Resolve the machine name on the startup worker, never on the UI
+            // thread. This fallback is replaced by initialize() if possible.
+            device_name: FALLBACK_DEVICE_NAME.to_string(),
+            brand_preset: BrandPreset::default(),
+        };
+        let protected_client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(20))
+            .redirect(Policy::none())
+            .user_agent(format!("{PRODUCT_NAME}/{PRODUCT_VERSION}"))
+            .build()?;
+
+        Ok(Self {
+            protected_client,
+            config_path,
+            credential_path,
+            credential_key_path,
+            legacy_credential_path,
+            cache_root,
+            cache_dir,
+            cache_lock: RwLock::new(()),
+            config: Mutex::new(config.clone()),
+            client_identifier: RwLock::new(config.client_identifier),
+            status_icon_enabled: AtomicBool::new(config.status_icon_enabled),
+            auto_update_enabled: AtomicBool::new(config.auto_update_enabled),
+            credential_status: RwLock::new(CredentialStatus::Missing),
+            token: RwLock::new(None),
+            servers: RwLock::new(HashMap::new()),
+            initialized: AtomicBool::new(false),
+            initialization_error: Mutex::new(None),
+            ready: Notify::new(),
+        })
+    }
+
+    pub fn initialize(&self) -> Result<()> {
+        if let Some(config_dir) = self.config_path.parent() {
+            fs::create_dir_all(config_dir).context("无法创建 Cadilume 配置目录")?;
+        }
+        initialize_artwork_cache_dir(&self.cache_root)?;
+
+        let (mut config, mut should_persist_config) = match fs::read_to_string(&self.config_path) {
             Ok(raw) => {
                 let mut value =
                     serde_json::from_str::<Value>(&raw).context("无法解析 Cadilume 配置")?;
@@ -351,43 +402,64 @@ impl PlexState {
         should_persist_config |= normalize_persisted_device_name(&mut config);
         should_persist_config |= normalize_persisted_close_behavior(&mut config);
         if should_persist_config {
-            write_persisted_config(&config_path, &config)?;
+            write_persisted_config(&self.config_path, &config)?;
         }
 
         // Keep the account token beside the app's other local data, matching
         // Plexamp's desktop storage model. It never enters the WebView.
         let stored_credential = read_account_token(
-            &credential_path,
-            &credential_key_path,
-            &legacy_credential_path,
+            &self.credential_path,
+            &self.credential_key_path,
+            &self.legacy_credential_path,
         );
         crate::diagnostics::record(
             "账号",
             format_args!("credential_store={}", stored_credential.status.log_label()),
         );
-        let protected_client = Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(20))
-            .redirect(Policy::none())
-            .user_agent(format!("{PRODUCT_NAME}/{PRODUCT_VERSION}"))
-            .build()?;
+        *self
+            .config
+            .lock()
+            .map_err(|_| anyhow!("配置写入锁定失败"))? = config.clone();
+        *self
+            .client_identifier
+            .write()
+            .map_err(|_| anyhow!("客户端标识写入锁定失败"))? = config.client_identifier;
+        self.status_icon_enabled
+            .store(config.status_icon_enabled, Ordering::SeqCst);
+        self.auto_update_enabled
+            .store(config.auto_update_enabled, Ordering::SeqCst);
+        *self
+            .credential_status
+            .write()
+            .map_err(|_| anyhow!("凭据状态写入锁定失败"))? = stored_credential.status;
+        *self
+            .token
+            .write()
+            .map_err(|_| anyhow!("凭据写入锁定失败"))? = stored_credential.token;
+        Ok(())
+    }
 
-        Ok(Self {
-            protected_client,
-            config_path,
-            credential_path,
-            credential_key_path,
-            legacy_credential_path,
-            cache_dir,
-            cache_lock: RwLock::new(()),
-            config: Mutex::new(config.clone()),
-            client_identifier: config.client_identifier.clone(),
-            status_icon_enabled: AtomicBool::new(config.status_icon_enabled),
-            auto_update_enabled: AtomicBool::new(config.auto_update_enabled),
-            credential_status: RwLock::new(stored_credential.status),
-            token: RwLock::new(stored_credential.token),
-            servers: RwLock::new(HashMap::new()),
-        })
+    pub(crate) fn finish_initialization(&self, error: Option<String>) {
+        if let Ok(mut current) = self.initialization_error.lock() {
+            *current = error;
+        }
+        self.initialized.store(true, Ordering::SeqCst);
+        self.ready.notify_one();
+    }
+
+    pub(crate) async fn wait_until_initialized(&self) -> Result<()> {
+        loop {
+            let notified = self.ready.notified();
+            if self.initialized.load(Ordering::SeqCst) {
+                let error = self
+                    .initialization_error
+                    .lock()
+                    .ok()
+                    .and_then(|current| current.clone());
+                return error.map_or(Ok(()), |error| Err(anyhow!(error)));
+            }
+            notified.await;
+        }
     }
 
     pub fn status_icon_enabled(&self) -> bool {
@@ -488,7 +560,8 @@ impl PlexState {
         request: reqwest::RequestBuilder,
     ) -> reqwest::RequestBuilder {
         let device_name = self.device_name();
-        apply_plex_identity_headers(request, &self.client_identifier, &device_name)
+        let client_identifier = self.client_identifier();
+        apply_plex_identity_headers(request, &client_identifier, &device_name)
     }
 
     async fn account(&self, token: &str) -> Result<Account> {
@@ -631,7 +704,7 @@ impl PlexState {
         // option, and keep unreachable connections at the end so a later
         // request can still retry them after a transient outage.
         let client = self.protected_client.clone();
-        let client_identifier = self.client_identifier.clone();
+        let client_identifier = self.client_identifier();
         let device_name = self.device_name();
         let expected_identifier = expected_machine_identifier.to_string();
         let mut pending = Vec::new();
@@ -825,8 +898,11 @@ impl PlexState {
         Ok(summaries)
     }
 
-    pub(crate) fn client_identifier(&self) -> &str {
-        &self.client_identifier
+    pub(crate) fn client_identifier(&self) -> String {
+        self.client_identifier
+            .read()
+            .map(|identifier| identifier.clone())
+            .unwrap_or_else(|_| String::new())
     }
 
     pub(crate) fn cached_artwork(&self, cache_key: &str) -> Result<CachedArtwork> {
@@ -1079,29 +1155,22 @@ struct XmlLyricSpan {
 
 #[tauri::command]
 pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse, String> {
+    state
+        .wait_until_initialized()
+        .await
+        .map_err(display_error)?;
     let token = state.token().ok();
     crate::diagnostics::record(
         "账号",
         format_args!("bootstrap_start credential={}", token.is_some()),
     );
-    let account = match token.as_deref() {
-        Some(token) => match state.account(token).await {
-            Ok(account) => {
-                crate::diagnostics::record("账号", format_args!("bootstrap_account=available"));
-                Some(account)
-            }
-            Err(_) => {
-                crate::diagnostics::record("账号", format_args!("bootstrap_account=unavailable"));
-                None
-            }
-        },
-        None => None,
-    };
     let response = BootstrapResponse {
-        client_identifier: state.client_identifier.clone(),
+        client_identifier: state.client_identifier(),
         authenticated: token.is_some(),
         credential_status: state.credential_status(),
-        account,
+        // Account metadata is intentionally loaded after the first frame. A
+        // slow Plex account endpoint must never keep the window on Splash.
+        account: None,
         app_version: PRODUCT_VERSION.to_string(),
         app_update_supported: crate::app_update::is_supported(),
         auto_update_enabled: state.auto_update_enabled(),
@@ -1120,6 +1189,18 @@ pub async fn bootstrap(state: State<'_, PlexState>) -> Result<BootstrapResponse,
         ),
     );
     Ok(response)
+}
+
+#[tauri::command]
+pub async fn refresh_account(state: State<'_, PlexState>) -> Result<Account, String> {
+    state
+        .wait_until_initialized()
+        .await
+        .map_err(display_error)?;
+    let token = state.token().map_err(display_error)?;
+    let account = state.account(&token).await.map_err(display_error)?;
+    crate::diagnostics::record("账号", format_args!("account_refresh=available"));
+    Ok(account)
 }
 
 #[tauri::command]

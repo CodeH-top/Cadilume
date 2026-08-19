@@ -633,8 +633,8 @@ async fn forward_to_plex(
 
         let mut attempts: Vec<UpstreamAttempt> = Vec::new();
         for connection in &server.connections {
-            let endpoints = match build_upstream_urls(target, connection, plex.client_identifier())
-            {
+            let client_identifier = plex.client_identifier();
+            let endpoints = match build_upstream_urls(target, connection, &client_identifier) {
                 Ok(endpoints) => endpoints,
                 Err(_) => continue,
             };

@@ -234,6 +234,10 @@ export async function bootstrap(): Promise<BootstrapResponse> {
   return isDesktopRuntime() ? invoke("bootstrap") : demoBootstrap;
 }
 
+export async function refreshAccount(): Promise<NonNullable<BootstrapResponse["account"]>> {
+  return isDesktopRuntime() ? invoke("refresh_account") : demoBootstrap.account as NonNullable<BootstrapResponse["account"]>;
+}
+
 export async function createPin(): Promise<PlexPin> {
   if (!isDesktopRuntime()) return { id: 1, code: "DEMO", expiresIn: 300, authenticated: false };
   return invoke("create_pin");

@@ -88,6 +88,7 @@ import {
   nativeAudioCacheStatus,
   normalizeDeviceName,
   removeTracksFromPlaylist,
+  refreshAccount,
   searchLibrary,
   setCloseBehavior as saveCloseBehavior,
   setStatusIconEnabled as saveStatusIconEnabled,
@@ -103,7 +104,6 @@ import { appendUniqueArtistTracks, collectAllArtistTracks, isArtistTrackCollecti
 import { selectRandomContextPlayback } from "./contextPlayback";
 import {
   isInitialLibrarySnapshotScopeActive,
-  loadInitialLibraryData,
   orderPlaylistsByRecency,
   withStartupTimeout,
   type InitialLibraryData,
@@ -177,7 +177,6 @@ const ARTIST_TRACK_PAGE_SIZE = 50;
 const LIBRARY_TRACK_PAGE_SIZE = 50;
 const SOURCE_SYNC_OVERLAY_MINIMUM_MS = 600;
 const SIDE_PANEL_MOTION_MS = 220;
-const STARTUP_TIMEOUT_MS = 45_000;
 type ConnectionKind = "local" | "remote" | "relay" | "disconnected";
 type ResolvedTheme = ThemeMode;
 type ThemeTransitionOrigin = { x: number; y: number };
@@ -189,6 +188,27 @@ type MusicPlayer = ReturnType<typeof usePlayer>;
 type OutputDevicesController = ReturnType<typeof useOutputDevices>;
 type PlaylistSelection = { tracks: PlexItem[]; label: string };
 const SYSTEM_OUTPUT_DEVICE_VALUE = "__cadilume_system_default__";
+const BOOTSTRAP_ACCOUNT_PLACEHOLDER: PlexAccount = {
+  username: "Plex",
+  title: "Plex",
+  email: "",
+  home: false,
+  restricted: false,
+  subscriptionActive: false,
+};
+
+function emptyInitialLibrary(): InitialLibraryData {
+  return {
+    servers: [],
+    sections: [],
+    playlists: [],
+    playlistsComplete: false,
+    libraryArtists: [],
+    libraryArtistsComplete: false,
+    home: { recentAlbums: [], hubs: [] },
+    homeComplete: false,
+  };
+}
 
 interface MusicShellRuntime {
   initialSession: BootstrapResponse;
@@ -346,6 +366,7 @@ function MainApplication({
   const notifications = useGlobalNotificationQueue();
   const appUpdater = useAppUpdater(session, notifications.notify);
   const syncedBrandSessionRef = useRef<BootstrapResponse | undefined>(undefined);
+  const accountRefreshRequestRef = useRef(0);
   const requestedUiPreview = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("ui-preview")
     : null;
@@ -355,29 +376,39 @@ function MainApplication({
 
   const load = useCallback(async () => {
     setError(undefined);
-    let authenticatedSession: BootstrapResponse | undefined;
     try {
       const nextSession = await withStartupTimeout(
         () => bootstrap(),
-        STARTUP_TIMEOUT_MS,
-        "恢复 Plex 账号超时，请检查网络连接后重试。",
+        15_000,
+        "恢复 Plex 登录状态超时，请重试。",
       );
-      if (!nextSession.authenticated || !nextSession.account) {
+      const accountRequestId = ++accountRefreshRequestRef.current;
+      if (!nextSession.authenticated) {
         setInitialLibrary(undefined);
         setSession(nextSession);
         return;
       }
-      authenticatedSession = nextSession;
-      const nextLibrary = await withStartupTimeout(
-        () => loadInitialLibraryData(readPersistedPlaybackSession()?.serverId),
-        STARTUP_TIMEOUT_MS,
-        "连接音乐资料库超时，请确认 Plex Media Server 在线后重试。",
-      );
-      setInitialLibrary(nextLibrary);
+      // The first visible frame contains only local session state and an
+      // empty library shell. Account metadata and every Plex library request
+      // start after MusicShell mounts, so an unavailable PMS cannot hold the
+      // window on Splash or make the pointer look busy.
+      setInitialLibrary(emptyInitialLibrary());
       setSession(nextSession);
+      void refreshAccount()
+        .then((account) => {
+          if (accountRequestId !== accountRefreshRequestRef.current) return;
+          setSession((current) => current ? { ...current, account } : current);
+        })
+        .catch((reason) => {
+          if (accountRequestId !== accountRefreshRequestRef.current) return;
+          // Account identity is decorative for the first frame. Keep the
+          // shell usable and let the user retry through the normal session
+          // flow instead of turning a slow account endpoint into a splash
+          // screen deadlock.
+          console.warn("[账号] 后台读取 Plex 账号失败", reason);
+        });
     } catch (reason) {
       const nextError = reason instanceof Error ? reason : new Error(String(reason));
-      if (authenticatedSession) setSession(authenticatedSession);
       setError(nextError.message);
       throw nextError;
     }
@@ -416,7 +447,7 @@ function MainApplication({
   if (session.credentialStatus === "unavailable") {
     return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message="无法读取应用数据中的 Plex 登录文件，请检查应用数据目录权限后重试。" retry={retryLoad} /></AppFrame>);
   }
-  if (!session.authenticated || !session.account) {
+  if (!session.authenticated) {
     return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
   }
   if (error) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message={error} retry={retryLoad} /></AppFrame>);
@@ -602,7 +633,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   appUpdater: AppUpdaterController;
   notify: (message: string, level?: GlobalNotificationLevel) => void;
 }) {
-  const account = initialSession.account as PlexAccount;
+  const account = initialSession.account || BOOTSTRAP_ACCOUNT_PLACEHOLDER;
   const [initialPlaybackSession] = useState(() => readPersistedPlaybackSession());
   const [servers, setServers] = useState<PlexServer[]>(initialLibrary.servers);
   const [serverId, setServerId] = useState<string | undefined>(initialLibrary.serverId);
@@ -836,8 +867,11 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   }, [notify, preferredPlaybackServerId]);
 
   useEffect(() => {
-    if (initialServerSnapshotActive) return;
-    if (!serverId) return;
+    if (initialServerSnapshotActive && initialLibrary.servers.length > 0) return;
+    if (!serverId) {
+      if (sourceRevision === 0) void loadServers();
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     void getSections(serverId)
@@ -855,7 +889,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
       })
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
-  }, [initialServerSnapshotActive, notify, serverId]);
+  }, [initialLibrary.servers.length, initialServerSnapshotActive, loadServers, notify, serverId, sourceRevision]);
 
   const loadPlaylistList = useCallback(async (announce = false) => {
     const requestId = ++playlistListRequestRef.current;

@@ -501,10 +501,6 @@ impl SegmentCache {
             .map_err(|error| format!("重建分段缓存目录失败: {error}"))
     }
 
-    pub(crate) fn limit_bytes(&self) -> u64 {
-        self.inner.limit_bytes
-    }
-
     pub(crate) fn active_operations(&self) -> usize {
         self.inner.active_operations.load(Ordering::SeqCst)
     }
