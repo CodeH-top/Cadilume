@@ -1112,10 +1112,15 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         }
       }
       if (!autoplay) await nativeAudioPause();
-      setPlaying(autoplay);
+      // `nativeAudioLoad` only means the decoder accepted the source. The
+      // playback UI must wait for Rust to confirm that the output callback
+      // has consumed PCM from this specific queue item.
+      setPlaying(false);
       setBuffering(false);
-      setPlaybackLoading(false);
-      playbackLog("info", `原生引擎开始播放：index=${index} 自动播放=${autoplay}`);
+      setPlaybackLoading(autoplay);
+      playbackLog("info", autoplay
+        ? `原生音源已就绪，等待实际 PCM 输出：index=${index}`
+        : `原生音源已就绪并暂停：index=${index}`);
     } catch (reason) {
       if (requestId !== loadRequestRef.current) return;
       const diagnostic = reason instanceof Error ? reason.message : String(reason);
@@ -1147,6 +1152,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     pendingNativeSourceRef.current = undefined;
     playbackLog("info", `加载请求：index=${index} 队列长度=${tracks.length} 自动播放=${autoplay} 质量=${quality} 强制新票据=${forceFreshTicket}`);
     setPlaybackLoading(autoplay);
+    setPlaying(false);
     setBuffering(false);
     indexRef.current = index;
     setCurrentIndex(index);
@@ -1696,9 +1702,34 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     let unlisten: (() => void) | undefined;
     void listen("native-audio://event", (event) => {
       const handlers = nativeEventHandlersRef.current;
-      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; ratingKey?: string; occurrenceId?: string; reason?: string; buffering?: boolean; deviceId?: string } | null;
+      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; ratingKey?: string; occurrenceId?: string; reason?: string; buffering?: boolean; deviceId?: string; playing?: boolean } | null;
       if (!payload) return;
-      if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
+      if (payload.type === "playback-started") {
+        const active = activeNativeSourceRef.current;
+        const eventIndex = payload.index;
+        const currentTrack = Number.isInteger(eventIndex)
+          ? queueRef.current[eventIndex as number]
+          : undefined;
+        if (!active
+          || eventIndex !== active.index
+          || payload.ratingKey !== active.ratingKey
+          || payload.occurrenceId !== active.queueInstanceId
+          || currentTrack?.ratingKey !== active.ratingKey
+          || currentTrack.queueInstanceId !== active.queueInstanceId
+          || eventIndex !== indexRef.current) {
+          playbackLog("warn", "已忽略过期的原生实际输出确认事件");
+          return;
+        }
+        if (typeof payload.position === "number" && Number.isFinite(payload.position)) {
+          progressRef.current = payload.position;
+          setProgress(payload.position);
+        }
+        setPlaying(true);
+        setPlaybackLoading(false);
+        setBuffering(false);
+        playbackLog("info", `原生实际 PCM 输出已确认：index=${eventIndex}`);
+        handlers.schedulePersistedSession(true);
+      } else if (payload.type === "progress" && typeof payload.position === "number" && Number.isFinite(payload.position)) {
         // 加载期间忽略旧歌的残留进度事件，保证切歌瞬间进度归 0 不被覆盖。
         if (playbackLoadingRef.current) return;
         progressRef.current = payload.position;
@@ -1847,6 +1878,10 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         outputSinkIdRef.current = recoveredDeviceId;
         setOutputSinkIdState(recoveredDeviceId);
         writeOutputDevicePreference(recoveredDeviceId);
+        if (payload.playing) {
+          setPlaying(false);
+          setPlaybackLoading(true);
+        }
         setBuffering(false);
         playbackLog("info", `音频输出流已恢复：${recoveredDeviceId ? "所选设备" : "系统默认"}`);
       } else if (payload.type === "queue-item" && typeof payload.index === "number") {
