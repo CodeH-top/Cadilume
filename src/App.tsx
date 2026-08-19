@@ -4195,7 +4195,7 @@ function SettingsView(props: ContentViewProps) {
       <SettingsGroup id={PLAYBACK_SETTINGS_ID} icon={<SlidersHorizontal size={18} />} title="播放">
         <div className="settings-stack">
           <div className="field-row"><span><strong>音频质量</strong><small>默认播放原始流；MP3 档位由 PMS 按所选码率转码。</small></span><SettingsSelect label="音频质量" value={props.quality} placeholder="选择音频质量" disabled={false} options={[{ value: "original", label: "原始质量（默认）" }, { value: "auto", label: "自动兼容（原始优先）" }, { value: "320", label: "MP3 · 320 kbps" }, { value: "256", label: "MP3 · 256 kbps" }, { value: "192", label: "MP3 · 192 kbps" }]} onValueChange={(value) => props.onQuality(value as StreamQuality)} /></div>
-          {props.outputDevices.platform === "windows" && <WindowsOutputSetting output={props.outputDevices} />}
+          {isDesktopRuntime() && (props.outputDevices.platform === "windows" || props.outputDevices.platform === "macos") && <OutputDeviceSetting output={props.outputDevices} />}
           <div className="toggle-row">
             <span><strong>预缓冲下一首</strong><small>提前加载队列中的下一首。</small></span>
             <label className="toggle-switch" aria-label="预缓冲下一首"><input type="checkbox" checked={props.prebufferNext} onChange={(event) => props.onPrebufferNext(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /></label>
@@ -4574,7 +4574,7 @@ function LyricsPanel({ open, track, lyrics, onSeek }: {
   );
 }
 
-function WindowsOutputSetting({ output }: { output: OutputDevicesController }) {
+function OutputDeviceSetting({ output }: { output: OutputDevicesController }) {
   const selectedValue = output.selectedDeviceId || SYSTEM_OUTPUT_DEVICE_VALUE;
   const options = output.devices.map((device) => ({
     value: device.deviceId || SYSTEM_OUTPUT_DEVICE_VALUE,
@@ -4583,10 +4583,10 @@ function WindowsOutputSetting({ output }: { output: OutputDevicesController }) {
   return (
     <div className="settings-output-setting">
       <div className="field-row settings-output-row">
-        <span><strong>Windows 播放设备</strong><small>仅改变 Cadilume 的输出，不修改系统默认设备。</small></span>
+        <span><strong>播放设备</strong><small>仅改变 Cadilume 的输出；选择“系统默认”时会跟随系统设备。</small></span>
         <div className="settings-output-controls">
           <SettingsSelect
-            label="Windows 播放设备"
+            label="播放设备"
             value={selectedValue}
             placeholder="选择播放设备"
             disabled={!output.canSelectSink}
@@ -4598,7 +4598,7 @@ function WindowsOutputSetting({ output }: { output: OutputDevicesController }) {
           </IconButton>
         </div>
       </div>
-      {!output.canSelectSink && <p className="device-hint">当前 WebView2 不支持应用内切换，可在 Windows 音量合成器中单独指定 Cadilume 的输出。</p>}
+      {!output.canSelectSink && <p className="device-hint">当前运行环境不支持应用内切换，请使用“系统默认”输出。</p>}
       {output.message && <p className="device-message" role="status">{output.message}</p>}
     </div>
   );
@@ -5710,7 +5710,8 @@ function useAppearance() {
     };
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const playbackActive = document.querySelector('.app-shell[data-playback-active="true"]') !== null;
-    if (!origin || !shouldAnimateAppearanceReveal(true, reducedMotion, playbackActive)) {
+    const isWindows = detectOutputPlatform(navigator) === "windows";
+    if (!origin || !shouldAnimateAppearanceReveal(true, reducedMotion, playbackActive, isWindows)) {
       applyAtomically();
       return;
     }

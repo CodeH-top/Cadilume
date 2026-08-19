@@ -13,8 +13,9 @@ export function shouldAnimateAppearanceReveal(
   hasOrigin: boolean,
   reducedMotion: boolean,
   playbackActive: boolean,
+  allowDuringPlayback = false,
 ): boolean {
-  return hasOrigin && !reducedMotion && !playbackActive;
+  return hasOrigin && !reducedMotion && (!playbackActive || allowDuringPlayback);
 }
 
 function centeredDestination(

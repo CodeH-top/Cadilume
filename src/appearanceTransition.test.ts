@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import { getCenteredImageDrawPlan, shouldAnimateAppearanceReveal } from "./appearanceTransition";
 
 describe("appearance transition policy", () => {
-  it("uses the expensive reveal only for an idle, motion-enabled app", () => {
+  it("uses the reveal only when motion is enabled and the platform permits the current playback state", () => {
     expect(shouldAnimateAppearanceReveal(true, false, false)).toBe(true);
     expect(shouldAnimateAppearanceReveal(false, false, false)).toBe(false);
     expect(shouldAnimateAppearanceReveal(true, true, false)).toBe(false);
     expect(shouldAnimateAppearanceReveal(true, false, true)).toBe(false);
+    expect(shouldAnimateAppearanceReveal(true, false, true, true)).toBe(true);
+    expect(shouldAnimateAppearanceReveal(true, true, true, true)).toBe(false);
   });
 });
 
