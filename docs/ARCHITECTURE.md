@@ -42,8 +42,9 @@ Rust / Tauri      │
 
 ## 账号、权限与连接
 
-- Plex PIN token 仅在 Rust 中解析并写入应用配置目录的用户专属 `credentials.json`；Unix
-  使用 `0600` 权限，Windows 使用当前用户专属 ACL。WebView 不接收账号 token，服务器
+- Plex PIN token 仅在 Rust 中解析并写入应用配置目录的加密二进制 `credentials.bin`；随机密钥
+  保存在同目录的 `credentials.key`。两个文件在 Unix 使用 `0600` 权限，Windows 使用当前用户
+  专属 ACL。WebView 不接收账号 token，服务器
   `accessToken` 只保存在 Rust 运行时缓存中，不长期落盘。
 - 每台服务器使用 `/api/v2/resources` 返回的专属 `accessToken`，包括 `owned:false`
   的共享服务器；不会错误复用 plex.tv 账号 token。

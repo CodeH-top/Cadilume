@@ -13,7 +13,8 @@
 - 前端只负责 UI、音量偏好和队列镜像；播放、下载、解码、队列自然推进、gapless、
   输出设备、Now Playing/SMTC 的权威均在 Rust。
 - 开发态仍只允许一条 `pnpm tauri dev` 链；凭证只读
-  `~/.cadilume-dev-token`；应用登录态则保存在应用配置目录的用户专属 `credentials.json`。
+  `~/.cadilume-dev-token`；应用登录态则保存在应用配置目录的加密 `credentials.bin` 与受限
+  `credentials.key`。
 
 ## 2. 本轮已解决
 

@@ -16,7 +16,7 @@
 2. 已完成：`windows-latest` 先执行完整门禁，再构建兼作 updater 载荷的 release NSIS `.exe` 及同名 `.exe.sig`。
 3. 已完成：发布汇总 job 生成同时覆盖 `darwin-aarch64`、`darwin-aarch64-app`、`windows-x86_64` 与 `windows-x86_64-nsis` 的唯一 `latest.json`。
 4. 待完成：配置 Windows Authenticode 证书与时间戳；updater minisign 只保护更新包来源，不能替代安装器下载信誉和系统开发者身份。
-5. 待完成：真机覆盖自定义标题栏 / DPI / Snap、中文和英文系统语言、语言选择器、全新安装、覆盖升级、卸载、播放中更新、安装完成后的恢复与 `credentials.json` 保留行为。
+5. 待完成：真机覆盖自定义标题栏 / DPI / Snap、中文和英文系统语言、语言选择器、全新安装、覆盖升级、卸载、播放中更新、安装完成后的恢复与加密凭据文件（`credentials.bin` / `credentials.key`）保留行为。
 
 ## 便携版
 

@@ -65,9 +65,9 @@ Cadilume 是一个面向 macOS 与 Windows 的 Plex 音乐桌面客户端，目�
 
 ### 账号与隐私
 
-- 发行构建与开发构建都把 Plex 账号 token 保存在应用配置目录的用户专属
-  `credentials.json` 中，采用类似 Plexamp 的桌面应用数据模型；Unix 使用 `0600` 权限，
-  Windows 使用仅当前用户可访问的 ACL。凭据不会暴露给 WebView 或写入日志。
+- 发行构建与开发构建都把 Plex 账号 token 保存在应用配置目录的加密二进制凭据文件
+  `credentials.bin` 中，并使用同目录的随机密钥文件 `credentials.key` 解密；两个文件在 Unix
+  使用 `0600` 权限、Windows 使用仅当前用户可访问的 ACL。凭据不会暴露给 WebView 或写入日志。
 - 服务器令牌、媒体地址与封面地址不会直接暴露给界面层或写入日志。
 - 所有请求继续遵守 Plex Media Server 的访问权限与订阅能力边界。
 - 播放、解码与缓存能力随应用一同提供，不要求用户额外安装 FFmpeg、libmpv、BASS、Homebrew 或后台服务。

@@ -53,7 +53,7 @@ Windows debug 构建会显示主窗口，并在任务栏保留恢复入口；这
 %USERPROFILE%\.cadilume-dev-token
 ```
 
-该文件只供被忽略的真实 PMS 回归测试读取，不是应用登录态；不应复制到仓库、提交或写入日志。Cadilume 登录后会把账号 token 写入应用配置目录的 `credentials.json`，Windows 文件 ACL 仅允许当前用户访问。可通过 `CADILUME_DEV_TOKEN_FILE` 临时指定回归测试文件路径。切换账号或退出账号时，应用会清理凭据文件和 Rust 内存中的服务器 token。
+该文件只供被忽略的真实 PMS 回归测试读取，不是应用登录态；不应复制到仓库、提交或写入日志。Cadilume 登录后会把账号 token 加密写入应用配置目录的 `credentials.bin`，解密密钥位于同目录的 `credentials.key`，两个文件的 Windows ACL 仅允许当前用户访问。可通过 `CADILUME_DEV_TOKEN_FILE` 临时指定回归测试文件路径。切换账号或退出账号时，应用会清理凭据文件、密钥文件和 Rust 内存中的服务器 token。
 
 调试时优先看运行 `pnpm tauri dev` 的终端输出。播放日志只包含经过清理的状态，不包含 PMS 地址、媒体路径、票据或 token。需要更完整的 Rust 堆栈时，在同一个 PowerShell 会话设置 `RUST_BACKTRACE=1`；不要把 token 放进 `RUST_LOG`、命令行参数或 issue 文字中。
 
@@ -120,7 +120,7 @@ pnpm verify:windows:cross
 ### 账号、网络与缓存
 
 - [ ] PIN 登录通过系统浏览器完成，WebView 和日志中没有账号 token。
-- [ ] Release 构建的 token 只出现在应用配置目录的 `credentials.json` 中，且 ACL 只允许当前 Windows 用户访问。
+- [ ] Release 构建的 token 只以加密形式出现在应用配置目录的 `credentials.bin` 中，且凭据/密钥文件 ACL 只允许当前 Windows 用户访问。
 - [ ] 共享服务器请求使用该服务器专属 token；不能因 Windows 路径或编码变化丢失 ACL。
 - [ ] 本地 loopback 音频/封面代理可工作，Windows Defender 不要求开放非 loopback 端口。
 - [ ] `%LOCALAPPDATA%` 下缓存、配置和临时文件可创建；账号切换后票据和旧授权缓存被撤销。
@@ -145,7 +145,7 @@ pnpm verify:windows:cross
 | 播放无声 | 先运行应用内输出设备检查，切回“系统默认”，确认 Windows 音量混合器没有把 Cadilume 静音 |
 | 设备切换后静音 | 拔插设备后重新枚举；删除失效的输出设备偏好并重启 debug 进程 |
 | SMTC 没有条目 | 确认应用已开始播放，检查 Windows 媒体面板；SMTC 绑定需要主窗口 HWND，必须在 Tauri 窗口创建后初始化 |
-| 应用登录状态异常 | 删除应用配置目录中的 `credentials.json` 后重新登录；真实 PMS 回归测试另查 `%USERPROFILE%\.cadilume-dev-token` |
+| 应用登录状态异常 | 删除应用配置目录中的 `credentials.bin` 和 `credentials.key` 后重新登录；真实 PMS 回归测试另查 `%USERPROFILE%\.cadilume-dev-token` |
 
 ## 7. 发行边界
 

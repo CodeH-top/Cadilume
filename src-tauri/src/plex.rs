@@ -11,6 +11,10 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use chacha20poly1305::{
+    aead::{Aead, Generate, KeyInit},
+    XChaCha20Poly1305, XNonce,
+};
 use quick_xml::de::from_str as from_xml_str;
 use reqwest::{
     header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE},
@@ -29,7 +33,10 @@ use crate::{audio_engine::NativeAudioEngineSlot, stream_proxy::StreamProxy};
 const PRODUCT_NAME: &str = "Cadilume";
 const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PLEX_TV: &str = "https://plex.tv";
-const CREDENTIALS_FILE_NAME: &str = "credentials.json";
+const CREDENTIALS_FILE_NAME: &str = "credentials.bin";
+const CREDENTIALS_KEY_FILE_NAME: &str = "credentials.key";
+const LEGACY_CREDENTIALS_FILE_NAME: &str = "credentials.json";
+const CREDENTIALS_FILE_MAGIC: &[u8; 8] = b"CADCRD01";
 const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ARTWORK_CACHE_BYTES: u64 = 512 * 1024 * 1024;
 const CACHE_NAMESPACE_DIR: &str = "cadilume";
@@ -301,6 +308,8 @@ pub struct PlexState {
     protected_client: Client,
     config_path: PathBuf,
     credential_path: PathBuf,
+    credential_key_path: PathBuf,
+    legacy_credential_path: PathBuf,
     cache_dir: PathBuf,
     cache_lock: RwLock<()>,
     config: Mutex<PersistedConfig>,
@@ -316,6 +325,8 @@ impl PlexState {
     pub fn load(config_dir: PathBuf, app_cache_dir: PathBuf) -> Result<Self> {
         let config_path = config_dir.join("config.json");
         let credential_path = config_dir.join(CREDENTIALS_FILE_NAME);
+        let credential_key_path = config_dir.join(CREDENTIALS_KEY_FILE_NAME);
+        let legacy_credential_path = config_dir.join(LEGACY_CREDENTIALS_FILE_NAME);
         let cache_dir = initialize_artwork_cache_dir(&app_cache_dir)?;
         let (mut config, mut should_persist_config) = match fs::read_to_string(&config_path) {
             Ok(raw) => {
@@ -341,7 +352,11 @@ impl PlexState {
 
         // Keep the account token beside the app's other local data, matching
         // Plexamp's desktop storage model. It never enters the WebView.
-        let stored_credential = read_account_token(&credential_path);
+        let stored_credential = read_account_token(
+            &credential_path,
+            &credential_key_path,
+            &legacy_credential_path,
+        );
         crate::diagnostics::record(
             "账号",
             format_args!("credential_store={}", stored_credential.status.log_label()),
@@ -357,6 +372,8 @@ impl PlexState {
             protected_client,
             config_path,
             credential_path,
+            credential_key_path,
+            legacy_credential_path,
             cache_dir,
             cache_lock: RwLock::new(()),
             config: Mutex::new(config.clone()),
@@ -1131,7 +1148,8 @@ pub async fn poll_pin(
             .map_err(|_| "服务器缓存写入失败".to_string())?
             .clear();
         let _ = clear_artwork_for_account_change(&state);
-        store_account_token(&state.credential_path, token).map_err(display_error)?;
+        store_account_token(&state.credential_path, &state.credential_key_path, token)
+            .map_err(display_error)?;
         *state
             .token
             .write()
@@ -1153,7 +1171,11 @@ pub async fn logout(
 ) -> Result<(), String> {
     // Credential revocation is authoritative and must succeed before logout
     // mutates runtime state. Later cache and ticket cleanup remains best-effort.
-    delete_account_token(&state.credential_path)?;
+    delete_account_token(
+        &state.credential_path,
+        &state.credential_key_path,
+        &state.legacy_credential_path,
+    )?;
     let mut cleanup_warnings = Vec::new();
     if let Err(error) = audio_engine.reset_and_clear_cache().await {
         cleanup_warnings.push(error);
@@ -2806,21 +2828,17 @@ fn string_field(value: &Value, key: &str) -> String {
         .to_string()
 }
 
-fn read_account_token(path: &Path) -> StoredCredential {
-    match fs::read_to_string(path) {
-        Ok(raw) => match serde_json::from_str::<PersistedCredential>(&raw) {
-            Ok(credentials) if !credentials.account_token.trim().is_empty() => StoredCredential {
-                token: Some(credentials.account_token.trim().to_string()),
+fn read_account_token(path: &Path, key_path: &Path, legacy_path: &Path) -> StoredCredential {
+    match fs::read(path) {
+        Ok(encoded) => match decrypt_account_token(&encoded, key_path) {
+            Ok(token) => StoredCredential {
+                token: Some(token),
                 status: CredentialStatus::Available,
-            },
-            Ok(_) => StoredCredential {
-                token: None,
-                status: CredentialStatus::Missing,
             },
             Err(error) => {
                 crate::diagnostics::record(
                     "账号",
-                    format_args!("credential_store_error=parse kind={error}"),
+                    format_args!("credential_store_error=decrypt kind={error}"),
                 );
                 StoredCredential {
                     token: None,
@@ -2828,10 +2846,9 @@ fn read_account_token(path: &Path) -> StoredCredential {
                 }
             }
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoredCredential {
-            token: None,
-            status: CredentialStatus::Missing,
-        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            migrate_legacy_account_token(path, key_path, legacy_path)
+        }
         Err(error) => {
             crate::diagnostics::record(
                 "账号",
@@ -2842,6 +2859,77 @@ fn read_account_token(path: &Path) -> StoredCredential {
                 status: CredentialStatus::Unavailable,
             }
         }
+    }
+}
+
+fn migrate_legacy_account_token(
+    path: &Path,
+    key_path: &Path,
+    legacy_path: &Path,
+) -> StoredCredential {
+    let legacy = match fs::read_to_string(legacy_path) {
+        Ok(raw) => match serde_json::from_str::<PersistedCredential>(&raw) {
+            Ok(credentials) if !credentials.account_token.trim().is_empty() => {
+                credentials.account_token.trim().to_string()
+            }
+            Ok(_) => {
+                return StoredCredential {
+                    token: None,
+                    status: CredentialStatus::Missing,
+                }
+            }
+            Err(error) => {
+                crate::diagnostics::record(
+                    "账号",
+                    format_args!("credential_store_error=legacy_parse kind={error}"),
+                );
+                return StoredCredential {
+                    token: None,
+                    status: CredentialStatus::Unavailable,
+                };
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return StoredCredential {
+                token: None,
+                status: CredentialStatus::Missing,
+            };
+        }
+        Err(error) => {
+            crate::diagnostics::record(
+                "账号",
+                format_args!("credential_store_error=legacy_read kind={:?}", error.kind()),
+            );
+            return StoredCredential {
+                token: None,
+                status: CredentialStatus::Unavailable,
+            };
+        }
+    };
+
+    if let Err(error) = store_account_token(path, key_path, &legacy) {
+        crate::diagnostics::record(
+            "账号",
+            format_args!("credential_store_error=legacy_migrate kind={error}"),
+        );
+        return StoredCredential {
+            token: None,
+            status: CredentialStatus::Unavailable,
+        };
+    }
+    if let Err(error) = remove_credential_file(legacy_path) {
+        crate::diagnostics::record(
+            "账号",
+            format_args!("credential_store_error=legacy_remove kind={error}"),
+        );
+        return StoredCredential {
+            token: None,
+            status: CredentialStatus::Unavailable,
+        };
+    }
+    StoredCredential {
+        token: Some(legacy),
+        status: CredentialStatus::Available,
     }
 }
 
@@ -2914,25 +3002,72 @@ fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), String> {
     fs::write(path, content).map_err(|error| format!("写入 Plex 凭据文件失败: {error}"))
 }
 
-fn store_account_token(path: &Path, token: &str) -> Result<(), String> {
+fn load_or_create_credential_key(path: &Path) -> Result<[u8; 32], String> {
+    match fs::read(path) {
+        Ok(bytes) => bytes
+            .try_into()
+            .map_err(|_| "Plex 凭据密钥文件格式无效".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let key = chacha20poly1305::Key::generate();
+            let bytes: [u8; 32] = *key.as_ref();
+            write_restricted_file(path, &bytes)?;
+            Ok(bytes)
+        }
+        Err(error) => Err(format!("读取 Plex 凭据密钥文件失败: {error}")),
+    }
+}
+
+fn decrypt_account_token(encoded: &[u8], key_path: &Path) -> Result<String, String> {
+    const HEADER_LEN: usize = CREDENTIALS_FILE_MAGIC.len() + 24;
+    if encoded.len() <= HEADER_LEN || !encoded.starts_with(CREDENTIALS_FILE_MAGIC) {
+        return Err("凭据文件格式无效".to_string());
+    }
+    let key = load_or_create_credential_key(key_path)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let nonce = XNonce::try_from(&encoded[CREDENTIALS_FILE_MAGIC.len()..HEADER_LEN])
+        .map_err(|_| "凭据文件 nonce 无效".to_string())?;
+    let plaintext = cipher
+        .decrypt(&nonce, &encoded[HEADER_LEN..])
+        .map_err(|_| "凭据文件校验失败".to_string())?;
+    let token = String::from_utf8(plaintext).map_err(|_| "凭据文件编码无效".to_string())?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("Plex 登录 token 为空".to_string());
+    }
+    Ok(token.to_string())
+}
+
+fn store_account_token(path: &Path, key_path: &Path, token: &str) -> Result<(), String> {
     let token = token.trim();
     if token.is_empty() {
         return Err("Plex 登录 token 不能为空".to_string());
     }
-    let credentials = PersistedCredential {
-        account_token: token.to_string(),
-    };
-    let encoded = serde_json::to_vec(&credentials)
-        .map_err(|error| format!("序列化 Plex 凭据失败: {error}"))?;
+    let key = load_or_create_credential_key(key_path)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let nonce = XNonce::generate();
+    let ciphertext = cipher
+        .encrypt(&nonce, token.as_bytes())
+        .map_err(|_| "加密 Plex 凭据失败".to_string())?;
+    let mut encoded =
+        Vec::with_capacity(CREDENTIALS_FILE_MAGIC.len() + nonce.len() + ciphertext.len());
+    encoded.extend_from_slice(CREDENTIALS_FILE_MAGIC);
+    encoded.extend_from_slice(&nonce);
+    encoded.extend_from_slice(&ciphertext);
     write_restricted_file(path, &encoded)
 }
 
-fn delete_account_token(path: &Path) -> Result<(), String> {
+fn remove_credential_file(path: &Path) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("删除 Plex 凭据文件失败: {error}")),
     }
+}
+
+fn delete_account_token(path: &Path, key_path: &Path, legacy_path: &Path) -> Result<(), String> {
+    remove_credential_file(path)?;
+    remove_credential_file(key_path)?;
+    remove_credential_file(legacy_path)
 }
 
 async fn ensure_success(response: Response, context: &str) -> Result<Response> {
@@ -2983,15 +3118,17 @@ mod tests {
 
         let cache = TestCache::new();
         let path = cache.root.join(CREDENTIALS_FILE_NAME);
+        let key = cache.root.join(CREDENTIALS_KEY_FILE_NAME);
+        let legacy = cache.root.join(LEGACY_CREDENTIALS_FILE_NAME);
         fs::write(&path, r#"{"accountToken":"old-token"}"#)
             .expect("existing credential should be created");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
             .expect("test credential permissions should be relaxed");
 
-        store_account_token(&path, "new-token").expect("credential rewrite should succeed");
+        store_account_token(&path, &key, "new-token").expect("credential rewrite should succeed");
 
         assert_eq!(
-            read_account_token(&path).token.as_deref(),
+            read_account_token(&path, &key, &legacy).token.as_deref(),
             Some("new-token")
         );
         assert_eq!(
@@ -3004,37 +3141,59 @@ mod tests {
     fn deleting_credential_is_idempotent_and_reports_non_file_targets() {
         let cache = TestCache::new();
         let token = cache.root.join(CREDENTIALS_FILE_NAME);
-        store_account_token(&token, "token").expect("test credential should be created");
+        let key = cache.root.join(CREDENTIALS_KEY_FILE_NAME);
+        let legacy = cache.root.join(LEGACY_CREDENTIALS_FILE_NAME);
+        store_account_token(&token, &key, "token").expect("test credential should be created");
 
-        delete_account_token(&token).expect("existing credential should be removed");
-        delete_account_token(&token).expect("missing credential should count as logged out");
+        delete_account_token(&token, &key, &legacy).expect("existing credential should be removed");
+        delete_account_token(&token, &key, &legacy)
+            .expect("missing credential should count as logged out");
         assert!(!token.exists());
+        assert!(!key.exists());
 
         let directory = cache.root.join("credential-directory");
         fs::create_dir(&directory).expect("non-file target should be created");
-        let error = delete_account_token(&directory)
+        let error = delete_account_token(&directory, &key, &legacy)
             .expect_err("a non-file target must not be reported as deleted");
         assert!(error.starts_with("删除 Plex 凭据文件失败:"));
         assert!(directory.is_dir());
     }
 
     #[test]
-    fn account_credential_round_trips_as_local_json() {
+    fn account_credential_round_trips_as_encrypted_binary() {
         let cache = TestCache::new();
         let path = cache.root.join(CREDENTIALS_FILE_NAME);
+        let key = cache.root.join(CREDENTIALS_KEY_FILE_NAME);
+        let legacy = cache.root.join(LEGACY_CREDENTIALS_FILE_NAME);
 
-        store_account_token(&path, "  account-token  ")
+        store_account_token(&path, &key, "  account-token  ")
             .expect("credential should be stored in app data");
 
         assert_eq!(
-            read_account_token(&path).token.as_deref(),
+            read_account_token(&path, &key, &legacy).token.as_deref(),
             Some("account-token")
         );
-        assert_eq!(
-            serde_json::from_str::<Value>(&fs::read_to_string(&path).unwrap()).unwrap()
-                ["accountToken"],
-            "account-token"
-        );
+        let encoded = fs::read(&path).expect("encrypted credential should exist");
+        assert!(encoded.starts_with(CREDENTIALS_FILE_MAGIC));
+        assert!(!encoded
+            .windows("account-token".len())
+            .any(|window| window == b"account-token"));
+    }
+
+    #[test]
+    fn legacy_json_credential_migrates_and_is_removed() {
+        let cache = TestCache::new();
+        let path = cache.root.join(CREDENTIALS_FILE_NAME);
+        let key = cache.root.join(CREDENTIALS_KEY_FILE_NAME);
+        let legacy = cache.root.join(LEGACY_CREDENTIALS_FILE_NAME);
+        fs::write(&legacy, r#"{"accountToken":"legacy-token"}"#)
+            .expect("legacy credential should be created");
+
+        let stored = read_account_token(&path, &key, &legacy);
+        assert_eq!(stored.token.as_deref(), Some("legacy-token"));
+        assert!(path.exists());
+        assert!(key.exists());
+        assert!(!legacy.exists());
     }
 
     #[test]

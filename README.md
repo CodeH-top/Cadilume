@@ -65,10 +65,10 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 
 ### Account and privacy
 
-- Release and debug builds store the Plex account token in the app configuration directory's
-  owner-only `credentials.json`, following the desktop app-data model used by Plexamp. The
-  file is `0600` on Unix and uses a current-user-only ACL on Windows; it is not exposed to the
-  WebView or written to logs.
+- Release and debug builds store the Plex account token in an encrypted binary
+  `credentials.bin` in the app configuration directory. A random sibling key file
+  `credentials.key` is used for decryption. Both files are `0600` on Unix and use a
+  current-user-only ACL on Windows; the token is not exposed to the WebView or written to logs.
 - Server tokens, upstream media addresses, and artwork addresses are not exposed directly to the interface layer or written to logs.
 - Every request continues to follow Plex Media Server access controls and subscription boundaries.
 - Playback, decoding, and caching ship with the application. Users do not need FFmpeg, libmpv, BASS, Homebrew, or a separate background service.
