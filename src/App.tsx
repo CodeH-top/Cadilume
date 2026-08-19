@@ -5162,7 +5162,10 @@ function LoginScreen({ brandPreset, clientIdentifier, onAuthenticated }: { brand
           <span role="listitem"><Check size={16} />家庭与共享服务器</span>
           <span role="listitem"><Check size={16} />清晰的托盘退出入口</span>
         </div>
-        <button className="primary-button login-button" onClick={() => void login.start()} disabled={login.busy} aria-busy={login.busy || undefined}>{login.busy ? <LoaderCircle className="spin" size={18} /> : <CircleUserRound size={18} />}{login.buttonLabel}</button>
+        <div className="login-actions">
+          <button className="primary-button login-button" onClick={() => void login.start()} disabled={login.busy} aria-busy={login.busy || undefined}>{login.busy ? <LoaderCircle className="spin" size={18} /> : <CircleUserRound size={18} />}{login.buttonLabel}</button>
+          {login.busy && <button className="secondary-button login-cancel-button" type="button" onClick={() => void login.cancel()}><X size={17} />取消登录</button>}
+        </div>
         {login.error && <p className="form-error" role="alert">{login.error}</p>}
         <div className="login-trust"><LockKeyhole size={15} /><span>仅请求当前账号已获授权的服务器和音乐库，不绕过 Plex 权限。</span></div>
       </section>

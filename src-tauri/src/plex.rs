@@ -1120,6 +1120,31 @@ pub async fn create_pin(state: State<'_, PlexState>) -> Result<PinResponse, Stri
 }
 
 #[tauri::command]
+pub async fn cancel_pin(pin_id: i64, state: State<'_, PlexState>) -> Result<(), String> {
+    if pin_id <= 0 {
+        return Err("无效的 Plex 登录码".to_string());
+    }
+    let response = state
+        .plex_headers(
+            state
+                .protected_client
+                .delete(format!("{PLEX_TV}/api/v2/pins/{pin_id}")),
+        )
+        .send()
+        .await
+        .map_err(display_error)?;
+    if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    let status = response.status();
+    crate::diagnostics::record(
+        "账号",
+        format_args!("pin_cancel_failed status={}", status.as_u16()),
+    );
+    Err(format!("取消 Plex 登录码失败（HTTP {}）", status.as_u16()))
+}
+
+#[tauri::command]
 pub async fn poll_pin(
     pin_id: i64,
     state: State<'_, PlexState>,

@@ -68,6 +68,7 @@ const hookRuntime = vi.hoisted(() => {
 });
 
 const apiMocks = vi.hoisted(() => ({
+  cancelPin: vi.fn(),
   createPin: vi.fn(),
   openPlexLogin: vi.fn(),
   pollPin: vi.fn(),
@@ -115,6 +116,7 @@ function mountLogin(onAuthenticated: () => void | Promise<void>) {
 beforeEach(() => {
   hookRuntime.reset();
   vi.useFakeTimers();
+  apiMocks.cancelPin.mockReset();
   apiMocks.createPin.mockReset();
   apiMocks.openPlexLogin.mockReset();
   apiMocks.pollPin.mockReset();
@@ -188,6 +190,55 @@ describe("usePlexLogin", () => {
       buttonLabel: "使用 Plex 账号登录",
       error: "刷新认证状态失败",
     });
+  });
+
+  it("cancels the active PIN and allows a fresh login attempt", async () => {
+    apiMocks.createPin.mockResolvedValue({ id: 17, code: "CANCEL-ME", expiresIn: 300, authenticated: false });
+    apiMocks.openPlexLogin.mockResolvedValue(undefined);
+    apiMocks.pollPin.mockResolvedValue({ id: 17, code: "CANCEL-ME", expiresIn: 300, authenticated: false });
+    apiMocks.cancelPin.mockResolvedValue(undefined);
+    const mounted = mountLogin(vi.fn());
+
+    const attempt = mounted.current.start();
+    await settleAsyncWork();
+    mounted.render();
+    expect(mounted.current).toMatchObject({ status: "waiting", busy: true });
+
+    await mounted.current.cancel();
+    mounted.render();
+
+    expect(apiMocks.cancelPin).toHaveBeenCalledWith(17);
+    expect(mounted.current).toMatchObject({ status: "idle", busy: false });
+
+    await vi.advanceTimersByTimeAsync(1500);
+    await attempt;
+    expect(apiMocks.pollPin).not.toHaveBeenCalled();
+
+    apiMocks.createPin.mockResolvedValueOnce({ id: 18, code: "NEW-PIN", expiresIn: 300, authenticated: false });
+    const freshAttempt = mounted.current.start();
+    await settleAsyncWork();
+    mounted.render();
+    expect(apiMocks.createPin).toHaveBeenCalledTimes(2);
+    expect(apiMocks.openPlexLogin).toHaveBeenLastCalledWith("client-id", "NEW-PIN");
+    await mounted.current.cancel();
+    await vi.advanceTimersByTimeAsync(1500);
+    await freshAttempt;
+  });
+
+  it("invalidates a PIN even when cancellation happens before PIN creation finishes", async () => {
+    const pin = deferred<{ id: number; code: string; expiresIn: number; authenticated: boolean }>();
+    apiMocks.createPin.mockReturnValue(pin.promise);
+    apiMocks.cancelPin.mockResolvedValue(undefined);
+    const mounted = mountLogin(vi.fn());
+
+    const attempt = mounted.current.start();
+    await settleAsyncWork();
+    await mounted.current.cancel();
+    pin.resolve({ id: 23, code: "STALE-PIN", expiresIn: 300, authenticated: false });
+    await attempt;
+
+    expect(apiMocks.cancelPin).toHaveBeenCalledWith(23);
+    expect(apiMocks.openPlexLogin).not.toHaveBeenCalled();
   });
 
   it("does not continue the login flow after unmount", async () => {

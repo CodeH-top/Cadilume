@@ -254,6 +254,10 @@ export async function pollPin(pinId: number): Promise<PlexPin> {
   return isDesktopRuntime() ? invoke("poll_pin", { pinId }) : { id: pinId, code: "DEMO", expiresIn: 300, authenticated: true };
 }
 
+export async function cancelPin(pinId: number): Promise<void> {
+  if (isDesktopRuntime()) await invoke("cancel_pin", { pinId });
+}
+
 export async function logout(): Promise<void> {
   if (isDesktopRuntime()) await invoke("logout");
 }

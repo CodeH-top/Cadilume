@@ -81,6 +81,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             plex::bootstrap,
             plex::create_pin,
+            plex::cancel_pin,
             plex::poll_pin,
             plex::logout,
             plex::discover_servers,
