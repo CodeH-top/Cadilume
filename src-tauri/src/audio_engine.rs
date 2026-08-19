@@ -1446,6 +1446,7 @@ impl NativeAudioEngineSlot {
         ) {
             return Ok(false);
         }
+        publish_output_device_recovering(engine, app, "system-default-changed");
         self.replace_output_device(app, String::new(), Some(engine))
             .await
     }
@@ -1736,6 +1737,30 @@ fn output_has_started(
     desired_playing
         && has_player_source
         && decode_state.is_some_and(|state| state.played_media_frames.load(Ordering::SeqCst) > 0)
+}
+
+/// As soon as the old route is known to be unusable, retract the prior output
+/// confirmation. The WebView must show recovery/loading until the replacement
+/// engine emits a fresh `playback-started` after consuming PCM.
+fn publish_output_device_recovering(
+    engine: &NativeAudioEngine,
+    app: &AppHandle,
+    reason: &'static str,
+) {
+    let playing = engine.loaded.load(Ordering::SeqCst)
+        && engine.desired_playing.load(Ordering::SeqCst)
+        && !engine.player().empty();
+    if playing {
+        engine.playback_started.store(false, Ordering::SeqCst);
+    }
+    let _ = app.emit(
+        "native-audio://event",
+        serde_json::json!({
+            "type": "output-device-recovering",
+            "reason": reason,
+            "playing": playing,
+        }),
+    );
 }
 
 fn open_device_sink<E>(
@@ -3073,6 +3098,7 @@ impl NativeAudioEngine {
                 {
                     // Keep the recovery future on Tauri's async runtime; it
                     // rebuilds CPAL without any WebView timer dependency.
+                    publish_output_device_recovering(&engine, &app_for_task, "stream-error");
                     let recovery =
                         if let Some(slot) = app_for_task.try_state::<NativeAudioEngineSlot>() {
                             slot.recover_output_stream(&app_for_task, &engine).await

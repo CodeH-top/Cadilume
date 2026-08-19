@@ -1871,6 +1871,13 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         handlers.schedulePersistedSession(true);
       } else if (payload.type === "buffering" && typeof payload.buffering === "boolean") {
         setBuffering(payload.buffering);
+      } else if (payload.type === "output-device-recovering") {
+        if (payload.playing) {
+          setPlaying(false);
+          setPlaybackLoading(true);
+        }
+        setBuffering(false);
+        playbackLog("warn", `音频输出正在恢复：${String(payload.reason ?? "unknown")}`);
       } else if (payload.type === "output-device-recovered") {
         const recoveredDeviceId = typeof payload.deviceId === "string"
           ? payload.deviceId
