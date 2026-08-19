@@ -6,6 +6,7 @@ import {
   getRecommendationHubs,
   getSections,
 } from "./api";
+import { homeRecommendationHubs, isRecentlyAddedHub } from "./recommendations";
 import type { LibrarySection, PlexHub, PlexItem, PlexPlaylist, PlexServer } from "./types";
 
 export interface InitialHomeData {
@@ -41,6 +42,7 @@ export interface InitialLibrarySource {
 
 export const INITIAL_LIBRARY_ARTIST_LIMIT = 120;
 const REQUIRED_STARTUP_REQUEST_TIMEOUT_MS = 15_000;
+const OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS = 8_000;
 
 export function isInitialLibrarySnapshotScopeActive(
   invalidated: boolean,
@@ -140,42 +142,75 @@ export async function loadInitialLibraryData(
 
   for (const selectedServer of orderedServers) {
     try {
-      const sections = await withStartupTimeout(
-        () => source.getSections(selectedServer.id),
-        REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
-        `读取 ${selectedServer.name} 的音乐资料库超时。`,
-      );
+      const [sectionsResult, playlistsResult] = await Promise.allSettled([
+        withStartupTimeout(
+          () => source.getSections(selectedServer.id),
+          REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的音乐资料库超时。`,
+        ),
+        withStartupTimeout(
+          () => source.getPlaylists(selectedServer.id),
+          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的歌单超时。`,
+        ),
+      ]);
+      if (sectionsResult.status === "rejected") throw sectionsResult.reason;
+      const sections = sectionsResult.value;
+      const playlists = playlistsResult.status === "fulfilled"
+        ? orderPlaylistsByRecency(playlistsResult.value)
+        : [];
       const selectedSection = sections[0];
-      const playlists: PlexPlaylist[] = [];
       if (!selectedSection) {
         return {
           servers,
           serverId: selectedServer.id,
           sections,
           playlists,
-          playlistsComplete: false,
+          ...(playlistsResult.status === "rejected" ? { playlistsComplete: false } : {}),
           libraryArtists: [],
           home: { recentAlbums: [], hubs: [] },
         };
       }
 
-      // Artists, recommendation hubs, and recent albums are explicitly
-      // optional. Do not hold the first screen hostage while waiting for any
-      // of them; MusicShell already hydrates these sources after mounting.
+      // The home route is part of the first usable screen. Wait for its two
+      // data sources before mounting MusicShell. The full artist index is not
+      // visible on the home route, so MusicShell hydrates it after mounting.
+      const [hubs, recentAlbums] = await Promise.all([
+        withStartupTimeout(
+          () => source.getRecommendationHubs(selectedServer.id, selectedSection.key),
+          REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的首页推荐超时。`,
+        ),
+        withStartupTimeout(
+          () => source.getRecentAlbums(selectedServer.id, selectedSection.key),
+          REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的最近加入内容超时。`,
+        ),
+      ]);
+      const completeHubs = hubs.some(isRecentlyAddedHub) || !recentAlbums.length
+        ? hubs
+        : [
+          ...hubs,
+          {
+            title: "最近加入的音乐",
+            type: "album",
+            identifier: "cadilume.recentlyadded",
+            items: recentAlbums,
+          },
+        ];
       return {
         servers,
         serverId: selectedServer.id,
         sections,
         sectionKey: selectedSection.key,
         playlists,
-        playlistsComplete: false,
+        ...(playlistsResult.status === "rejected" ? { playlistsComplete: false } : {}),
         libraryArtists: [],
         libraryArtistsComplete: false,
         home: {
-          recentAlbums: [],
-          hubs: [],
+          recentAlbums,
+          hubs: homeRecommendationHubs(completeHubs),
         },
-        homeComplete: false,
       };
     } catch (reason) {
       lastError = reason;

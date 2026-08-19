@@ -58,7 +58,7 @@ describe("initial library loading", () => {
     expect(isInitialLibrarySnapshotScopeActive(false, 1, "server-a", "server-a")).toBe(false);
   });
 
-  it("returns the required preferred-server snapshot without waiting for optional home data", async () => {
+  it("loads the preferred server snapshot and home data before entering the main screen", async () => {
     const librarySource = source({
       discoverServers: vi.fn(async () => [server("server-a"), server("server-b")]),
       getSections: vi.fn(async () => [section("music-b")]),
@@ -71,17 +71,16 @@ describe("initial library loading", () => {
     expect(result).toMatchObject({
       serverId: "server-b",
       sectionKey: "music-b",
-      playlists: [],
-      playlistsComplete: false,
+      playlists: [playlist("newer", 2), playlist("older", 1)],
       libraryArtists: [],
       libraryArtistsComplete: false,
       home: { recentAlbums: [], hubs: [] },
-      homeComplete: false,
     });
     expect(librarySource.getSections).toHaveBeenCalledWith("server-b");
+    expect(librarySource.getPlaylists).toHaveBeenCalledWith("server-b");
     expect(librarySource.getLibraryItems).not.toHaveBeenCalled();
-    expect(librarySource.getRecommendationHubs).not.toHaveBeenCalled();
-    expect(librarySource.getRecentAlbums).not.toHaveBeenCalled();
+    expect(librarySource.getRecommendationHubs).toHaveBeenCalledWith("server-b", "music-b");
+    expect(librarySource.getRecentAlbums).toHaveBeenCalledWith("server-b", "music-b");
   });
 
   it("treats no accessible server as a completed empty initialization", async () => {
@@ -107,8 +106,7 @@ describe("initial library loading", () => {
     await expect(loadInitialLibraryData(undefined, librarySource)).resolves.toMatchObject({
       serverId: "server-a",
       sections: [],
-      playlists: [],
-      playlistsComplete: false,
+      playlists: [playlist("playlist-a", 1)],
       libraryArtists: [],
       home: { recentAlbums: [], hubs: [] },
     });
@@ -130,7 +128,6 @@ describe("initial library loading", () => {
       serverId: "server-online",
       sectionKey: "music-online",
       playlists: [],
-      playlistsComplete: false,
     });
     expect(getSections.mock.calls.map(([serverId]) => serverId)).toEqual(["server-offline", "server-online"]);
   });
@@ -144,21 +141,14 @@ describe("initial library loading", () => {
     await expect(loadInitialLibraryData("server-b", librarySource)).rejects.toThrow("server-a 不可用");
   });
 
-  it("keeps the first screen available when optional startup sources fail", async () => {
+  it("does not enter the main screen when required home data fails", async () => {
     const librarySource = source({
       getInitialLibraryArtists: vi.fn(async () => { throw new Error("artist index stalled"); }),
       getRecommendationHubs: vi.fn(async () => { throw new Error("recommendations unavailable"); }),
       getRecentAlbums: vi.fn(async () => { throw new Error("recent albums unavailable"); }),
     });
 
-    await expect(loadInitialLibraryData(undefined, librarySource)).resolves.toMatchObject({
-      serverId: "server-a",
-      sections: [{ key: "music" }],
-      libraryArtists: [],
-      libraryArtistsComplete: false,
-      home: { recentAlbums: [], hubs: [] },
-      homeComplete: false,
-    });
+    await expect(loadInitialLibraryData(undefined, librarySource)).rejects.toThrow("recommendations unavailable");
   });
 
   it("turns a stalled startup operation into a retryable timeout", async () => {

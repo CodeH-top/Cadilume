@@ -104,6 +104,7 @@ import { appendUniqueArtistTracks, collectAllArtistTracks, isArtistTrackCollecti
 import { selectRandomContextPlayback } from "./contextPlayback";
 import {
   isInitialLibrarySnapshotScopeActive,
+  loadInitialLibraryData,
   orderPlaylistsByRecency,
   withStartupTimeout,
   type InitialLibraryData,
@@ -196,19 +197,6 @@ const BOOTSTRAP_ACCOUNT_PLACEHOLDER: PlexAccount = {
   restricted: false,
   subscriptionActive: false,
 };
-
-function emptyInitialLibrary(): InitialLibraryData {
-  return {
-    servers: [],
-    sections: [],
-    playlists: [],
-    playlistsComplete: false,
-    libraryArtists: [],
-    libraryArtistsComplete: false,
-    home: { recentAlbums: [], hubs: [] },
-    homeComplete: false,
-  };
-}
 
 interface MusicShellRuntime {
   initialSession: BootstrapResponse;
@@ -363,6 +351,7 @@ function MainApplication({
   const [session, setSession] = useState<BootstrapResponse>();
   const [initialLibrary, setInitialLibrary] = useState<InitialLibraryData>();
   const [error, setError] = useState<string>();
+  const [startupStage, setStartupStage] = useState("正在恢复本地会话");
   const notifications = useGlobalNotificationQueue();
   const appUpdater = useAppUpdater(session, notifications.notify);
   const syncedBrandSessionRef = useRef<BootstrapResponse | undefined>(undefined);
@@ -376,6 +365,8 @@ function MainApplication({
 
   const load = useCallback(async () => {
     setError(undefined);
+    setInitialLibrary(undefined);
+    setStartupStage("正在恢复本地会话");
     try {
       const nextSession = await withStartupTimeout(
         () => bootstrap(),
@@ -384,16 +375,18 @@ function MainApplication({
       );
       const accountRequestId = ++accountRefreshRequestRef.current;
       if (!nextSession.authenticated) {
-        setInitialLibrary(undefined);
         setSession(nextSession);
         return;
       }
-      // The first visible frame contains only local session state and an
-      // empty library shell. Account metadata and every Plex library request
-      // start after MusicShell mounts, so an unavailable PMS cannot hold the
-      // window on Splash or make the pointer look busy.
-      setInitialLibrary(emptyInitialLibrary());
       setSession(nextSession);
+      setStartupStage("正在加载服务器与音乐资料库");
+      const nextLibrary = await withStartupTimeout(
+        () => loadInitialLibraryData(readPersistedPlaybackSession()?.serverId),
+        45_000,
+        "连接音乐资料库超时，请确认 Plex Media Server 在线后重试。",
+      );
+      setStartupStage("正在准备首页与上次播放记录");
+      setInitialLibrary(nextLibrary);
       void refreshAccount()
         .then((account) => {
           if (accountRequestId !== accountRefreshRequestRef.current) return;
@@ -401,10 +394,6 @@ function MainApplication({
         })
         .catch((reason) => {
           if (accountRequestId !== accountRefreshRequestRef.current) return;
-          // Account identity is decorative for the first frame. Keep the
-          // shell usable and let the user retry through the normal session
-          // flow instead of turning a slow account endpoint into a splash
-          // screen deadlock.
           console.warn("[账号] 后台读取 Plex 账号失败", reason);
         });
     } catch (reason) {
@@ -442,7 +431,7 @@ function MainApplication({
     return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier="cadilume-development-preview" onAuthenticated={() => undefined} /></AppFrame>);
   }
   if (uiPreview === "notifications") return withNotifications(<AppFrame brandPreset={brandPreset}><NotificationFixture /></AppFrame>);
-  if (!session && !error) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} /></AppFrame>);
+  if (!session && !error) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} stage={startupStage} /></AppFrame>);
   if (!session) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message={error || "无法启动 Cadilume"} retry={retryLoad} /></AppFrame>);
   if (session.credentialStatus === "unavailable") {
     return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message="无法读取应用数据中的 Plex 登录文件，请检查应用数据目录权限后重试。" retry={retryLoad} /></AppFrame>);
@@ -451,7 +440,7 @@ function MainApplication({
     return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><LoginScreen brandPreset={brandPreset} clientIdentifier={session.clientIdentifier} onAuthenticated={load} /></AppFrame>);
   }
   if (error) return withNotifications(<AppFrame brandPreset={brandPreset}><FatalError brandPreset={brandPreset} message={error} retry={retryLoad} /></AppFrame>);
-  if (!initialLibrary) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} /></AppFrame>);
+  if (!initialLibrary) return withNotifications(<AppFrame fullBleed brandPreset={brandPreset}><SplashScreen brandPreset={brandPreset} stage={startupStage} /></AppFrame>);
   return withNotifications(<AppFrame integrated brandPreset={brandPreset}><MusicShell initialSession={session} initialLibrary={initialLibrary} themeMode={themeMode} resolvedTheme={resolvedTheme} brandPreset={brandPreset} onThemeMode={onThemeMode} onBrandPreset={onBrandPreset} appUpdater={appUpdater} notify={notifications.notify} /></AppFrame>);
 }
 
@@ -5439,7 +5428,7 @@ function SearchLoadingState({ query }: { query: string }) {
   );
 }
 
-function SplashScreen({ brandPreset }: { brandPreset: BrandPreset }) {
+function SplashScreen({ brandPreset, stage = "正在准备你的音乐空间" }: { brandPreset: BrandPreset; stage?: string }) {
   return (
     <main className="splash-screen" data-testid="splash-screen">
       <section className="splash-content" aria-live="polite" aria-busy="true">
@@ -5453,7 +5442,7 @@ function SplashScreen({ brandPreset }: { brandPreset: BrandPreset }) {
           <div className="splash-copy">
             <h1>准备你的音乐空间</h1>
             <p>正在恢复账号、音乐来源与上次播放现场。</p>
-            <div className="splash-progress" role="status"><span className="splash-progress-icon"><LoaderCircle className="spin" size={18} /></span><span><strong>正在连接你的音乐资料库</strong><small>首次启动可能需要一点时间</small></span><span className="splash-progress-pulse" /></div>
+            <div className="splash-progress" role="status"><span className="splash-progress-icon"><LoaderCircle className="spin" size={18} /></span><span><strong>{stage}</strong><small>首页和上次播放记录准备完成后进入</small></span><span className="splash-progress-pulse" /></div>
             <div className="splash-checks"><span><Check size={14} />凭据安全恢复</span><span><Check size={14} />连接状态检测</span></div>
           </div>
         </div>
