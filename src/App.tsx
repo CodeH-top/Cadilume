@@ -427,8 +427,16 @@ function MainApplication({
             console.warn("[资料库] 后台刷新没有返回可用资料库，继续使用本地快照");
             return;
           }
-          void writeInitialLibraryCache(nextLibrary);
-          startTransition(() => setInitialLibrary(nextLibrary));
+          const refreshedLibrary = {
+            ...nextLibrary,
+            // The refreshed snapshot is committed as one complete replacement
+            // so MusicShell does not start a second visible loading pass.
+            playlistsComplete: true,
+            libraryArtistsComplete: true,
+            homeComplete: true,
+          };
+          void writeInitialLibraryCache(refreshedLibrary);
+          startTransition(() => setInitialLibrary(refreshedLibrary));
           setStartupStage("资料库已更新");
         }).catch((reason) => {
           console.warn("[资料库] 后台刷新失败，继续使用本地快照", reason);
@@ -443,8 +451,14 @@ function MainApplication({
           throw new Error("当前账号没有可访问的 Plex 音乐资料库。");
         }
         setStartupStage("正在准备首页与上次播放记录");
-        startTransition(() => setInitialLibrary(nextLibrary));
-        void writeInitialLibraryCache(nextLibrary);
+        const readyLibrary = {
+          ...nextLibrary,
+          playlistsComplete: true,
+          libraryArtistsComplete: true,
+          homeComplete: true,
+        };
+        startTransition(() => setInitialLibrary(readyLibrary));
+        void writeInitialLibraryCache(readyLibrary);
       }
       void refreshAccount()
         .then((account) => {

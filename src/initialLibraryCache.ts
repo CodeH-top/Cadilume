@@ -50,9 +50,12 @@ export async function readInitialLibraryCache(): Promise<InitialLibraryData | un
         recentAlbums,
         hubs,
       },
-      playlistsComplete: false,
-      libraryArtistsComplete: false,
-      homeComplete: false,
+      // The snapshot is the data used for the first frame. Background
+      // refresh replaces it later; it must not trigger another visible
+      // loading pass immediately after MusicShell mounts.
+      playlistsComplete: true,
+      libraryArtistsComplete: true,
+      homeComplete: true,
     };
   } catch {
     return undefined;

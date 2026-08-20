@@ -141,9 +141,6 @@ export async function loadInitialLibraryData(
 
   for (const selectedServer of orderedServers) {
     try {
-      // The playlist sidebar is not part of the first usable home frame. Do
-      // not await it here: a slow or unreachable `/playlists` endpoint must
-      // never keep the window on Splash. MusicShell refreshes it after mount.
       const sections = await withStartupTimeout(
         () => source.getSections(selectedServer.id),
         REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
@@ -156,16 +153,21 @@ export async function loadInitialLibraryData(
           serverId: selectedServer.id,
           sections,
           playlists: [],
-          playlistsComplete: false,
           libraryArtists: [],
+          libraryArtistsComplete: true,
           home: { recentAlbums: [], hubs: [] },
         };
       }
 
-      // The home route is part of the first usable screen. Wait for its two
-      // data sources before mounting MusicShell. The full artist index is not
-      // visible on the home route, so MusicShell hydrates it after mounting.
-      const [hubs, recentAlbums] = await Promise.all([
+      // Prepare the complete first-frame snapshot while Splash is still
+      // visible. Non-critical artist indexing is loaded on demand by its
+      // route, so it is intentionally represented by an empty complete index.
+      const [playlists, hubs, recentAlbums] = await Promise.all([
+        withStartupTimeout(
+          () => source.getPlaylists(selectedServer.id),
+          REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的歌单超时。`,
+        ).catch(() => []),
         withStartupTimeout(
           () => source.getRecommendationHubs(selectedServer.id, selectedSection.key),
           REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
@@ -193,10 +195,9 @@ export async function loadInitialLibraryData(
         serverId: selectedServer.id,
         sections,
         sectionKey: selectedSection.key,
-        playlists: [],
-        playlistsComplete: false,
+        playlists: orderPlaylistsByRecency(playlists),
         libraryArtists: [],
-        libraryArtistsComplete: false,
+        libraryArtistsComplete: true,
         home: {
           recentAlbums,
           hubs: homeRecommendationHubs(completeHubs),

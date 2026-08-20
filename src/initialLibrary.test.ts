@@ -58,7 +58,7 @@ describe("initial library loading", () => {
     expect(isInitialLibrarySnapshotScopeActive(false, 1, "server-a", "server-a")).toBe(false);
   });
 
-  it("loads the preferred server and home snapshot without waiting for playlists", async () => {
+  it("loads the preferred server, playlists, and home snapshot before entering the main screen", async () => {
     const librarySource = source({
       discoverServers: vi.fn(async () => [server("server-a"), server("server-b")]),
       getSections: vi.fn(async () => [section("music-b")]),
@@ -71,14 +71,13 @@ describe("initial library loading", () => {
     expect(result).toMatchObject({
       serverId: "server-b",
       sectionKey: "music-b",
-      playlists: [],
-      playlistsComplete: false,
+      playlists: [playlist("newer", 2), playlist("older", 1)],
       libraryArtists: [],
-      libraryArtistsComplete: false,
+      libraryArtistsComplete: true,
       home: { recentAlbums: [], hubs: [] },
     });
     expect(librarySource.getSections).toHaveBeenCalledWith("server-b");
-    expect(librarySource.getPlaylists).not.toHaveBeenCalled();
+    expect(librarySource.getPlaylists).toHaveBeenCalledWith("server-b");
     expect(librarySource.getLibraryItems).not.toHaveBeenCalled();
     expect(librarySource.getRecommendationHubs).toHaveBeenCalledWith("server-b", "music-b");
     expect(librarySource.getRecentAlbums).toHaveBeenCalledWith("server-b", "music-b");
@@ -108,7 +107,6 @@ describe("initial library loading", () => {
       serverId: "server-a",
       sections: [],
       playlists: [],
-      playlistsComplete: false,
       libraryArtists: [],
       home: { recentAlbums: [], hubs: [] },
     });
