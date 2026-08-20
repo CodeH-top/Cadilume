@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isDesktopRuntime } from "./api";
 import type { InitialLibraryData } from "./initialLibrary";
+import { homeRecommendationHubs } from "./recommendations";
+
+const STARTUP_PLAYLIST_LIMIT = 50;
+const STARTUP_RECENT_ALBUM_LIMIT = 18;
 
 function isInitialLibraryData(value: unknown): value is InitialLibraryData {
   if (!value || typeof value !== "object") return false;
@@ -28,6 +32,11 @@ export async function readInitialLibraryCache(): Promise<InitialLibraryData | un
     if (!isInitialLibraryData(data)) return undefined;
     return {
       ...data,
+      playlists: data.playlists.slice(0, STARTUP_PLAYLIST_LIMIT),
+      home: {
+        recentAlbums: data.home.recentAlbums.slice(0, STARTUP_RECENT_ALBUM_LIMIT),
+        hubs: homeRecommendationHubs(data.home.hubs),
+      },
       playlistsComplete: false,
       libraryArtistsComplete: false,
       homeComplete: false,
