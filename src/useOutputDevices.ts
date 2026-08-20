@@ -272,7 +272,7 @@ export function useOutputDevices(
     return () => mediaDevices.removeEventListener("devicechange", onDeviceChange);
   }, [desktopRuntime, mediaDevices, platform, refresh]);
 
-  return {
+  return useMemo(() => ({
     platform,
     devices,
     selectedDeviceId,
@@ -284,5 +284,5 @@ export function useOutputDevices(
     selectDevice,
     requestSystemDevice,
     setMessage,
-  };
+  }), [canSelectSink, canUseSystemPicker, devices, loading, message, platform, refresh, requestSystemDevice, selectDevice, selectedDeviceId]);
 }
