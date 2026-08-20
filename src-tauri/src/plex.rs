@@ -32,7 +32,7 @@ use tokio::sync::Notify;
 use url::Url;
 use uuid::Uuid;
 
-use crate::{audio_engine::NativeAudioEngineSlot, stream_proxy::StreamProxy};
+use crate::{audio_engine::NativeAudioEngineSlot, catalog_cache, stream_proxy::StreamProxy};
 
 const PRODUCT_NAME: &str = "Cadilume";
 const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -405,9 +405,10 @@ impl PlexState {
             write_persisted_config(&self.config_path, &config)?;
         }
 
-        // Keep the account token beside the app's other local data, matching
-        // Plexamp's desktop storage model. It never enters the WebView.
-        let stored_credential = read_account_token(
+        // Keep the encrypted account token in the native SQLite cache beside
+        // the app's other local data. It never enters the WebView.
+        let stored_credential = read_catalog_account_token(
+            &self.catalog_cache_path(),
             &self.credential_path,
             &self.credential_key_path,
             &self.legacy_credential_path,
@@ -912,6 +913,12 @@ impl PlexState {
             .map_err(|_| anyhow!("图片缓存读取锁定失败"))?;
         read_artwork_cache(&self.cache_dir, cache_key)?.ok_or_else(|| anyhow!("封面缓存已失效"))
     }
+
+    pub(crate) fn catalog_cache_path(&self) -> PathBuf {
+        self.cache_root
+            .join(CACHE_NAMESPACE_DIR)
+            .join("catalog.sqlite3")
+    }
 }
 
 fn demote_cached_connection(connections: &mut [CachedConnection], index: usize) {
@@ -1281,8 +1288,14 @@ pub async fn poll_pin(
             .map_err(|_| "服务器缓存写入失败".to_string())?
             .clear();
         let _ = clear_artwork_for_account_change(&state);
-        store_account_token(&state.credential_path, &state.credential_key_path, token)
-            .map_err(display_error)?;
+        store_catalog_account_token(
+            &state.catalog_cache_path(),
+            &state.credential_path,
+            &state.credential_key_path,
+            &state.legacy_credential_path,
+            token,
+        )
+        .map_err(display_error)?;
         *state
             .token
             .write()
@@ -1304,7 +1317,8 @@ pub async fn logout(
 ) -> Result<(), String> {
     // Credential revocation is authoritative and must succeed before logout
     // mutates runtime state. Later cache and ticket cleanup remains best-effort.
-    delete_account_token(
+    delete_catalog_account_token(
+        &state.catalog_cache_path(),
         &state.credential_path,
         &state.credential_key_path,
         &state.legacy_credential_path,
@@ -2995,6 +3009,58 @@ fn read_account_token(path: &Path, key_path: &Path, legacy_path: &Path) -> Store
     }
 }
 
+fn read_catalog_account_token(
+    catalog_path: &Path,
+    path: &Path,
+    key_path: &Path,
+    legacy_path: &Path,
+) -> StoredCredential {
+    match catalog_cache::read_credential_blob(catalog_path) {
+        Ok(Some(encoded)) => match decrypt_account_token(&encoded, key_path) {
+            Ok(token) => {
+                let _ = remove_credential_file(path);
+                let _ = remove_credential_file(legacy_path);
+                StoredCredential {
+                    token: Some(token),
+                    status: CredentialStatus::Available,
+                }
+            }
+            Err(error) => {
+                crate::diagnostics::record(
+                    "账号",
+                    format_args!("credential_store_error=sqlite_decrypt kind={error}"),
+                );
+                read_account_token(path, key_path, legacy_path)
+            }
+        },
+        Ok(None) => {
+            let stored = read_account_token(path, key_path, legacy_path);
+            if let Some(token) = stored.token.as_deref() {
+                if let Err(error) =
+                    store_catalog_account_token(catalog_path, path, key_path, legacy_path, token)
+                {
+                    crate::diagnostics::record(
+                        "账号",
+                        format_args!("credential_store_error=sqlite_migrate kind={error}"),
+                    );
+                    return StoredCredential {
+                        token: None,
+                        status: CredentialStatus::Unavailable,
+                    };
+                }
+            }
+            stored
+        }
+        Err(error) => {
+            crate::diagnostics::record(
+                "账号",
+                format_args!("credential_store_error=sqlite_read kind={error}"),
+            );
+            read_account_token(path, key_path, legacy_path)
+        }
+    }
+}
+
 fn migrate_legacy_account_token(
     path: &Path,
     key_path: &Path,
@@ -3170,7 +3236,7 @@ fn decrypt_account_token(encoded: &[u8], key_path: &Path) -> Result<String, Stri
     Ok(token.to_string())
 }
 
-fn store_account_token(path: &Path, key_path: &Path, token: &str) -> Result<(), String> {
+fn encode_account_token(key_path: &Path, token: &str) -> Result<Vec<u8>, String> {
     let token = token.trim();
     if token.is_empty() {
         return Err("Plex 登录 token 不能为空".to_string());
@@ -3186,7 +3252,26 @@ fn store_account_token(path: &Path, key_path: &Path, token: &str) -> Result<(), 
     encoded.extend_from_slice(CREDENTIALS_FILE_MAGIC);
     encoded.extend_from_slice(&nonce);
     encoded.extend_from_slice(&ciphertext);
+    Ok(encoded)
+}
+
+fn store_account_token(path: &Path, key_path: &Path, token: &str) -> Result<(), String> {
+    let encoded = encode_account_token(key_path, token)?;
     write_restricted_file(path, &encoded)
+}
+
+fn store_catalog_account_token(
+    catalog_path: &Path,
+    path: &Path,
+    key_path: &Path,
+    legacy_path: &Path,
+    token: &str,
+) -> Result<(), String> {
+    let encoded = encode_account_token(key_path, token)?;
+    catalog_cache::write_credential_blob(catalog_path, &encoded)?;
+    remove_credential_file(path)?;
+    remove_credential_file(legacy_path)?;
+    Ok(())
 }
 
 fn remove_credential_file(path: &Path) -> Result<(), String> {
@@ -3201,6 +3286,16 @@ fn delete_account_token(path: &Path, key_path: &Path, legacy_path: &Path) -> Res
     remove_credential_file(path)?;
     remove_credential_file(key_path)?;
     remove_credential_file(legacy_path)
+}
+
+fn delete_catalog_account_token(
+    catalog_path: &Path,
+    path: &Path,
+    key_path: &Path,
+    legacy_path: &Path,
+) -> Result<(), String> {
+    catalog_cache::delete_credential_blob(catalog_path)?;
+    delete_account_token(path, key_path, legacy_path)
 }
 
 async fn ensure_success(response: Response, context: &str) -> Result<Response> {

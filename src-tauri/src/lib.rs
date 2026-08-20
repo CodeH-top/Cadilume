@@ -2,6 +2,7 @@ mod app_update;
 mod audio_cache;
 mod audio_engine;
 mod audio_resampler;
+mod catalog_cache;
 mod diagnostics;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod now_playing;
@@ -113,6 +114,9 @@ pub fn run() {
             plex::lyrics,
             plex::cache_status,
             plex::clear_cache,
+            catalog_cache::read_initial_library_cache,
+            catalog_cache::write_initial_library_cache,
+            catalog_cache::clear_initial_library_cache,
             plex::report_timeline,
             plex::scrobble,
             audio_engine::native_audio_load,

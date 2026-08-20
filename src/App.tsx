@@ -722,6 +722,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   const playlistListRequestRef = useRef(0);
   const artistDirectoryRequestRef = useRef(0);
   const cacheStatusRequestRef = useRef(0);
+  const appliedInitialLibraryRef = useRef(initialLibrary);
   const previousRouteCacheContextRef = useRef<{ serverId: string; sectionKey: string } | undefined>(undefined);
   const deferredQueueOpenTimerRef = useRef<number | undefined>(undefined);
   const preferredPlaybackServerId = initialPlaybackSession?.serverId;
@@ -805,6 +806,28 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
       sectionKey,
       initialLibrary.sectionKey,
     );
+
+  useEffect(() => {
+    if (appliedInitialLibraryRef.current === initialLibrary) return;
+    appliedInitialLibraryRef.current = initialLibrary;
+    if (!hasUsableInitialLibrary(initialLibrary)) return;
+
+    const nextServerId = initialLibrary.serverId;
+    const nextSectionKey = initialLibrary.sectionKey;
+    startTransition(() => {
+      setServers(initialLibrary.servers);
+      setSections(initialLibrary.sections);
+      setServerId(nextServerId);
+      setSectionKey(nextSectionKey);
+      setConnectionAvailable(true);
+      if (initialLibrary.libraryArtistsComplete !== false) {
+        setLibraryArtists(initialLibrary.libraryArtists);
+      }
+      if (initialLibrary.playlistsComplete !== false) {
+        setPlaylists(orderPlaylistsByRecency(initialLibrary.playlists));
+      }
+    });
+  }, [initialLibrary]);
 
   useLayoutEffect(() => {
     const nextContext = serverId && sectionKey ? { serverId, sectionKey } : undefined;
@@ -1033,6 +1056,20 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
       const refreshedArtists = refreshedSection
         ? await getLibraryItems(refreshedServer.id, refreshedSection.key, 8).catch(() => [])
         : [];
+      const refreshedPlaylistSnapshot = orderPlaylistsByRecency(refreshedPlaylists);
+      if (refreshedSection) {
+        void writeInitialLibraryCache({
+          ...initialLibrary,
+          servers: refreshedServers,
+          serverId: refreshedServer.id,
+          sections: refreshedSections,
+          sectionKey: refreshedSection.key,
+          playlists: refreshedPlaylistSnapshot,
+          playlistsComplete: true,
+          libraryArtists: refreshedArtists,
+          libraryArtistsComplete: true,
+        });
+      }
 
       startTransition(() => {
         setConnectionAvailable(true);
@@ -1040,7 +1077,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
         setServerId(refreshedServer.id);
         setSections(refreshedSections);
         setSectionKey(refreshedSection?.key);
-        setPlaylists(orderPlaylistsByRecency(refreshedPlaylists));
+        setPlaylists(refreshedPlaylistSnapshot);
         artistDirectoryRequestRef.current += 1;
         setLibraryArtists(refreshedArtists);
         setSourceRevision((revision) => revision + 1);
@@ -1055,7 +1092,7 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
       if (remaining > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, remaining));
       setSourcesSyncing(false);
     }
-  }, [loadServers, notify, sectionKey, serverId]);
+  }, [initialLibrary, loadServers, notify, sectionKey, serverId]);
 
   const refreshCacheStatus = useCallback(async () => {
     const requestId = ++cacheStatusRequestRef.current;
@@ -5376,23 +5413,41 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
 
   useEffect(() => {
     if (!visible || source || failed || !path || !serverId || !artworkRequestKey || !isDesktopRuntime()) return;
-    let request = artworkCache.get(artworkRequestKey);
-    if (!request) {
-      request = artworkUrl(serverId, path, dimensions.width, dimensions.height);
-      artworkCache.set(artworkRequestKey, request);
-      if (artworkCache.size > 200) artworkCache.delete(artworkCache.keys().next().value as string);
-    }
     let cancelled = false;
-    void request
-      .then((url) => { if (!cancelled) setSource(url); })
-      .catch(() => {
-        artworkCache.delete(artworkRequestKey);
-        if (!cancelled) {
-          setFailed(true);
-          setDisplayedSource(undefined);
-        }
-      });
-    return () => { cancelled = true; };
+    let idleHandle: number | undefined;
+    let fallbackTimer: number | undefined;
+    const startRequest = () => {
+      if (cancelled) return;
+      let request = artworkCache.get(artworkRequestKey);
+      if (!request) {
+        request = artworkUrl(serverId, path, dimensions.width, dimensions.height);
+        artworkCache.set(artworkRequestKey, request);
+        if (artworkCache.size > 200) artworkCache.delete(artworkCache.keys().next().value as string);
+      }
+      void request
+        .then((url) => { if (!cancelled) setSource(url); })
+        .catch(() => {
+          artworkCache.delete(artworkRequestKey);
+          if (!cancelled) {
+            setFailed(true);
+            setDisplayedSource(undefined);
+          }
+        });
+    };
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (idleWindow.requestIdleCallback) {
+      idleHandle = idleWindow.requestIdleCallback(startRequest, { timeout: 900 });
+    } else {
+      fallbackTimer = window.setTimeout(startRequest, 80);
+    }
+    return () => {
+      cancelled = true;
+      if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle);
+      if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
+    };
   }, [artworkRequestKey, dimensions.height, dimensions.width, failed, path, serverId, source, visible]);
 
   const handleImageError = () => {
@@ -5419,6 +5474,7 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
             src={renderedSource}
             alt={`${item?.title || "音乐"} 封面`}
             loading={stableTransition ? "eager" : "lazy"}
+            decoding="async"
             onError={() => {
               if (stableTransition && renderedSource !== source) {
                 setDisplayedSource(undefined);
