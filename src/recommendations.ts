@@ -1,5 +1,8 @@
 import type { PlexHub, PlexPlaylist } from "./types";
 
+const HOME_RECENT_PLAYED_LIMIT = 12;
+const HOME_RECENT_ADDED_LIMIT = 18;
+
 function hubIdentity(hub: PlexHub): string {
   return [hub.identifier, hub.context, hub.title].filter(Boolean).join(" ").toLowerCase();
 }
@@ -37,12 +40,16 @@ export function homeRecommendationHubs(hubs: readonly PlexHub[]): PlexHub[] {
   const result: PlexHub[] = [];
 
   if (recentlyPlayed) {
-    const tracks = recentlyPlayed.items.filter((item) => item.type === "track");
+    const tracks = recentlyPlayed.items
+      .filter((item) => item.type === "track")
+      .slice(0, HOME_RECENT_PLAYED_LIMIT);
     if (tracks.length) result.push({ ...recentlyPlayed, type: "track", items: tracks });
   }
 
   if (recentlyAdded) {
-    const media = recentlyAdded.items.filter((item) => item.type === "track" || item.type === "album");
+    const media = recentlyAdded.items
+      .filter((item) => item.type === "track" || item.type === "album")
+      .slice(0, HOME_RECENT_ADDED_LIMIT);
     if (media.length) result.push({ ...recentlyAdded, items: media });
   }
 
