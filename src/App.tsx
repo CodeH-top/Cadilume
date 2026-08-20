@@ -207,10 +207,13 @@ const BOOTSTRAP_ACCOUNT_PLACEHOLDER: PlexAccount = {
 };
 
 function hasUsableInitialLibrary(data: InitialLibraryData): boolean {
+  const homeHasContent = data.home.recentAlbums.length > 0 || data.home.hubs.length > 0;
+  const homeIsReady = data.homeComplete !== false || homeHasContent;
   return data.servers.length > 0
     && data.sections.length > 0
     && Boolean(data.serverId)
-    && Boolean(data.sectionKey);
+    && Boolean(data.sectionKey)
+    && homeIsReady;
 }
 
 interface MusicShellRuntime {

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isDesktopRuntime } from "./api";
 import type { InitialLibraryData } from "./initialLibrary";
-import { homeRecommendationHubs } from "./recommendations";
+import { homeRecommendationHubs, isRecentlyAddedHub } from "./recommendations";
 
 const STARTUP_PLAYLIST_LIMIT = 50;
 const STARTUP_RECENT_ALBUM_LIMIT = 18;
@@ -30,12 +30,25 @@ export async function readInitialLibraryCache(): Promise<InitialLibraryData | un
   try {
     const data = await invoke<InitialLibraryData | null>("read_initial_library_cache");
     if (!isInitialLibraryData(data)) return undefined;
+    const recentAlbums = data.home.recentAlbums.slice(0, STARTUP_RECENT_ALBUM_LIMIT);
+    const normalizedHubs = homeRecommendationHubs(data.home.hubs);
+    const hubs = normalizedHubs.some(isRecentlyAddedHub) || !recentAlbums.length
+      ? normalizedHubs
+      : [
+        ...normalizedHubs,
+        {
+          title: "最近加入的音乐",
+          type: "album",
+          identifier: "cadilume.recentlyadded",
+          items: recentAlbums,
+        },
+      ];
     return {
       ...data,
       playlists: data.playlists.slice(0, STARTUP_PLAYLIST_LIMIT),
       home: {
-        recentAlbums: data.home.recentAlbums.slice(0, STARTUP_RECENT_ALBUM_LIMIT),
-        hubs: homeRecommendationHubs(data.home.hubs),
+        recentAlbums,
+        hubs,
       },
       playlistsComplete: false,
       libraryArtistsComplete: false,
