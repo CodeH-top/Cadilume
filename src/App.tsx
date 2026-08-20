@@ -5442,7 +5442,11 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
         if (artworkCache.size > 200) artworkCache.delete(artworkCache.keys().next().value as string);
       }
       void request
-        .then((url) => { if (!cancelled) setSource(url); })
+        .then((url) => {
+          if (cancelled) return;
+          setSource(url);
+          if (stableTransition) setDisplayedSource((current) => current || url);
+        })
         .catch(() => {
           artworkCache.delete(artworkRequestKey);
           if (!cancelled) {
@@ -5465,7 +5469,7 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
       if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle);
       if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
     };
-  }, [artworkRequestKey, dimensions.height, dimensions.width, failed, path, serverId, source, visible]);
+  }, [artworkRequestKey, dimensions.height, dimensions.width, failed, path, serverId, source, stableTransition, visible]);
 
   const handleImageError = () => {
     if (!item?.imageUrl && artworkRequestKey && isDesktopRuntime()) {
