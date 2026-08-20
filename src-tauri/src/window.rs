@@ -47,20 +47,23 @@ fn dock_icon_bytes(preset: BrandPreset) -> &'static [u8] {
 /// preset can update the running application without changing the packaged
 /// default. Other platforms silently retain their bundle icon.
 #[cfg(target_os = "macos")]
-pub(crate) fn update_dock_icon<R: Runtime>(app: &AppHandle<R>, preset: BrandPreset) {
+fn update_dock_icon_on_main(preset: BrandPreset) {
     use objc2::{AllocAnyThread, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
 
     let icon_bytes = dock_icon_bytes(preset);
-    let _ = app.run_on_main_thread(move || {
-        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        let app = NSApplication::sharedApplication(mtm);
-        let data = NSData::with_bytes(icon_bytes);
-        if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
-            unsafe { app.setApplicationIconImage(Some(&icon)) };
-        }
-    });
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    let app = NSApplication::sharedApplication(mtm);
+    let data = NSData::with_bytes(icon_bytes);
+    if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
+        unsafe { app.setApplicationIconImage(Some(&icon)) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn update_dock_icon<R: Runtime>(app: &AppHandle<R>, preset: BrandPreset) {
+    let _ = app.run_on_main_thread(move || update_dock_icon_on_main(preset));
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -137,10 +140,18 @@ fn should_reveal_main_window_on_reopen(_has_visible_windows: bool) -> bool {
 }
 
 pub fn handle_run_event<R: Runtime>(app: &AppHandle<R>, event: tauri::RunEvent) {
-    #[cfg(target_os = "macos")]
     if matches!(&event, tauri::RunEvent::Ready) {
+        // The setup callback runs before AppKit's event loop is servicing the
+        // window. Reveal only after Ready and never focus it here, so a hot
+        // reload cannot steal the user's active application while the first
+        // WebView frame is still being prepared.
+        show_main_window_on_ready(app);
+
+        #[cfg(target_os = "macos")]
         if let Some(state) = app.try_state::<PlexState>() {
-            update_dock_icon(app, state.brand_preset());
+            // RunEvent::Ready is already delivered on AppKit's main thread;
+            // avoid queueing a second main-thread task during launch.
+            update_dock_icon_on_main(state.brand_preset());
         }
     }
 
@@ -199,14 +210,20 @@ pub fn set_status_icon_enabled<R: Runtime>(app: &AppHandle<R>, enabled: bool) ->
         return Ok(());
     }
 
-    match status_icon_action(enabled, app.tray_by_id(TRAY_ID).is_some()) {
-        StatusIconAction::Create => build_status_icon(app),
-        StatusIconAction::Remove => {
-            drop(app.remove_tray_by_id(TRAY_ID));
-            Ok(())
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let result = match status_icon_action(enabled, handle.tray_by_id(TRAY_ID).is_some()) {
+            StatusIconAction::Create => build_status_icon(&handle),
+            StatusIconAction::Remove => {
+                drop(handle.remove_tray_by_id(TRAY_ID));
+                Ok(())
+            }
+            StatusIconAction::Noop => Ok(()),
+        };
+        if let Err(error) = result {
+            eprintln!("[窗口] 更新系统状态图标失败：{error}");
         }
-        StatusIconAction::Noop => Ok(()),
-    }
+    })
 }
 
 pub fn handle_window_event(window: &Window, event: &WindowEvent) {
@@ -240,6 +257,13 @@ pub(crate) fn reveal_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Resul
         window.set_focus()?;
     }
     Ok(())
+}
+
+fn show_main_window_on_ready<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.unminimize();
+    }
 }
 
 #[tauri::command]

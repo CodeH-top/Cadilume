@@ -41,7 +41,8 @@ export interface InitialLibrarySource {
 }
 
 export const INITIAL_LIBRARY_ARTIST_LIMIT = 120;
-const REQUIRED_STARTUP_REQUEST_TIMEOUT_MS = 15_000;
+const REQUIRED_STARTUP_REQUEST_TIMEOUT_MS = 8_000;
+const OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS = 2_500;
 
 export function isInitialLibrarySnapshotScopeActive(
   invalidated: boolean,
@@ -159,26 +160,57 @@ export async function loadInitialLibraryData(
         };
       }
 
-      // Prepare the complete first-frame snapshot while Splash is still
-      // visible. Non-critical artist indexing is loaded on demand by its
-      // route, so it is intentionally represented by an empty complete index.
-      const [playlists, hubs, recentAlbums] = await Promise.all([
+      // The server and section are required to identify the startup scope.
+      // Catalog adornments are independent requests: one stalled Plex
+      // endpoint must not hold the native window on Splash while the other
+      // useful data is already available. The settled flags let MusicShell
+      // hydrate only the part that actually missed the first pass.
+      const [playlistsResult, artistsResult, hubsResult, recentAlbumsResult] = await Promise.all([
         withStartupTimeout(
           () => source.getPlaylists(selectedServer.id),
-          REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
           `读取 ${selectedServer.name} 的歌单超时。`,
-        ).catch(() => []),
+        ).then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          (reason) => ({ status: "rejected" as const, reason }),
+        ),
+        withStartupTimeout(
+          () => source.getInitialLibraryArtists
+            ? source.getInitialLibraryArtists(selectedServer.id, selectedSection.key)
+            : source.getLibraryItems(selectedServer.id, selectedSection.key, 8, {
+              maxItems: INITIAL_LIBRARY_ARTIST_LIMIT,
+            }),
+          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
+          `读取 ${selectedServer.name} 的艺术家索引超时。`,
+        ).then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          (reason) => ({ status: "rejected" as const, reason }),
+        ),
         withStartupTimeout(
           () => source.getRecommendationHubs(selectedServer.id, selectedSection.key),
-          REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
           `读取 ${selectedServer.name} 的首页推荐超时。`,
+        ).then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          (reason) => ({ status: "rejected" as const, reason }),
         ),
         withStartupTimeout(
           () => source.getRecentAlbums(selectedServer.id, selectedSection.key),
-          REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
           `读取 ${selectedServer.name} 的最近加入内容超时。`,
+        ).then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          (reason) => ({ status: "rejected" as const, reason }),
         ),
       ]);
+      const playlists = playlistsResult.status === "fulfilled" ? orderPlaylistsByRecency(playlistsResult.value) : [];
+      const libraryArtists = artistsResult.status === "fulfilled"
+        ? artistsResult.value.slice(0, INITIAL_LIBRARY_ARTIST_LIMIT)
+        : [];
+      const libraryArtistsComplete = artistsResult.status === "fulfilled"
+        && !source.getInitialLibraryArtists;
+      const hubs = hubsResult.status === "fulfilled" ? hubsResult.value : [];
+      const recentAlbums = recentAlbumsResult.status === "fulfilled" ? recentAlbumsResult.value : [];
       const completeHubs = hubs.some(isRecentlyAddedHub) || !recentAlbums.length
         ? hubs
         : [
@@ -195,13 +227,15 @@ export async function loadInitialLibraryData(
         serverId: selectedServer.id,
         sections,
         sectionKey: selectedSection.key,
-        playlists: orderPlaylistsByRecency(playlists),
-        libraryArtists: [],
-        libraryArtistsComplete: true,
+        playlists,
+        playlistsComplete: playlistsResult.status === "fulfilled",
+        libraryArtists,
+        libraryArtistsComplete,
         home: {
           recentAlbums,
           hubs: homeRecommendationHubs(completeHubs),
         },
+        homeComplete: hubsResult.status === "fulfilled" && recentAlbumsResult.status === "fulfilled",
       };
     } catch (reason) {
       lastError = reason;

@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener},
-    sync::{mpsc::sync_channel, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -23,13 +26,19 @@ use axum::{
 };
 use reqwest::{redirect::Policy, Client};
 use tauri::{AppHandle, Manager, State as TauriState};
-use tokio::{net::TcpListener, sync::oneshot};
+use tokio::{
+    net::TcpListener,
+    sync::{oneshot, Notify},
+};
 use url::Url;
 use uuid::Uuid;
 
 use crate::plex::{PlexState, StreamConnectionSnapshot};
 
-const UNUSED_TICKET_TTL: Duration = Duration::from_secs(90);
+// Lazy artwork requests may sit behind a bounded WebView queue while Plex is
+// probing several connections. Keep the ticket short-lived, but long enough
+// that a valid image is not invalidated before its <img> starts fetching it.
+const UNUSED_TICKET_TTL: Duration = Duration::from_secs(10 * 60);
 // A direct-play response can stay open for hours without resolving the ticket
 // again. Keep an already-used high-entropy loopback ticket seekable for long
 // albums and recordings; logout and the bounded registry still revoke it.
@@ -224,6 +233,8 @@ pub struct StreamProxy {
     audio_tickets: Arc<Mutex<TicketRegistry<StreamTarget>>>,
     artwork_tickets: Arc<Mutex<TicketRegistry<String>>>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    ready: Arc<AtomicBool>,
+    ready_notify: Arc<Notify>,
 }
 
 impl StreamProxy {
@@ -249,13 +260,16 @@ impl StreamProxy {
             .route("/artwork/{ticket}", get(artwork_get).head(artwork_head))
             .with_state(runtime);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let (ready_tx, ready_rx) = sync_channel::<std::result::Result<(), String>>(1);
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_notify = Arc::new(Notify::new());
+        let task_ready = Arc::clone(&ready);
+        let task_ready_notify = Arc::clone(&ready_notify);
+        let ready_port = port;
 
         tauri::async_runtime::spawn(async move {
             let listener = match TcpListener::from_std(listener) {
                 Ok(listener) => listener,
                 Err(error) => {
-                    let _ = ready_tx.send(Err(error.to_string()));
                     crate::diagnostics::record(
                         "代理",
                         format_args!("loopback=failed error={error}"),
@@ -263,11 +277,9 @@ impl StreamProxy {
                     return;
                 }
             };
-            // Do not hand out a loopback ticket until Tokio has registered the
-            // socket. Release builds schedule the first command much faster
-            // than `tauri dev`, so returning before this point can make the
-            // first decoder request race the proxy task's startup.
-            let _ = ready_tx.send(Ok(()));
+            task_ready.store(true, Ordering::Release);
+            task_ready_notify.notify_waiters();
+            crate::diagnostics::record("代理", format_args!("loopback=ready port={ready_port}"));
             let server = axum::serve(listener, router).with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
             });
@@ -276,26 +288,34 @@ impl StreamProxy {
             }
         });
 
-        match ready_rx.recv_timeout(Duration::from_secs(2)) {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                let _ = shutdown_tx.send(());
-                return Err(anyhow!("本机媒体代理启动失败：{error}"));
-            }
-            Err(error) => {
-                let _ = shutdown_tx.send(());
-                return Err(anyhow!("等待本机媒体代理就绪超时：{error}"));
-            }
-        }
-
-        crate::diagnostics::record("代理", format_args!("loopback=ready port={port}"));
+        crate::diagnostics::record("代理", format_args!("loopback=bound port={port}"));
 
         Ok(Self {
             port,
             audio_tickets,
             artwork_tickets,
             shutdown: Mutex::new(Some(shutdown_tx)),
+            ready,
+            ready_notify,
         })
+    }
+
+    pub(crate) async fn wait_until_ready(&self) -> Result<()> {
+        if self.ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let notified = self.ready_notify.notified();
+        if self.ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        tokio::time::timeout(Duration::from_secs(2), notified)
+            .await
+            .map_err(|_| anyhow!("本机媒体代理就绪超时"))?;
+        if self.ready.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(anyhow!("本机媒体代理未能启动"))
+        }
     }
 
     fn issue(&self, target: StreamTarget) -> Result<String> {
@@ -401,7 +421,7 @@ impl Drop for StreamProxy {
 }
 
 #[tauri::command]
-pub fn stream_url(
+pub async fn stream_url(
     server_id: String,
     metadata_key: String,
     part_key: String,
@@ -413,7 +433,12 @@ pub fn stream_url(
         .map_err(|error| error.to_string())?;
     let requested_quality = target.quality.clone();
     let server = plex
-        .stream_server(&target.server_id)
+        .stream_server_ready(&target.server_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    proxy
+        .wait_until_ready()
+        .await
         .map_err(|error| error.to_string())?;
     if server.connections.is_empty() {
         return Err("服务器没有可用连接".to_string());
@@ -1368,6 +1393,8 @@ mod tests {
             audio_tickets: Arc::new(Mutex::new(TicketRegistry::new(MAX_AUDIO_TICKETS))),
             artwork_tickets: Arc::new(Mutex::new(TicketRegistry::new(MAX_ARTWORK_TICKETS))),
             shutdown: Mutex::new(None),
+            ready: Arc::new(AtomicBool::new(true)),
+            ready_notify: Arc::new(Notify::new()),
         }
     }
 

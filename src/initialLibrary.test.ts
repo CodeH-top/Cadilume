@@ -58,7 +58,7 @@ describe("initial library loading", () => {
     expect(isInitialLibrarySnapshotScopeActive(false, 1, "server-a", "server-a")).toBe(false);
   });
 
-  it("loads the preferred server, playlists, and home snapshot before entering the main screen", async () => {
+  it("loads the preferred server and parallel startup catalog snapshot", async () => {
     const librarySource = source({
       discoverServers: vi.fn(async () => [server("server-a"), server("server-b")]),
       getSections: vi.fn(async () => [section("music-b")]),
@@ -72,13 +72,13 @@ describe("initial library loading", () => {
       serverId: "server-b",
       sectionKey: "music-b",
       playlists: [playlist("newer", 2), playlist("older", 1)],
-      libraryArtists: [],
+      libraryArtists: [track("artist-index")],
       libraryArtistsComplete: true,
       home: { recentAlbums: [], hubs: [] },
     });
     expect(librarySource.getSections).toHaveBeenCalledWith("server-b");
     expect(librarySource.getPlaylists).toHaveBeenCalledWith("server-b");
-    expect(librarySource.getLibraryItems).not.toHaveBeenCalled();
+    expect(librarySource.getLibraryItems).toHaveBeenCalledWith("server-b", "music-b", 8, { maxItems: 120 });
     expect(librarySource.getRecommendationHubs).toHaveBeenCalledWith("server-b", "music-b");
     expect(librarySource.getRecentAlbums).toHaveBeenCalledWith("server-b", "music-b");
   });
@@ -142,14 +142,38 @@ describe("initial library loading", () => {
     await expect(loadInitialLibraryData("server-b", librarySource)).rejects.toThrow("server-a 不可用");
   });
 
-  it("does not enter the main screen when required home data fails", async () => {
+  it("keeps the usable server snapshot when optional home data fails", async () => {
     const librarySource = source({
       getInitialLibraryArtists: vi.fn(async () => { throw new Error("artist index stalled"); }),
       getRecommendationHubs: vi.fn(async () => { throw new Error("recommendations unavailable"); }),
       getRecentAlbums: vi.fn(async () => { throw new Error("recent albums unavailable"); }),
     });
 
-    await expect(loadInitialLibraryData(undefined, librarySource)).rejects.toThrow("recommendations unavailable");
+    await expect(loadInitialLibraryData(undefined, librarySource)).resolves.toMatchObject({
+      serverId: "server-a",
+      sectionKey: "music",
+      home: { hubs: [], recentAlbums: [] },
+      homeComplete: false,
+      libraryArtistsComplete: false,
+    });
+  });
+
+  it("returns the required scope after an optional startup endpoint stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      const librarySource = source({
+        getRecommendationHubs: vi.fn(async () => new Promise<never>(() => undefined)),
+      });
+      const pending = loadInitialLibraryData(undefined, librarySource);
+      await vi.advanceTimersByTimeAsync(2_500);
+      await expect(pending).resolves.toMatchObject({
+        serverId: "server-a",
+        sectionKey: "music",
+        homeComplete: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("turns a stalled startup operation into a retryable timeout", async () => {

@@ -53,10 +53,6 @@ pub fn run() {
             app.manage(plex_state);
             let native_cache = app.path().app_cache_dir()?.join("native-audio");
             app.manage(NativeAudioEngineSlot::new(native_cache));
-            #[cfg(target_os = "macos")]
-            now_playing::install(app.handle().clone());
-            #[cfg(target_os = "windows")]
-            now_playing::install(app.handle().clone());
             app.manage(StreamProxy::start(app.handle().clone())?);
             app.manage(window::QuitCoordinator::default());
             app.manage(app_update::AppUpdateState::default());
@@ -82,13 +78,10 @@ pub fn run() {
                         &initialization_handle,
                         state.status_icon_enabled(),
                     );
+                    #[cfg(target_os = "macos")]
+                    window::update_dock_icon(&initialization_handle, state.brand_preset());
                 })
                 .map_err(|error| format!("无法启动后台初始化线程：{error}"))?;
-            // Always reveal the main window after setup. Hiding the macOS
-            // debug window made a cold `tauri dev` launch look like an
-            // unresponsive process: the process was alive, but there was no
-            // window for the user to wake or interact with.
-            window::reveal_main_window(&app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

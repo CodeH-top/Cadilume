@@ -13,7 +13,10 @@ pub(crate) enum PlaybackState {
 mod macos {
     use super::PlaybackState;
     use std::ptr::NonNull;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    };
 
     use block2::RcBlock;
     use objc2::rc::Retained;
@@ -34,6 +37,7 @@ mod macos {
     use tauri::{AppHandle, Emitter};
 
     static COMMAND_APP: OnceLock<Mutex<Option<AppHandle>>> = OnceLock::new();
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
 
     fn app_handle() -> Option<AppHandle> {
         COMMAND_APP
@@ -75,6 +79,9 @@ mod macos {
     }
 
     pub fn install(app: AppHandle) {
+        if INSTALLED.swap(true, Ordering::SeqCst) {
+            return;
+        }
         *COMMAND_APP.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(app);
         let center = unsafe { MPRemoteCommandCenter::sharedCommandCenter() };
 
@@ -340,7 +347,10 @@ mod macos {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::PlaybackState;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    };
 
     use tauri::{AppHandle, Emitter, Manager};
     use windows::core::{factory, HSTRING};
@@ -358,6 +368,7 @@ mod windows {
     use windows::Win32::System::WinRT::ISystemMediaTransportControlsInterop;
 
     static CONTROLS: OnceLock<SystemMediaTransportControls> = OnceLock::new();
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
     static COMMAND_APP: OnceLock<Mutex<Option<AppHandle>>> = OnceLock::new();
     static THUMBNAIL: OnceLock<Mutex<Option<CachedThumbnail>>> = OnceLock::new();
 
@@ -446,6 +457,9 @@ mod windows {
     }
 
     pub fn install(app: AppHandle) {
+        if INSTALLED.swap(true, Ordering::SeqCst) {
+            return;
+        }
         if let Ok(mut command_app) = COMMAND_APP.get_or_init(|| Mutex::new(None)).lock() {
             *command_app = Some(app.clone());
         }

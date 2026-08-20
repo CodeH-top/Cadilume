@@ -207,13 +207,10 @@ const BOOTSTRAP_ACCOUNT_PLACEHOLDER: PlexAccount = {
 };
 
 function hasUsableInitialLibrary(data: InitialLibraryData): boolean {
-  const homeHasContent = data.home.recentAlbums.length > 0 || data.home.hubs.length > 0;
-  const homeIsReady = data.homeComplete !== false || homeHasContent;
   return data.servers.length > 0
     && data.sections.length > 0
     && Boolean(data.serverId)
-    && Boolean(data.sectionKey)
-    && homeIsReady;
+    && Boolean(data.sectionKey);
 }
 
 interface MusicShellRuntime {
@@ -385,6 +382,7 @@ function MainApplication({
   const appUpdater = useAppUpdater(session, notifications.notify);
   const syncedBrandSessionRef = useRef<BootstrapResponse | undefined>(undefined);
   const accountRefreshRequestRef = useRef(0);
+  const startupRequestRef = useRef(0);
   const requestedUiPreview = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("ui-preview")
     : null;
@@ -393,6 +391,7 @@ function MainApplication({
     : null;
 
   const load = useCallback(async () => {
+    const startupRequestId = ++startupRequestRef.current;
     setError(undefined);
     setInitialLibrary(undefined);
     setStartupStage("正在恢复本地会话");
@@ -409,11 +408,6 @@ function MainApplication({
       }
       setSession(nextSession);
       setStartupStage("正在加载服务器与音乐资料库");
-      const networkLibrary = withStartupTimeout(
-        () => loadInitialLibraryData(readPersistedPlaybackSession()?.serverId),
-        45_000,
-        "连接音乐资料库超时，请确认 Plex Media Server 在线后重试。",
-      );
       const cachedLibrary = await withStartupTimeout(
         () => readInitialLibraryCache(),
         500,
@@ -422,43 +416,66 @@ function MainApplication({
       if (cachedLibrary && hasUsableInitialLibrary(cachedLibrary)) {
         setStartupStage("正在使用本地资料快照，后台更新资料库");
         startTransition(() => setInitialLibrary(cachedLibrary));
-        void networkLibrary.then((nextLibrary) => {
-          if (!hasUsableInitialLibrary(nextLibrary)) {
-            console.warn("[资料库] 后台刷新没有返回可用资料库，继续使用本地快照");
-            return;
-          }
-          const refreshedLibrary = {
-            ...nextLibrary,
-            // The refreshed snapshot is committed as one complete replacement
-            // so MusicShell does not start a second visible loading pass.
-            playlistsComplete: true,
-            libraryArtistsComplete: true,
-            homeComplete: true,
-          };
-          void writeInitialLibraryCache(refreshedLibrary);
-          startTransition(() => setInitialLibrary(refreshedLibrary));
-          setStartupStage("资料库已更新");
-        }).catch((reason) => {
-          console.warn("[资料库] 后台刷新失败，继续使用本地快照", reason);
+        // Do not start server discovery until the cached frame is mounted.
+        // Concurrent connection probing can saturate the native runtime and
+        // make the first WebView paint look frozen even though the cache is
+        // already ready.
+        window.requestAnimationFrame(() => {
+          if (startupRequestRef.current !== startupRequestId) return;
+          const networkLibrary = withStartupTimeout(
+            () => loadInitialLibraryData(readPersistedPlaybackSession()?.serverId),
+            12_000,
+            "连接音乐资料库超时，请确认 Plex Media Server 在线后重试。",
+          );
+          void networkLibrary.then((nextLibrary) => {
+            if (startupRequestRef.current !== startupRequestId) return;
+            if (!hasUsableInitialLibrary(nextLibrary)) {
+              console.warn("[资料库] 后台刷新没有返回可用资料库，继续使用本地快照");
+              return;
+            }
+            const sameScope = nextLibrary.serverId === cachedLibrary.serverId
+              && nextLibrary.sectionKey === cachedLibrary.sectionKey;
+            const refreshedLibrary = sameScope
+              ? {
+                ...nextLibrary,
+                playlists: nextLibrary.playlistsComplete === false
+                  ? cachedLibrary.playlists
+                  : nextLibrary.playlists,
+                playlistsComplete: nextLibrary.playlistsComplete !== false
+                  || cachedLibrary.playlistsComplete !== false,
+                libraryArtists: nextLibrary.libraryArtistsComplete === false
+                  ? cachedLibrary.libraryArtists
+                  : nextLibrary.libraryArtists,
+                libraryArtistsComplete: nextLibrary.libraryArtistsComplete !== false
+                  || cachedLibrary.libraryArtistsComplete !== false,
+                home: nextLibrary.homeComplete === false ? cachedLibrary.home : nextLibrary.home,
+                homeComplete: nextLibrary.homeComplete !== false || cachedLibrary.homeComplete !== false,
+              }
+              : nextLibrary;
+            void writeInitialLibraryCache(refreshedLibrary);
+            startTransition(() => setInitialLibrary(refreshedLibrary));
+            setStartupStage("资料库已更新");
+          }).catch((reason) => {
+            if (startupRequestRef.current !== startupRequestId) return;
+            console.warn("[资料库] 后台刷新失败，继续使用本地快照", reason);
+          });
         });
       } else {
         if (cachedLibrary) {
           console.warn("[资料库] 忽略无服务器的空缓存快照");
           void clearInitialLibraryCache();
         }
-        const nextLibrary = await networkLibrary;
+        const nextLibrary = await withStartupTimeout(
+          () => loadInitialLibraryData(readPersistedPlaybackSession()?.serverId),
+          12_000,
+          "连接音乐资料库超时，请确认 Plex Media Server 在线后重试。",
+        );
         if (!hasUsableInitialLibrary(nextLibrary)) {
           throw new Error("当前账号没有可访问的 Plex 音乐资料库。");
         }
         setStartupStage("正在准备首页与上次播放记录");
-        const readyLibrary = {
-          ...nextLibrary,
-          playlistsComplete: true,
-          libraryArtistsComplete: true,
-          homeComplete: true,
-        };
-        startTransition(() => setInitialLibrary(readyLibrary));
-        void writeInitialLibraryCache(readyLibrary);
+        startTransition(() => setInitialLibrary(nextLibrary));
+        void writeInitialLibraryCache(nextLibrary);
       }
       void refreshAccount()
         .then((account) => {
@@ -5423,10 +5440,10 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
         setVisible(true);
         observer.disconnect();
       }
-    }, { rootMargin: "320px" });
+    }, { rootMargin: "96px" });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [item?.imageUrl, path, serverId]);
+  }, [item?.imageUrl, path, serverId, size]);
 
   useEffect(() => {
     if (!visible || source || failed || !path || !serverId || !artworkRequestKey || !isDesktopRuntime()) return;
@@ -5449,6 +5466,14 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
         })
         .catch(() => {
           artworkCache.delete(artworkRequestKey);
+          if (!cancelled && ticketRetryCount < 2) {
+            // A ticket can race server discovery or expire while a WebView
+            // image is being promoted from the lazy queue. Reissue it a
+            // bounded number of times before showing the placeholder.
+            setTicketRetryCount((count) => count + 1);
+            setFailed(false);
+            return;
+          }
           if (!cancelled) {
             setFailed(true);
             setDisplayedSource(undefined);
@@ -5459,8 +5484,10 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
       requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
       cancelIdleCallback?: (handle: number) => void;
     };
-    if (idleWindow.requestIdleCallback) {
-      idleHandle = idleWindow.requestIdleCallback(startRequest, { timeout: 900 });
+    if (stableTransition || size === "player") {
+      startRequest();
+    } else if (idleWindow.requestIdleCallback) {
+      idleHandle = idleWindow.requestIdleCallback(startRequest, { timeout: 250 });
     } else {
       fallbackTimer = window.setTimeout(startRequest, 80);
     }
@@ -5469,13 +5496,15 @@ function Artwork({ item, size, className = "", preferArt = false, stableTransiti
       if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle);
       if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
     };
-  }, [artworkRequestKey, dimensions.height, dimensions.width, failed, path, serverId, source, stableTransition, visible]);
+  }, [artworkRequestKey, dimensions.height, dimensions.width, failed, path, serverId, size, source, stableTransition, ticketRetryCount, visible]);
 
   const handleImageError = () => {
-    if (!item?.imageUrl && artworkRequestKey && isDesktopRuntime()) {
+    const canRefreshTicket = !item?.imageUrl || isLoopbackArtworkSource(item.imageUrl);
+    if (canRefreshTicket && artworkRequestKey && isDesktopRuntime()) {
       artworkCache.delete(artworkRequestKey);
-      if (ticketRetryCount < 1) {
-        setTicketRetryCount(1);
+      if (ticketRetryCount < 2) {
+        setTicketRetryCount((count) => count + 1);
+        setFailed(false);
         setSource(undefined);
         return;
       }

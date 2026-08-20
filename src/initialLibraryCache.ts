@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isDesktopRuntime } from "./api";
-import type { InitialLibraryData } from "./initialLibrary";
+import { INITIAL_LIBRARY_ARTIST_LIMIT, type InitialLibraryData } from "./initialLibrary";
 import { homeRecommendationHubs, isRecentlyAddedHub } from "./recommendations";
 
 const STARTUP_PLAYLIST_LIMIT = 50;
@@ -50,12 +50,15 @@ export async function readInitialLibraryCache(): Promise<InitialLibraryData | un
         recentAlbums,
         hubs,
       },
-      // The snapshot is the data used for the first frame. Background
-      // refresh replaces it later; it must not trigger another visible
-      // loading pass immediately after MusicShell mounts.
-      playlistsComplete: true,
-      libraryArtistsComplete: true,
-      homeComplete: true,
+      // Older caches were written before the artist index became part of the
+      // startup snapshot. Do not mark an empty index complete: MusicShell can
+      // hydrate just that missing slice in the background while the cached
+      // home frame remains visible.
+      playlistsComplete: data.playlistsComplete !== false && data.playlists.length > 0,
+      libraryArtistsComplete: data.libraryArtistsComplete !== false
+        && data.libraryArtists.length > 0
+        && data.libraryArtists.length < INITIAL_LIBRARY_ARTIST_LIMIT,
+      homeComplete: data.homeComplete !== false && (recentAlbums.length > 0 || hubs.length > 0),
     };
   } catch {
     return undefined;

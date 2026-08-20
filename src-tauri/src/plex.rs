@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Mutex, RwLock,
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[cfg(target_os = "windows")]
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, State};
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use url::Url;
 use uuid::Uuid;
 
@@ -52,6 +52,10 @@ const MAX_DEVICE_NAME_CHARACTERS: usize = 80;
 const MAX_PLAYLIST_BATCH_TRACKS: usize = 10_000;
 const FALLBACK_DEVICE_NAME: &str = "Desktop";
 const BOOTSTRAP_ACCOUNT_TIMEOUT: Duration = Duration::from_secs(8);
+const SERVER_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(6);
+const CONNECTION_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+const ARTWORK_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -325,6 +329,9 @@ pub struct PlexState {
     credential_status: RwLock<CredentialStatus>,
     token: RwLock<Option<String>>,
     servers: RwLock<HashMap<String, CachedServer>>,
+    server_summaries: RwLock<Vec<ServerSummary>>,
+    server_refresh_lock: AsyncMutex<()>,
+    server_refresh_finished_at: Mutex<Option<Instant>>,
     initialized: AtomicBool,
     initialization_error: Mutex<Option<String>>,
     ready: Notify,
@@ -371,6 +378,9 @@ impl PlexState {
             credential_status: RwLock::new(CredentialStatus::Missing),
             token: RwLock::new(None),
             servers: RwLock::new(HashMap::new()),
+            server_summaries: RwLock::new(Vec::new()),
+            server_refresh_lock: AsyncMutex::new(()),
+            server_refresh_finished_at: Mutex::new(None),
             initialized: AtomicBool::new(false),
             initialization_error: Mutex::new(None),
             ready: Notify::new(),
@@ -594,13 +604,11 @@ impl PlexState {
         path: &str,
         query: &HashMap<String, String>,
     ) -> Result<Response> {
-        let mut server = self
-            .servers
-            .read()
-            .map_err(|_| anyhow!("服务器缓存读取失败"))?
-            .get(server_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("找不到服务器，请重新刷新服务器列表"))?;
+        // A cached WebView snapshot can issue its first metadata request before
+        // the background resource discovery has filled the native server map.
+        // Recover that race here so every server-scoped command shares the same
+        // lazy readiness boundary as artwork and playback.
+        let mut server = self.cached_server_ready(server_id).await?;
 
         let mut reprioritized_after_500 = false;
         loop {
@@ -614,13 +622,16 @@ impl PlexState {
                         continue;
                     }
                 };
-                match self
+                let request = self
                     .plex_headers(self.protected_client.request(method.clone(), endpoint))
                     .header("X-Plex-Token", &server.token)
-                    .query(query)
-                    .send()
-                    .await
-                {
+                    .query(query);
+                let request = if method == Method::GET {
+                    request.timeout(SERVER_METADATA_TIMEOUT)
+                } else {
+                    request
+                };
+                match request.send().await {
                     Ok(response) if response.status().is_success() => {
                         if index > 0 {
                             self.promote_connection(server_id, &connection.uri);
@@ -708,6 +719,7 @@ impl PlexState {
         let client_identifier = self.client_identifier();
         let device_name = self.device_name();
         let expected_identifier = expected_machine_identifier.to_string();
+        let original_connections = connections.clone();
         let mut pending = Vec::new();
         let mut unparsable = Vec::new();
         for connection in connections {
@@ -722,7 +734,7 @@ impl PlexState {
             let request =
                 apply_plex_identity_headers(client.get(endpoint), &client_identifier, &device_name)
                     .header("X-Plex-Token", token)
-                    .timeout(Duration::from_secs(5));
+                    .timeout(CONNECTION_PROBE_TIMEOUT);
             let expected = expected_identifier.clone();
             tasks.spawn(async move {
                 let reachable = match request.send().await {
@@ -742,9 +754,22 @@ impl PlexState {
         }
 
         let mut results = Vec::with_capacity(tasks.len());
-        while let Some(result) = tasks.join_next().await {
-            if let Ok(item) = result {
-                results.push(item);
+        let probe_deadline = tokio::time::sleep(CONNECTION_PROBE_TIMEOUT);
+        tokio::pin!(probe_deadline);
+        loop {
+            tokio::select! {
+                result = tasks.join_next() => match result {
+                    Some(Ok(item)) => results.push(item),
+                    Some(Err(_)) => {}
+                    None => break,
+                },
+                _ = &mut probe_deadline => {
+                    // A slow/unresolvable LAN candidate must not hold the
+                    // first library frame hostage. Preserve unobserved
+                    // connections as fallback candidates below.
+                    tasks.abort_all();
+                    break;
+                }
             }
         }
         results.sort_by_key(|(index, _, _)| *index);
@@ -752,12 +777,23 @@ impl PlexState {
         let mut reachable = Vec::new();
         let mut reachable_relays = Vec::new();
         let mut unreachable = Vec::new();
+        let observed_uris: HashSet<String> = results
+            .iter()
+            .map(|(_, connection, _)| connection.uri.clone())
+            .collect();
         for (_, connection, ok) in results {
             if ok && connection.relay {
                 reachable_relays.push(connection);
             } else if ok {
                 reachable.push(connection);
             } else {
+                unreachable.push(connection);
+            }
+        }
+        for connection in original_connections {
+            if !observed_uris.contains(&connection.uri)
+                && !unparsable.iter().any(|item| item.uri == connection.uri)
+            {
                 unreachable.push(connection);
             }
         }
@@ -812,6 +848,25 @@ impl PlexState {
     }
 
     pub(crate) async fn refresh_servers(&self) -> Result<Vec<ServerSummary>> {
+        let requested_at = Instant::now();
+        let _refresh_guard = self.server_refresh_lock.lock().await;
+        let already_refreshed = self
+            .server_refresh_finished_at
+            .lock()
+            .map(|finished_at| finished_at.is_some_and(|finished_at| finished_at >= requested_at))
+            .unwrap_or(false);
+        if already_refreshed {
+            return self
+                .server_summaries
+                .read()
+                .map(|summaries| summaries.clone())
+                .map_err(|_| anyhow!("服务器摘要缓存读取失败"));
+        }
+        self.refresh_servers_inner().await
+    }
+
+    async fn refresh_servers_inner(&self) -> Result<Vec<ServerSummary>> {
+        let started_at = Instant::now();
         let account_token = self.token()?;
         let response = self
             .plex_headers(
@@ -824,6 +879,7 @@ impl PlexState {
                 ("includeRelay", "1"),
                 ("includeIPv6", "1"),
             ])
+            .timeout(SERVER_DISCOVERY_TIMEOUT)
             .send()
             .await?;
         let resources = ensure_success(response, "读取 Plex 服务器失败")
@@ -896,7 +952,74 @@ impl PlexState {
             .servers
             .write()
             .map_err(|_| anyhow!("服务器缓存写入失败"))? = cache;
+        *self
+            .server_summaries
+            .write()
+            .map_err(|_| anyhow!("服务器摘要缓存写入失败"))? = summaries.clone();
+        if let Ok(mut finished_at) = self.server_refresh_finished_at.lock() {
+            *finished_at = Some(Instant::now());
+        }
+        crate::diagnostics::record(
+            "启动",
+            format_args!(
+                "servers_ready count={} elapsed_ms={}",
+                summaries.len(),
+                started_at.elapsed().as_millis()
+            ),
+        );
         Ok(summaries)
+    }
+
+    /// Cached startup snapshots can mount before the first background server
+    /// discovery finishes. Resolve the native server scope lazily so artwork,
+    /// playback and metadata requests do not fail just because the WebView
+    /// rendered a cached frame a few milliseconds early.
+    pub(crate) async fn stream_server_ready(
+        &self,
+        server_id: &str,
+    ) -> Result<StreamServerSnapshot> {
+        let server = self.cached_server_ready(server_id).await?;
+        Ok(StreamServerSnapshot {
+            token: server.token,
+            connections: server
+                .connections
+                .into_iter()
+                .map(|connection| StreamConnectionSnapshot {
+                    uri: connection.uri,
+                    local: connection.local,
+                    relay: connection.relay,
+                })
+                .collect(),
+        })
+    }
+
+    async fn cached_server_ready(&self, server_id: &str) -> Result<CachedServer> {
+        if let Ok(server) = cached_server(self, server_id) {
+            return Ok(server);
+        }
+        let _refresh_guard = self.server_refresh_lock.lock().await;
+        if let Ok(server) = cached_server(self, server_id) {
+            return Ok(server);
+        }
+        self.refresh_servers_inner().await?;
+        cached_server(self, server_id)
+    }
+
+    async fn clear_server_cache(&self) -> Result<()> {
+        let _refresh_guard = self.server_refresh_lock.lock().await;
+        self.servers
+            .write()
+            .map_err(|_| anyhow!("服务器缓存写入失败"))?
+            .clear();
+        self.server_summaries
+            .write()
+            .map_err(|_| anyhow!("服务器摘要缓存写入失败"))?
+            .clear();
+        *self
+            .server_refresh_finished_at
+            .lock()
+            .map_err(|_| anyhow!("服务器刷新状态写入失败"))? = None;
+        Ok(())
     }
 
     pub(crate) fn client_identifier(&self) -> String {
@@ -1057,7 +1180,7 @@ struct ResourceConnection {
     relay: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerSummary {
     id: String,
@@ -1282,11 +1405,7 @@ pub async fn poll_pin(
     let authenticated = if let Some(token) = pin.auth_token.as_deref() {
         audio_engine.reset_and_clear_cache().await?;
         stream_proxy.clear().map_err(display_error)?;
-        state
-            .servers
-            .write()
-            .map_err(|_| "服务器缓存写入失败".to_string())?
-            .clear();
+        state.clear_server_cache().await.map_err(display_error)?;
         let _ = clear_artwork_for_account_change(&state);
         store_catalog_account_token(
             &state.catalog_cache_path(),
@@ -1336,9 +1455,8 @@ pub async fn logout(
     }
     state.set_credential_status(CredentialStatus::Missing);
     crate::diagnostics::record("账号", format_args!("credential_store=missing"));
-    match state.servers.write() {
-        Ok(mut servers) => servers.clear(),
-        Err(_) => cleanup_warnings.push("服务器缓存写入失败".to_string()),
+    if let Err(error) = state.clear_server_cache().await {
+        cleanup_warnings.push(display_error(error));
     }
     if let Err(error) = clear_artwork_for_account_change(&state) {
         cleanup_warnings.push(display_error(error));
@@ -1710,6 +1828,10 @@ pub async fn artwork_url(
     stream_proxy: State<'_, StreamProxy>,
 ) -> Result<String, String> {
     let cache_key = ensure_artwork_cached(server_id, path, width, height, &state).await?;
+    stream_proxy
+        .wait_until_ready()
+        .await
+        .map_err(display_error)?;
     stream_proxy.issue_artwork(cache_key).map_err(display_error)
 }
 
@@ -1728,7 +1850,10 @@ async fn ensure_artwork_cached(
     }
     // Resolve the current account's authorized server before consulting disk.
     // A cache hit must never bypass the active PMS ACL boundary.
-    let server = cached_server(state, &server_id).map_err(display_error)?;
+    let server = state
+        .cached_server_ready(&server_id)
+        .await
+        .map_err(display_error)?;
     let cache_key = artwork_cache_key(&server_id, &path, width, height, &server.token);
     if let Ok(_cache_guard) = state.cache_lock.read() {
         match read_artwork_cache(&state.cache_dir, &cache_key) {
@@ -1766,6 +1891,7 @@ async fn ensure_artwork_cached(
             .plex_identity_headers(state.protected_client.get(endpoint))
             .header(ACCEPT, "image/*")
             .header("X-Plex-Token", &server.token)
+            .timeout(ARTWORK_REQUEST_TIMEOUT)
             .send()
             .await
         {
@@ -1788,13 +1914,15 @@ async fn ensure_artwork_cached(
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
-        let mime = match validate_image_metadata(content_type, content_length) {
-            Ok(mime) => mime,
-            Err(error) => {
-                last_error = Some(error.to_string());
-                continue;
-            }
-        };
+        let declared_mime = validate_image_metadata(content_type, content_length).ok();
+        let generic_binary = content_type
+            .and_then(|value| value.split(';').next())
+            .map(str::trim)
+            .is_some_and(|value| value.eq_ignore_ascii_case("application/octet-stream"));
+        if content_type.is_some() && declared_mime.is_none() && !generic_binary {
+            last_error = Some("Plex 图片响应不是 image/*".to_string());
+            continue;
+        }
         let initial_capacity = content_length
             .unwrap_or_default()
             .min(MAX_IMAGE_BYTES as u64) as usize;
@@ -1815,6 +1943,16 @@ async fn ensure_artwork_cached(
                 }
             }
         }
+        let mime = match declared_mime {
+            Some(mime) => mime,
+            None => match sniff_image_mime(&bytes) {
+                Some(mime) => mime.to_string(),
+                None => {
+                    last_error = Some("Plex 图片响应缺少有效的 image Content-Type".to_string());
+                    continue;
+                }
+            },
+        };
         if index > 0 {
             state.promote_connection(&server_id, &connection.uri);
         }
@@ -1826,10 +1964,23 @@ async fn ensure_artwork_cached(
         return Ok(cache_key);
     }
 
-    Err(format!(
-        "读取 Plex 图片失败：{}",
-        last_error.unwrap_or_else(|| "服务器没有可用连接".to_string())
-    ))
+    let summary = last_error.unwrap_or_else(|| "服务器没有可用连接".to_string());
+    crate::diagnostics::record(
+        "封面",
+        format_args!(
+            "fetch_failed server={} connections={} reason_class={}",
+            server_id.chars().take(8).collect::<String>(),
+            server.connections.len(),
+            if summary.contains("HTTP") {
+                "http"
+            } else if summary.contains("超时") || summary.contains("timed out") {
+                "timeout"
+            } else {
+                "transport_or_content"
+            }
+        ),
+    );
+    Err(format!("读取 Plex 图片失败：{summary}"))
 }
 
 #[tauri::command]
@@ -2723,6 +2874,25 @@ fn validate_image_metadata(
         })
         .ok_or_else(|| anyhow!("Plex 图片响应缺少有效的 image Content-Type"))?;
     Ok(mime)
+}
+
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"\x00\x00\x00\x0C" && &bytes[4..8] == b"jP  " {
+        return Some("image/jp2");
+    }
+    None
 }
 
 fn cached_server(state: &PlexState, server_id: &str) -> Result<CachedServer> {
@@ -3884,6 +4054,17 @@ mod tests {
         assert!(
             validate_image_metadata(Some("image/png"), Some(MAX_IMAGE_BYTES as u64 + 1)).is_err()
         );
+    }
+
+    #[test]
+    fn artwork_mime_can_be_recovered_from_common_image_headers() {
+        assert_eq!(sniff_image_mime(b"\xFF\xD8\xFFrest"), Some("image/jpeg"));
+        assert_eq!(
+            sniff_image_mime(b"\x89PNG\r\n\x1A\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(sniff_image_mime(b"RIFF0000WEBPrest"), Some("image/webp"));
+        assert_eq!(sniff_image_mime(b"text/html"), None);
     }
 
     #[test]

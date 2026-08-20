@@ -12,6 +12,7 @@ const demoCreatedPlaylists: PlexPlaylist[] = [];
 const demoCreatedPlaylistItems = new Map<string, PlexItem[]>();
 const demoRemovedPlaylistItemIds = new Set<string>();
 const MAX_ARTWORK_REQUESTS = 6;
+const ARTWORK_INVOKE_TIMEOUT_MS = 18_000;
 const MAX_PLAYLIST_TITLE_LENGTH = 255;
 const MAX_PLAYLIST_SUMMARY_LENGTH = 1000;
 const MAX_DEVICE_NAME_LENGTH = 80;
@@ -650,11 +651,12 @@ export async function getRecommendationHubs(serverId: string, sectionKey: string
   if (!isDesktopRuntime()) return demoRecommendationHubs.map((hub) => ({ ...hub, items: [...hub.items] }));
   // Only recent bands are rendered on the home screen. Request a bounded hub
   // set to keep Tauri IPC and WebKit JSON parsing responsive during startup.
-  const response = await serverGet(serverId, `/hubs/sections/${sectionKey}`, { count: "12" });
+  const response = await serverGet(serverId, `/hubs/sections/${sectionKey}`, { count: "8" });
   const root = container(response);
   const hubs = Array.isArray(root.Hub) ? root.Hub.filter(isRecord) : [];
   return hubs.map((hub): PlexHub => {
     const rawItems = hub.Metadata ?? hub.Directory ?? hub.Track;
+    const boundedItems = Array.isArray(rawItems) ? rawItems.slice(0, 24) : rawItems;
     return {
       title: optionalString(hub.title) || "推荐",
       type: optionalString(hub.type) || "mixed",
@@ -662,7 +664,7 @@ export async function getRecommendationHubs(serverId: string, sectionKey: string
       context: optionalString(hub.context),
       more: optionalBooleanFlag(hub.more),
       promoted: optionalBooleanFlag(hub.promoted),
-      items: normalizePlexItems(rawItems),
+      items: normalizePlexItems(boundedItems),
     };
   }).filter((hub) => hub.items.length > 0 && ["artist", "album", "track"].includes(hub.type));
 }
@@ -1087,9 +1089,18 @@ export async function artworkUrl(serverId: string, path: string, width: number, 
   if (!isDesktopRuntime()) return path;
   return new Promise<string>((resolve, reject) => {
     artworkQueue.push(() => {
-      void invoke<string>("artwork_url", { serverId, path, width, height })
+      let timeoutHandle: ReturnType<typeof globalThis.setTimeout> | undefined;
+      const request = invoke<string>("artwork_url", { serverId, path, width, height });
+      const timeout = new Promise<never>((_, timeoutReject) => {
+        timeoutHandle = globalThis.setTimeout(
+          () => timeoutReject(new Error("封面请求超时，请稍后重试。")),
+          ARTWORK_INVOKE_TIMEOUT_MS,
+        );
+      });
+      void Promise.race([request, timeout])
         .then(resolve, reject)
         .finally(() => {
+          if (timeoutHandle !== undefined) globalThis.clearTimeout(timeoutHandle);
           activeArtworkRequests -= 1;
           drainArtworkQueue();
         });

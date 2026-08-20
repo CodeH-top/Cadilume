@@ -3805,6 +3805,14 @@ pub async fn native_audio_load(
         return Err("音频地址不是当前 Cadilume 本机票据".to_string());
     }
     let metadata = validate_now_playing_metadata(&stream_proxy, metadata)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        // System media frameworks are optional for the first frame. Register
+        // them only when the user actually starts native playback, keeping
+        // AppKit/SMTC work off the startup path.
+        let media_handle = app.clone();
+        let _ = app.run_on_main_thread(move || crate::now_playing::install(media_handle));
+    }
     let _operation = audio_state.output_switch_lock.lock().await;
     let engine = audio_state.ensure(&app)?;
     engine
