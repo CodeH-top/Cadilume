@@ -74,12 +74,6 @@ pub fn run() {
                     if let Some(error) = error {
                         diagnostics::record("启动", format_args!("后台初始化失败 error={error}"));
                     }
-                    let _ = window::set_status_icon_enabled(
-                        &initialization_handle,
-                        state.status_icon_enabled(),
-                    );
-                    #[cfg(target_os = "macos")]
-                    window::update_dock_icon(&initialization_handle, state.brand_preset());
                 })
                 .map_err(|error| format!("无法启动后台初始化线程：{error}"))?;
             Ok(())
@@ -142,6 +136,7 @@ pub fn run() {
             app_update::install_app_update,
             app_update::set_auto_update_enabled,
             window::show_main_window,
+            window::mark_main_ui_ready,
             window::quit_app,
             window::acknowledge_quit,
         ])

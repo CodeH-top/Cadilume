@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, RwLock,
+        Mutex, OnceLock, RwLock,
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -314,7 +314,7 @@ pub(crate) struct StreamServerSnapshot {
 }
 
 pub struct PlexState {
-    protected_client: Client,
+    protected_client: OnceLock<Result<Client, String>>,
     config_path: PathBuf,
     credential_path: PathBuf,
     credential_key_path: PathBuf,
@@ -355,15 +355,8 @@ impl PlexState {
             device_name: FALLBACK_DEVICE_NAME.to_string(),
             brand_preset: BrandPreset::default(),
         };
-        let protected_client = Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(20))
-            .redirect(Policy::none())
-            .user_agent(format!("{PRODUCT_NAME}/{PRODUCT_VERSION}"))
-            .build()?;
-
         Ok(Self {
-            protected_client,
+            protected_client: OnceLock::new(),
             config_path,
             credential_path,
             credential_key_path,
@@ -575,9 +568,25 @@ impl PlexState {
         apply_plex_identity_headers(request, &client_identifier, &device_name)
     }
 
+    fn protected_client(&self) -> Result<Client> {
+        self.protected_client
+            .get_or_init(|| {
+                Client::builder()
+                    .connect_timeout(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(20))
+                    .redirect(Policy::none())
+                    .user_agent(format!("{PRODUCT_NAME}/{PRODUCT_VERSION}"))
+                    .build()
+                    .map_err(|error| format!("无法初始化 Plex 网络客户端：{error}"))
+            })
+            .clone()
+            .map_err(|error| anyhow!(error))
+    }
+
     async fn account(&self, token: &str) -> Result<Account> {
+        let client = self.protected_client()?;
         let response = self
-            .plex_headers(self.protected_client.get(format!("{PLEX_TV}/api/v2/user")))
+            .plex_headers(client.get(format!("{PLEX_TV}/api/v2/user")))
             .header("X-Plex-Token", token)
             .timeout(BOOTSTRAP_ACCOUNT_TIMEOUT)
             .send()
@@ -608,6 +617,7 @@ impl PlexState {
         // the background resource discovery has filled the native server map.
         // Recover that race here so every server-scoped command shares the same
         // lazy readiness boundary as artwork and playback.
+        let client = self.protected_client()?;
         let mut server = self.cached_server_ready(server_id).await?;
 
         let mut reprioritized_after_500 = false;
@@ -623,7 +633,7 @@ impl PlexState {
                     }
                 };
                 let request = self
-                    .plex_headers(self.protected_client.request(method.clone(), endpoint))
+                    .plex_headers(client.request(method.clone(), endpoint))
                     .header("X-Plex-Token", &server.token)
                     .query(query);
                 let request = if method == Method::GET {
@@ -715,7 +725,9 @@ impl PlexState {
         // this client's server identifier), keep relay as the last-ditch
         // option, and keep unreachable connections at the end so a later
         // request can still retry them after a transient outage.
-        let client = self.protected_client.clone();
+        let Ok(client) = self.protected_client() else {
+            return connections;
+        };
         let client_identifier = self.client_identifier();
         let device_name = self.device_name();
         let expected_identifier = expected_machine_identifier.to_string();
@@ -868,11 +880,9 @@ impl PlexState {
     async fn refresh_servers_inner(&self) -> Result<Vec<ServerSummary>> {
         let started_at = Instant::now();
         let account_token = self.token()?;
+        let client = self.protected_client()?;
         let response = self
-            .plex_headers(
-                self.protected_client
-                    .get(format!("{PLEX_TV}/api/v2/resources")),
-            )
+            .plex_headers(client.get(format!("{PLEX_TV}/api/v2/resources")))
             .header("X-Plex-Token", account_token)
             .query(&[
                 ("includeHttps", "1"),
@@ -1335,12 +1345,9 @@ pub async fn refresh_account(state: State<'_, PlexState>) -> Result<Account, Str
 
 #[tauri::command]
 pub async fn create_pin(state: State<'_, PlexState>) -> Result<PinResponse, String> {
+    let client = state.protected_client().map_err(display_error)?;
     let response = state
-        .plex_headers(
-            state
-                .protected_client
-                .post(format!("{PLEX_TV}/api/v2/pins")),
-        )
+        .plex_headers(client.post(format!("{PLEX_TV}/api/v2/pins")))
         .query(&[("strong", "true")])
         .send()
         .await
@@ -1359,12 +1366,9 @@ pub async fn cancel_pin(pin_id: i64, state: State<'_, PlexState>) -> Result<(), 
     if pin_id <= 0 {
         return Err("无效的 Plex 登录码".to_string());
     }
+    let client = state.protected_client().map_err(display_error)?;
     let response = state
-        .plex_headers(
-            state
-                .protected_client
-                .delete(format!("{PLEX_TV}/api/v2/pins/{pin_id}")),
-        )
+        .plex_headers(client.delete(format!("{PLEX_TV}/api/v2/pins/{pin_id}")))
         .send()
         .await
         .map_err(display_error)?;
@@ -1386,12 +1390,9 @@ pub async fn poll_pin(
     stream_proxy: State<'_, StreamProxy>,
     audio_engine: State<'_, NativeAudioEngineSlot>,
 ) -> Result<PinResponse, String> {
+    let client = state.protected_client().map_err(display_error)?;
     let response = state
-        .plex_headers(
-            state
-                .protected_client
-                .get(format!("{PLEX_TV}/api/v2/pins/{pin_id}")),
-        )
+        .plex_headers(client.get(format!("{PLEX_TV}/api/v2/pins/{pin_id}")))
         .send()
         .await
         .map_err(display_error)?;
@@ -1857,11 +1858,29 @@ async fn ensure_artwork_cached(
     let cache_key = artwork_cache_key(&server_id, &path, width, height, &server.token);
     if let Ok(_cache_guard) = state.cache_lock.read() {
         match read_artwork_cache(&state.cache_dir, &cache_key) {
-            Ok(Some(_)) => return Ok(cache_key),
+            Ok(Some(_)) => {
+                crate::diagnostics::record(
+                    "封面",
+                    format_args!(
+                        "cache=hit width={} height={}",
+                        width.unwrap_or_default(),
+                        height.unwrap_or_default()
+                    ),
+                );
+                return Ok(cache_key);
+            }
             Ok(None) => {}
             Err(_) => discard_artwork_cache_entry(&state.cache_dir, &cache_key),
         }
     }
+    crate::diagnostics::record(
+        "封面",
+        format_args!(
+            "cache=miss width={} height={}",
+            width.unwrap_or_default(),
+            height.unwrap_or_default()
+        ),
+    );
 
     let mut last_error = None;
 
@@ -1887,8 +1906,9 @@ async fn ensure_artwork_cached(
             }
         }
 
+        let client = state.protected_client().map_err(display_error)?;
         let mut response = match state
-            .plex_identity_headers(state.protected_client.get(endpoint))
+            .plex_identity_headers(client.get(endpoint))
             .header(ACCEPT, "image/*")
             .header("X-Plex-Token", &server.token)
             .timeout(ARTWORK_REQUEST_TIMEOUT)
@@ -2186,8 +2206,9 @@ async fn request_lyric_stream(
 }
 
 async fn send_lyric_request(state: &PlexState, url: Url, token: &str) -> Result<Response> {
+    let client = state.protected_client()?;
     let response = state
-        .plex_identity_headers(state.protected_client.get(url))
+        .plex_identity_headers(client.get(url))
         .header(
             ACCEPT,
             "application/xml, text/plain;q=0.9, application/json;q=0.8",

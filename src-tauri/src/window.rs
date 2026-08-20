@@ -140,20 +140,7 @@ fn should_reveal_main_window_on_reopen(_has_visible_windows: bool) -> bool {
 }
 
 pub fn handle_run_event<R: Runtime>(app: &AppHandle<R>, event: tauri::RunEvent) {
-    if matches!(&event, tauri::RunEvent::Ready) {
-        // The setup callback runs before AppKit's event loop is servicing the
-        // window. Reveal only after Ready and never focus it here, so a hot
-        // reload cannot steal the user's active application while the first
-        // WebView frame is still being prepared.
-        show_main_window_on_ready(app);
-
-        #[cfg(target_os = "macos")]
-        if let Some(state) = app.try_state::<PlexState>() {
-            // RunEvent::Ready is already delivered on AppKit's main thread;
-            // avoid queueing a second main-thread task during launch.
-            update_dock_icon_on_main(state.brand_preset());
-        }
-    }
+    let _ = (app, matches!(&event, tauri::RunEvent::Ready));
 
     #[cfg(target_os = "macos")]
     if let tauri::RunEvent::Reopen {
@@ -259,16 +246,22 @@ pub(crate) fn reveal_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Resul
     Ok(())
 }
 
-fn show_main_window_on_ready<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.show();
-        let _ = window.unminimize();
-    }
-}
-
 #[tauri::command]
 pub fn show_main_window(app: AppHandle) -> Result<(), String> {
     reveal_main_window(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn mark_main_ui_ready(app: AppHandle, state: State<'_, PlexState>) -> Result<(), String> {
+    // React calls this only after the authenticated home chunk, account, and
+    // first-screen artwork have completed and two paint frames have elapsed.
+    // Keep Tray/Dock AppKit construction out of the launch/first-frame path.
+    set_status_icon_enabled(&app, state.status_icon_enabled())
+        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    update_dock_icon(&app, state.brand_preset());
+    crate::diagnostics::record("启动", format_args!("native_ui=ready"));
+    Ok(())
 }
 
 #[tauri::command]

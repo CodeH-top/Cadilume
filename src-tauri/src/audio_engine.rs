@@ -1334,6 +1334,17 @@ impl NativeAudioEngineSlot {
             .and_then(|guard| guard.as_ref().map(Arc::clone))
     }
 
+    fn peek_next(&self, natural_ended: bool) -> Result<Option<usize>, String> {
+        let Some(engine) = self.current() else {
+            return Ok(None);
+        };
+        let mut queue = engine
+            .queue
+            .lock()
+            .map_err(|_| "队列状态锁失败".to_string())?;
+        Ok(queue.peek_next_index(natural_ended))
+    }
+
     fn begin_maintenance(&self) -> SlotMaintenanceGuard<'_> {
         self.maintenance_in_progress.store(true, Ordering::SeqCst);
         SlotMaintenanceGuard(&self.maintenance_in_progress)
@@ -4063,16 +4074,14 @@ pub fn native_queue_next(
 
 #[tauri::command]
 pub fn native_queue_peek_next(
-    app: AppHandle,
+    _app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
     natural_ended: Option<bool>,
 ) -> Result<Option<usize>, String> {
-    let engine = state.ensure(&app)?;
-    let mut queue = engine
-        .queue
-        .lock()
-        .map_err(|_| "队列状态锁失败".to_string())?;
-    Ok(queue.peek_next_index(natural_ended.unwrap_or(true)))
+    // Peeking is a read-only queue operation. Do not create an output stream
+    // merely because a restored paused queue has a next item; CoreAudio must
+    // remain untouched until the user starts playback.
+    state.peek_next(natural_ended.unwrap_or(true))
 }
 
 #[tauri::command]
@@ -5146,6 +5155,21 @@ mod tests {
             Some(2),
             "手动 next 不受 repeat-one 约束"
         );
+    }
+
+    #[test]
+    fn peeking_before_playback_does_not_create_native_engine() {
+        let cache_root = unique_temp_path("lazy-audio-engine");
+        let slot = NativeAudioEngineSlot::new(cache_root.clone());
+
+        assert!(slot.current().is_none());
+        assert_eq!(slot.peek_next(true).unwrap(), None);
+        assert!(
+            slot.current().is_none(),
+            "只读预览队列不能隐式创建 CoreAudio 输出引擎"
+        );
+
+        let _ = std::fs::remove_dir_all(cache_root);
     }
 
     #[test]

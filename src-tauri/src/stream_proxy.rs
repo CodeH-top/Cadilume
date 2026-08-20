@@ -3,7 +3,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -222,10 +222,22 @@ impl<T: Clone> TicketRegistry<T> {
 
 struct ProxyRuntime {
     app: AppHandle,
-    client: Client,
+    client: Arc<OnceLock<Result<Client, String>>>,
     audio_tickets: Arc<Mutex<TicketRegistry<StreamTarget>>>,
     artwork_tickets: Arc<Mutex<TicketRegistry<String>>>,
     expected_host: String,
+}
+
+impl ProxyRuntime {
+    fn client(&self) -> Result<Client> {
+        self.client
+            .get_or_init(|| {
+                build_stream_client()
+                    .map_err(|error| format!("无法初始化音频代理网络客户端：{error}"))
+            })
+            .clone()
+            .map_err(|error| anyhow!(error))
+    }
 }
 
 pub struct StreamProxy {
@@ -247,10 +259,9 @@ impl StreamProxy {
         let port = listener.local_addr()?.port();
         let audio_tickets = Arc::new(Mutex::new(TicketRegistry::new(MAX_AUDIO_TICKETS)));
         let artwork_tickets = Arc::new(Mutex::new(TicketRegistry::new(MAX_ARTWORK_TICKETS)));
-        let client = build_stream_client()?;
         let runtime = Arc::new(ProxyRuntime {
             app,
-            client,
+            client: Arc::new(OnceLock::new()),
             audio_tickets: Arc::clone(&audio_tickets),
             artwork_tickets: Arc::clone(&artwork_tickets),
             expected_host: format!("127.0.0.1:{port}"),
@@ -647,6 +658,10 @@ async fn forward_to_plex(
     let Some(plex) = runtime.app.try_state::<PlexState>() else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "播放器服务尚未就绪");
     };
+    let client = match runtime.client() {
+        Ok(client) => client,
+        Err(error) => return error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+    };
     let mut authorization_refreshed = false;
     let mut authorization_failure = None;
     'authorization: loop {
@@ -680,7 +695,7 @@ async fn forward_to_plex(
             };
             for endpoint in endpoints {
                 let mut request = plex
-                    .plex_identity_headers(runtime.client.request(method.clone(), endpoint))
+                    .plex_identity_headers(client.request(method.clone(), endpoint))
                     .header(ACCEPT, "audio/mpeg,audio/*;q=0.9,*/*;q=0.1")
                     .header(ACCEPT_ENCODING, "identity")
                     .header("X-Plex-Token", &server.token)

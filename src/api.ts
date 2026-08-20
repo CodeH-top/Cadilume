@@ -1161,6 +1161,10 @@ export async function showMainWindow(): Promise<void> {
   if (isDesktopRuntime()) await invoke("show_main_window");
 }
 
+export async function markMainUiReady(): Promise<void> {
+  if (isDesktopRuntime()) await invoke("mark_main_ui_ready");
+}
+
 export async function reportTimeline(serverId: string, track: PlexItem, playbackState: "playing" | "paused" | "stopped", time: number): Promise<void> {
   if (!isDesktopRuntime()) return;
   await invoke("report_timeline", {

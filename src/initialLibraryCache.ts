@@ -19,6 +19,27 @@ function isInitialLibraryData(value: unknown): value is InitialLibraryData {
     && Array.isArray(home?.hubs);
 }
 
+function stripRuntimeArtwork<T extends object>(item: T): T {
+  const { imageUrl: _imageUrl, ...persisted } = item as T & { imageUrl?: string };
+  return persisted as T;
+}
+
+function stripRuntimeArtworkFromLibrary(data: InitialLibraryData): InitialLibraryData {
+  return {
+    ...data,
+    playlists: data.playlists.map((playlist) => stripRuntimeArtwork(playlist)),
+    libraryArtists: data.libraryArtists.map((artist) => stripRuntimeArtwork(artist)),
+    home: {
+      ...data.home,
+      recentAlbums: data.home.recentAlbums.map((item) => stripRuntimeArtwork(item)),
+      hubs: data.home.hubs.map((hub) => ({
+        ...hub,
+        items: hub.items.map((item) => stripRuntimeArtwork(item)),
+      })),
+    },
+  };
+}
+
 /**
  * The desktop cache lives in Rust's SQLite store so dev and release share the
  * same app-cache boundary. The database contains catalog metadata only; the
@@ -30,8 +51,9 @@ export async function readInitialLibraryCache(): Promise<InitialLibraryData | un
   try {
     const data = await invoke<InitialLibraryData | null>("read_initial_library_cache");
     if (!isInitialLibraryData(data)) return undefined;
-    const recentAlbums = data.home.recentAlbums.slice(0, STARTUP_RECENT_ALBUM_LIMIT);
-    const normalizedHubs = homeRecommendationHubs(data.home.hubs);
+    const sanitizedData = stripRuntimeArtworkFromLibrary(data);
+    const recentAlbums = sanitizedData.home.recentAlbums.slice(0, STARTUP_RECENT_ALBUM_LIMIT);
+    const normalizedHubs = homeRecommendationHubs(sanitizedData.home.hubs);
     const hubs = normalizedHubs.some(isRecentlyAddedHub) || !recentAlbums.length
       ? normalizedHubs
       : [
@@ -44,8 +66,8 @@ export async function readInitialLibraryCache(): Promise<InitialLibraryData | un
         },
       ];
     return {
-      ...data,
-      playlists: data.playlists.slice(0, STARTUP_PLAYLIST_LIMIT),
+      ...sanitizedData,
+      playlists: sanitizedData.playlists.slice(0, STARTUP_PLAYLIST_LIMIT),
       home: {
         recentAlbums,
         hubs,
@@ -54,10 +76,10 @@ export async function readInitialLibraryCache(): Promise<InitialLibraryData | un
       // startup snapshot. Do not mark an empty index complete: MusicShell can
       // hydrate just that missing slice in the background while the cached
       // home frame remains visible.
-      playlistsComplete: data.playlistsComplete !== false && data.playlists.length > 0,
-      libraryArtistsComplete: data.libraryArtistsComplete !== false
-        && data.libraryArtists.length > 0
-        && data.libraryArtists.length < INITIAL_LIBRARY_ARTIST_LIMIT,
+      playlistsComplete: sanitizedData.playlistsComplete !== false && sanitizedData.playlists.length > 0,
+      libraryArtistsComplete: sanitizedData.libraryArtistsComplete !== false
+        && sanitizedData.libraryArtists.length > 0
+        && sanitizedData.libraryArtists.length < INITIAL_LIBRARY_ARTIST_LIMIT,
       homeComplete: data.homeComplete !== false && (recentAlbums.length > 0 || hubs.length > 0),
     };
   } catch {
@@ -68,7 +90,7 @@ export async function readInitialLibraryCache(): Promise<InitialLibraryData | un
 export async function writeInitialLibraryCache(data: InitialLibraryData): Promise<void> {
   if (!isDesktopRuntime() || !isInitialLibraryData(data) || !data.servers.length || !data.sections.length || !data.serverId || !data.sectionKey) return;
   try {
-    await invoke("write_initial_library_cache", { data });
+    await invoke("write_initial_library_cache", { data: stripRuntimeArtworkFromLibrary(data) });
   } catch {
     // A cache is an optimization; startup must remain functional if SQLite
     // is unavailable or the cache path is not writable.

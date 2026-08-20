@@ -1,10 +1,11 @@
 import { listen } from "@tauri-apps/api/event";
 import { isBlurhashValid } from "blurhash";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { acknowledgeQuit, artworkUrl, isDesktopRuntime, nativeAudioClearCache, nativeAudioClearQueue, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
+import { acknowledgeQuit, isDesktopRuntime, nativeAudioClearCache, nativeAudioClearQueue, nativeAudioLoad, nativeAudioPause, nativeAudioPlay, nativeAudioQueueNextSource, nativeAudioSeek, nativeAudioSetArtwork, nativeAudioSetOutputDevice, nativeAudioSetVolume, nativeAudioStatus, nativeAudioStop, nativeQueueNext, nativeQueuePeekNext, nativeQueuePrevious, nativeQueueSet } from "./api";
 import { plexMusicGateway } from "./musicGateway";
 import { readOutputDevicePreference, writeOutputDevicePreference } from "./outputDevicePreference";
 import { playbackLog } from "./playbackLog";
+import { getResolvedArtwork, requestCachedArtwork } from "./artworkCache";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
 
 export type RepeatMode = "off" | "all" | "one";
@@ -718,7 +719,13 @@ const storedOutputSinkId = (): string => readOutputDevicePreference();
 function playbackArtworkTicket(serverId: string, track: PlexItem): Promise<string | undefined> {
   if (track.imageUrl) return Promise.resolve(track.imageUrl);
   if (!track.thumb) return Promise.resolve(undefined);
-  return artworkUrl(serverId, track.thumb, 512, 512).catch(() => undefined);
+  return requestCachedArtwork(serverId, track.thumb, 512, 512).catch(() => undefined);
+}
+
+function withResolvedArtwork(serverId: string | undefined, track: PlexItem): PlexItem {
+  if (!serverId || track.imageUrl || !track.thumb) return track;
+  const imageUrl = getResolvedArtwork(serverId, track.thumb);
+  return imageUrl ? { ...track, imageUrl } : track;
 }
 
 export type FallbackStreamQuality = Exclude<StreamQuality, "auto" | "original">;
@@ -1196,7 +1203,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       || Boolean(track.playlistItemID && item.playlistItemID === track.playlistItemID)
     ));
     const queueSource = contextIndex >= 0 ? playable : [track, ...playable];
-    const tracks = createQueueInstances(queueSource);
+    const tracks = createQueueInstances(
+      queueSource.map((item) => withResolvedArtwork(serverIdRef.current, item)),
+    );
     const index = Math.max(0, contextIndex);
     queueRef.current = tracks;
     queueServerIdRef.current = serverIdRef.current;
@@ -1212,7 +1221,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, [loadAt, schedulePersistedSession]);
 
   const playTracks = useCallback((incoming: readonly PlexItem[]): boolean => {
-    const tracks = createQueueInstances(normalizeQueueBatch(incoming));
+    const tracks = createQueueInstances(
+      normalizeQueueBatch(incoming).map((item) => withResolvedArtwork(serverIdRef.current, item)),
+    );
     if (!tracks.length) return false;
     queueRef.current = tracks;
     queueServerIdRef.current = serverIdRef.current;
@@ -1625,7 +1636,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     }
 
     const restoredQueue = ensureQueueInstanceIds(
-      persisted.queue.map((item) => ({ ...item })) as PlexItem[],
+      persisted.queue.map((item) => withResolvedArtwork(serverId, { ...item } as PlexItem)),
     );
     const restoredIndex = persisted.currentIndex >= 0 && persisted.currentIndex < restoredQueue.length
       ? persisted.currentIndex
@@ -1957,7 +1968,10 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   }, []);
 
   useEffect(() => {
-    if (!isDesktopRuntime() || !prebufferNext) return;
+    // Restoring a paused queue must not create the native audio engine. The
+    // first CoreAudio device open is reserved for an explicit/user-confirmed
+    // play; prebuffering starts only after Rust has reported real playback.
+    if (!isDesktopRuntime() || !prebufferNext || !playing) return;
     const tracks = queueRef.current;
     if (!tracks.length || currentIndex < 0) return;
     if (!serverId) return;
@@ -2047,7 +2061,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         nextSourceRequestRef.current += 1;
       }
     };
-  }, [currentIndex, gaplessHandoffGeneration, outputSinkId, prebufferNext, quality, queue, repeat, requestStreamUrl, serverId, shuffle]);
+  }, [currentIndex, gaplessHandoffGeneration, outputSinkId, playing, prebufferNext, quality, queue, repeat, requestStreamUrl, serverId, shuffle]);
 
   useEffect(() => {
     if (queueRef.current.length && queueServerIdRef.current === serverId) schedulePersistedSession(false);
