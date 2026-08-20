@@ -400,7 +400,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .recommendation-section .section-heading h2 { margin: 0; color: var(--text); font-size: 17px; line-height: 22px; letter-spacing: -0.018em; }
 .recommendation-row { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 .recommendation-card { align-content: start; border-radius: 8px; }
-.recommendation-card:disabled { cursor: wait; opacity: 1; }
+.recommendation-card:disabled { cursor: default; opacity: 1; }
 .recommendation-artwork { position: relative; width: 100%; display: grid; overflow: hidden; border-radius: 8px; }
 .recommendation-artwork.is-round { border-radius: 50%; }
 .recommendation-artwork .artwork-large { grid-area: 1 / 1; margin-bottom: 0; }
@@ -567,7 +567,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .track-reorder-handle:active, .track-table.is-reordering .track-reorder-handle { cursor: grabbing; }
 .track-table.is-reordering .track-reorder-handle { color: var(--accent); }
 .track-reorder-handle:hover:not(:disabled), .track-reorder-handle:focus-visible, .track-action-button:hover, .track-action-button:focus-visible, .track-action-button[aria-expanded="true"] { background: var(--hover-fill); color: var(--text); }
-.track-reorder-handle:disabled { cursor: wait; opacity: 0.55; }
+.track-reorder-handle:disabled { cursor: default; opacity: 0.55; }
 .track-action-button { color: var(--muted); }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .duration-cell { width: 100%; min-width: 0; display: grid; place-items: center; padding: 0; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
@@ -584,7 +584,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .popconfirm-cancel:hover:not(:disabled), .popconfirm-cancel:focus-visible { background: color-mix(in srgb, var(--muted) 14%, transparent); color: var(--text); }
 .popconfirm-ok { background: color-mix(in srgb, var(--danger) 88%, transparent); color: #fff; }
 .popconfirm-ok:hover:not(:disabled), .popconfirm-ok:focus-visible { background: var(--danger); box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 26%, transparent); }
-.popconfirm-actions button:disabled { cursor: wait; opacity: 0.62; }
+.popconfirm-actions button:disabled { cursor: default; opacity: 0.62; }
 .track-selection-actions { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .track-selection-summary { display: inline-flex; align-items: center; min-height: 28px; border-radius: 14px; padding: 0 10px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; }
 .track-selection-action { min-height: 32px; margin-top: 0; padding-inline: 11px; font-size: 12px; }
@@ -663,7 +663,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .play-button:active:not(:disabled) { filter: brightness(0.97); box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 24%, transparent); }
 .play-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; box-shadow: 0 0 0 4px var(--accent-soft), 0 7px 20px color-mix(in srgb, var(--accent) 32%, transparent); }
 .play-button:disabled { opacity: 0.36; cursor: not-allowed; filter: saturate(0.55); box-shadow: none; }
-.play-button.is-loading { cursor: progress; filter: none; box-shadow: 0 0 0 4px var(--accent-soft), 0 6px 18px color-mix(in srgb, var(--accent) 30%, transparent); }
+.play-button.is-loading { cursor: default; filter: none; box-shadow: 0 0 0 4px var(--accent-soft), 0 6px 18px color-mix(in srgb, var(--accent) 30%, transparent); }
 .play-button.is-loading:disabled { opacity: 1; filter: none; box-shadow: 0 0 0 4px var(--accent-soft), 0 6px 18px color-mix(in srgb, var(--accent) 30%, transparent); }
 .play-button.is-loading:hover:not(:disabled), .play-button.is-loading:active:not(:disabled) { filter: none; box-shadow: 0 0 0 4px var(--accent-soft), 0 6px 18px color-mix(in srgb, var(--accent) 30%, transparent); }
 .play-button > svg { display: block; flex: 0 0 auto; }
@@ -754,10 +754,10 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .playlist-picker-list { min-height: 180px; overflow-y: auto; display: flex; flex-direction: column; align-items: stretch; gap: 7px; padding: 12px; }
 .playlist-picker-option { width: 100%; min-width: 0; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 11px; border: 1px solid transparent; border-radius: 10px; padding: 9px 10px; background: var(--surface-soft); color: var(--muted-strong); text-align: left; transition: border-color 160ms ease, background 160ms ease; }
 .playlist-picker-option:hover:not(:disabled), .playlist-picker-option:focus-visible { border-color: var(--border-strong); background: var(--panel-strong); }
-.playlist-picker-option:disabled { cursor: wait; opacity: 0.72; }
+.playlist-picker-option:disabled { cursor: default; opacity: 0.72; }
 .playlist-picker-create-option { width: 100%; min-width: 0; display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 11px; border: 1px dashed color-mix(in srgb, var(--accent) 44%, var(--border)); border-radius: 10px; padding: 9px 10px; background: color-mix(in srgb, var(--accent) 6%, var(--surface-soft)); color: var(--muted-strong); text-align: left; }
 .playlist-picker-create-option:hover:not(:disabled), .playlist-picker-create-option:focus-visible { border-style: solid; border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
-.playlist-picker-create-option:disabled { cursor: wait; opacity: 0.72; }
+.playlist-picker-create-option:disabled { cursor: default; opacity: 0.72; }
 .playlist-picker-option-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 9px; color: var(--accent); background: var(--accent-soft); }
 .playlist-picker-option > span:nth-child(2), .playlist-picker-create-option > span:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
 .playlist-picker-option strong, .playlist-picker-option small, .playlist-picker-create-option strong, .playlist-picker-create-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -859,7 +859,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .toggle-row strong { color: var(--text); font-size: 13px; }
 .toggle-switch { width: 42px; height: 24px; position: relative; display: inline-flex; align-items: center; justify-content: flex-end; cursor: pointer; }
 .toggle-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.toggle-switch:has(input:disabled) { cursor: wait; }
+.toggle-switch:has(input:disabled) { cursor: default; }
 .toggle-switch input:disabled + .toggle-control { opacity: 0.7; }
 .toggle-control { position: relative; width: 42px; height: 24px; display: block; box-sizing: border-box; border: 1px solid var(--toggle-off-border); border-radius: 99px; background: var(--toggle-off-track); box-shadow: inset 0 1px 1px color-mix(in srgb, var(--text) 16%, transparent), 0 0 0 1px color-mix(in srgb, var(--bg) 26%, transparent); transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease; }
 .toggle-control::after { content: ""; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--toggle-off-thumb); box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 35%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--bg) 22%, transparent); transition: transform 160ms ease, background 160ms ease, box-shadow 160ms ease; }
@@ -920,7 +920,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .login-actions { display: grid; gap: 8px; margin-top: 22px; }
 .login-button { width: 100%; height: 45px; margin-top: 0; }
 .login-cancel-button { width: 100%; min-height: 37px; }
-.login-button:disabled { cursor: wait; }
+.login-button:disabled { cursor: default; }
 .form-error { margin: 10px 0 0; text-align: center; font-size: 12px; color: var(--danger); }
 .login-trust { display: flex; align-items: flex-start; justify-content: center; gap: 7px; margin: 18px auto 0; max-width: 430px; color: var(--muted-faint); font-size: 12px; line-height: 1.5; text-align: center; }
 .login-trust svg { flex: 0 0 auto; margin-top: 1px; }

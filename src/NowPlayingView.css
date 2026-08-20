@@ -1004,7 +1004,7 @@
 
 .now-playing-play-button.is-loading,
 .now-playing-play-button.is-loading:disabled {
-  cursor: progress;
+  cursor: default;
   opacity: 1;
   filter: none;
   box-shadow: 0 0 0 4px var(--now-playing-accent-soft), 0 8px 24px color-mix(in srgb, var(--now-playing-accent) 30%, transparent);

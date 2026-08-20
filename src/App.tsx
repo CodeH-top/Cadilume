@@ -58,7 +58,7 @@ import {
 import * as Select from "@radix-ui/react-select";
 import { KeepAlive, type KeepAliveRef, useKeepAliveContext, useKeepAliveRef } from "keepalive-for-react";
 import { createHashRouter, Navigate, RouterProvider, useLocation, useNavigate, useOutlet } from "react-router-dom";
-import { createContext, FormEvent, memo, ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { createContext, FormEvent, memo, ReactNode, startTransition, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createPortal, flushSync } from "react-dom";
 import { TooltipLayer } from "./TooltipLayer";
@@ -205,6 +205,13 @@ const BOOTSTRAP_ACCOUNT_PLACEHOLDER: PlexAccount = {
   restricted: false,
   subscriptionActive: false,
 };
+
+function hasUsableInitialLibrary(data: InitialLibraryData): boolean {
+  return data.servers.length > 0
+    && data.sections.length > 0
+    && Boolean(data.serverId)
+    && Boolean(data.sectionKey);
+}
 
 interface MusicShellRuntime {
   initialSession: BootstrapResponse;
@@ -409,20 +416,31 @@ function MainApplication({
         500,
         "读取本地资料缓存超时。",
       ).catch(() => undefined);
-      if (cachedLibrary) {
+      if (cachedLibrary && hasUsableInitialLibrary(cachedLibrary)) {
         setStartupStage("正在使用本地资料快照，后台更新资料库");
-        setInitialLibrary(cachedLibrary);
+        startTransition(() => setInitialLibrary(cachedLibrary));
         void networkLibrary.then((nextLibrary) => {
+          if (!hasUsableInitialLibrary(nextLibrary)) {
+            console.warn("[资料库] 后台刷新没有返回可用资料库，继续使用本地快照");
+            return;
+          }
           void writeInitialLibraryCache(nextLibrary);
-          setInitialLibrary(nextLibrary);
+          startTransition(() => setInitialLibrary(nextLibrary));
           setStartupStage("资料库已更新");
         }).catch((reason) => {
           console.warn("[资料库] 后台刷新失败，继续使用本地快照", reason);
         });
       } else {
+        if (cachedLibrary) {
+          console.warn("[资料库] 忽略无服务器的空缓存快照");
+          void clearInitialLibraryCache();
+        }
         const nextLibrary = await networkLibrary;
+        if (!hasUsableInitialLibrary(nextLibrary)) {
+          throw new Error("当前账号没有可访问的 Plex 音乐资料库。");
+        }
         setStartupStage("正在准备首页与上次播放记录");
-        setInitialLibrary(nextLibrary);
+        startTransition(() => setInitialLibrary(nextLibrary));
         void writeInitialLibraryCache(nextLibrary);
       }
       void refreshAccount()
@@ -874,14 +892,16 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
     setLoading(true);
     try {
       const result = await discoverServers();
-      setServers(result);
-      setConnectionAvailable(result.length > 0);
-      setServerId((current) => {
-        if (result.some((server) => server.id === current)) return current;
-        if (result.some((server) => server.id === preferredPlaybackServerId)) return preferredPlaybackServerId;
-        return result[0]?.id;
+      startTransition(() => {
+        setServers(result);
+        setConnectionAvailable(result.length > 0);
+        setServerId((current) => {
+          if (result.some((server) => server.id === current)) return current;
+          if (result.some((server) => server.id === preferredPlaybackServerId)) return preferredPlaybackServerId;
+          return result[0]?.id;
+        });
+        if (refreshDependents) setSourceRevision((revision) => revision + 1);
       });
-      if (refreshDependents) setSourceRevision((revision) => revision + 1);
       if (!result.length) notify("当前账号没有发现可访问的 Plex Media Server。请先让服务器所有者共享音乐库。", "warning");
       return result;
     } catch (reason) {
@@ -932,14 +952,16 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
     try {
       const result = await getPlaylists(serverId);
       if (playlistListRequestRef.current === requestId) {
-        setPlaylists(orderPlaylistsByRecency(result));
+        startTransition(() => setPlaylists(orderPlaylistsByRecency(result)));
         if (announce) notify(result.length ? `歌单已刷新，共 ${result.length} 个。` : "歌单已刷新，当前没有可显示的音乐歌单。", "success");
       }
     } catch (reason) {
       if (playlistListRequestRef.current === requestId) {
         const message = playlistReadErrorMessage(reason);
-        setPlaylists([]);
-        setPlaylistListError(message);
+        startTransition(() => {
+          setPlaylists([]);
+          setPlaylistListError(message);
+        });
         if (announce) notify(message, "error");
       }
     } finally {
@@ -1012,15 +1034,17 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
         ? await getLibraryItems(refreshedServer.id, refreshedSection.key, 8).catch(() => [])
         : [];
 
-      setConnectionAvailable(true);
-      setServers(refreshedServers);
-      setServerId(refreshedServer.id);
-      setSections(refreshedSections);
-      setSectionKey(refreshedSection?.key);
-      setPlaylists(orderPlaylistsByRecency(refreshedPlaylists));
-      artistDirectoryRequestRef.current += 1;
-      setLibraryArtists(refreshedArtists);
-      setSourceRevision((revision) => revision + 1);
+      startTransition(() => {
+        setConnectionAvailable(true);
+        setServers(refreshedServers);
+        setServerId(refreshedServer.id);
+        setSections(refreshedSections);
+        setSectionKey(refreshedSection?.key);
+        setPlaylists(orderPlaylistsByRecency(refreshedPlaylists));
+        artistDirectoryRequestRef.current += 1;
+        setLibraryArtists(refreshedArtists);
+        setSourceRevision((revision) => revision + 1);
+      });
     } catch (reason) {
       setConnectionAvailable(false);
       notify(reason instanceof Error ? reason.message : String(reason), "error");

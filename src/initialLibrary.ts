@@ -42,7 +42,6 @@ export interface InitialLibrarySource {
 
 export const INITIAL_LIBRARY_ARTIST_LIMIT = 120;
 const REQUIRED_STARTUP_REQUEST_TIMEOUT_MS = 15_000;
-const OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS = 8_000;
 
 export function isInitialLibrarySnapshotScopeActive(
   invalidated: boolean,
@@ -142,31 +141,22 @@ export async function loadInitialLibraryData(
 
   for (const selectedServer of orderedServers) {
     try {
-      const [sectionsResult, playlistsResult] = await Promise.allSettled([
-        withStartupTimeout(
-          () => source.getSections(selectedServer.id),
-          REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
-          `读取 ${selectedServer.name} 的音乐资料库超时。`,
-        ),
-        withStartupTimeout(
-          () => source.getPlaylists(selectedServer.id),
-          OPTIONAL_STARTUP_REQUEST_TIMEOUT_MS,
-          `读取 ${selectedServer.name} 的歌单超时。`,
-        ),
-      ]);
-      if (sectionsResult.status === "rejected") throw sectionsResult.reason;
-      const sections = sectionsResult.value;
-      const playlists = playlistsResult.status === "fulfilled"
-        ? orderPlaylistsByRecency(playlistsResult.value)
-        : [];
+      // The playlist sidebar is not part of the first usable home frame. Do
+      // not await it here: a slow or unreachable `/playlists` endpoint must
+      // never keep the window on Splash. MusicShell refreshes it after mount.
+      const sections = await withStartupTimeout(
+        () => source.getSections(selectedServer.id),
+        REQUIRED_STARTUP_REQUEST_TIMEOUT_MS,
+        `读取 ${selectedServer.name} 的音乐资料库超时。`,
+      );
       const selectedSection = sections[0];
       if (!selectedSection) {
         return {
           servers,
           serverId: selectedServer.id,
           sections,
-          playlists,
-          ...(playlistsResult.status === "rejected" ? { playlistsComplete: false } : {}),
+          playlists: [],
+          playlistsComplete: false,
           libraryArtists: [],
           home: { recentAlbums: [], hubs: [] },
         };
@@ -203,8 +193,8 @@ export async function loadInitialLibraryData(
         serverId: selectedServer.id,
         sections,
         sectionKey: selectedSection.key,
-        playlists,
-        ...(playlistsResult.status === "rejected" ? { playlistsComplete: false } : {}),
+        playlists: [],
+        playlistsComplete: false,
         libraryArtists: [],
         libraryArtistsComplete: false,
         home: {

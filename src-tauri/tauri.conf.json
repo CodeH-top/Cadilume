@@ -16,7 +16,7 @@
         "title": "Cadilume",
         "width": 1280,
         "height": 820,
-        "visible": false,
+        "visible": true,
         "minWidth": 1280,
         "minHeight": 820,
         "center": true,

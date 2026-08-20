@@ -397,7 +397,10 @@ export async function getRecentAlbums(serverId: string, sectionKey: string): Pro
     type: "9",
     sort: "addedAt:desc",
     "X-Plex-Container-Start": "0",
-    "X-Plex-Container-Size": "36",
+    // The startup home only displays a compact recent band. Keep the IPC
+    // payload bounded so WebKit does not parse a full library page before the
+    // first usable window.
+    "X-Plex-Container-Size": "18",
   });
   return metadata(response);
 }
@@ -645,7 +648,9 @@ function demoLibraryArtists(): PlexItem[] {
 
 export async function getRecommendationHubs(serverId: string, sectionKey: string): Promise<PlexHub[]> {
   if (!isDesktopRuntime()) return demoRecommendationHubs.map((hub) => ({ ...hub, items: [...hub.items] }));
-  const response = await serverGet(serverId, `/hubs/sections/${sectionKey}`, { count: "18" });
+  // Only recent bands are rendered on the home screen. Request a bounded hub
+  // set to keep Tauri IPC and WebKit JSON parsing responsive during startup.
+  const response = await serverGet(serverId, `/hubs/sections/${sectionKey}`, { count: "12" });
   const root = container(response);
   const hubs = Array.isArray(root.Hub) ? root.Hub.filter(isRecord) : [];
   return hubs.map((hub): PlexHub => {

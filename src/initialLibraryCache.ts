@@ -82,7 +82,7 @@ export async function readInitialLibraryCache(): Promise<InitialLibraryData | un
 }
 
 export async function writeInitialLibraryCache(data: InitialLibraryData): Promise<void> {
-  if (!isInitialLibraryData(data)) return;
+  if (!isInitialLibraryData(data) || !data.servers.length || !data.sections.length || !data.serverId || !data.sectionKey) return;
   try {
     await runStoreRequest<IDBValidKey>("readwrite", (store) => store.put({
       version: 1,

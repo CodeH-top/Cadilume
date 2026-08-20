@@ -362,7 +362,7 @@ describe("Plex library sorting", () => {
     expect(invokeMock).toHaveBeenCalledWith("server_get", {
       serverId: "server-a",
       path: "/hubs/sections/15",
-      query: { count: "18" },
+      query: { count: "12" },
     });
   });
 });

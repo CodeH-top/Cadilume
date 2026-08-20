@@ -83,13 +83,10 @@ pub fn run() {
                     );
                 })
                 .map_err(|error| format!("无法启动后台初始化线程：{error}"))?;
-            // macOS development keeps the window hidden so a hot reload does
-            // not steal focus; Dock Reopen and the status icon reveal it.
-            // Windows has no Dock-Reopen equivalent, so the debug window must
-            // remain visible in the taskbar for an unambiguous restore path.
-            #[cfg(all(debug_assertions, target_os = "macos"))]
-            let _ = &app;
-            #[cfg(not(all(debug_assertions, target_os = "macos")))]
+            // Always reveal the main window after setup. Hiding the macOS
+            // debug window made a cold `tauri dev` launch look like an
+            // unresponsive process: the process was alive, but there was no
+            // window for the user to wake or interact with.
             window::reveal_main_window(&app.handle())?;
             Ok(())
         })
