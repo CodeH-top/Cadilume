@@ -282,7 +282,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
 .avatar.fallback { display: grid; place-items: center; background: var(--panel-strong); color: var(--text); font-weight: 750; }
 .workspace { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
-.searchbox { width: min(430px, 52vw); display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 9px; align-items: center; border: 1px solid var(--border); border-radius: 9px; padding: 0 10px; height: 36px; background: var(--surface-soft); color: var(--muted); transition: border-color 160ms ease, background 160ms ease; }
+.searchbox { width: min(430px, 52vw); display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 9px; align-items: center; border: 1px solid var(--border); border-radius: 9px; padding: 0 10px; height: 36px; background: var(--surface-soft); color: var(--muted); }
 .searchbox:focus-within { border-color: color-mix(in srgb, var(--accent) 50%, transparent); background: var(--panel); }
 .searchbox input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 14px; }
 .searchbox input::placeholder { color: var(--muted-faint); }
