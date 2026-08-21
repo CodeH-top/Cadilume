@@ -35,6 +35,7 @@ const DECODE_BUFFER_SECONDS: usize = 4;
 /// rapid pause/resume oscillation on an unstable connection.
 const DECODE_RESUME_BUFFER_MS: usize = 250;
 const DECODE_INITIAL_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
+const AUDIO_OUTPUT_PROBE_ARG: &str = "--cadilume-audio-output-probe";
 #[cfg(target_os = "macos")]
 const MACOS_OUTPUT_OPEN_TIMEOUT: Duration = Duration::from_millis(750);
 #[cfg(target_os = "macos")]
@@ -95,6 +96,40 @@ fn http_error_category(error: &reqwest::Error) -> &'static str {
         "request"
     } else {
         "unknown"
+    }
+}
+
+pub(crate) fn audio_output_probe_exit_code() -> Option<i32> {
+    let mut arguments = std::env::args();
+    let _executable = arguments.next();
+    if arguments.next().as_deref() != Some(AUDIO_OUTPUT_PROBE_ARG) {
+        return None;
+    }
+    let Some(device_id) = arguments.next() else {
+        return Some(2);
+    };
+    #[cfg(target_os = "macos")]
+    {
+        use cpal::traits::HostTrait;
+        let host = cpal::default_host();
+        let Some(device) = device_id
+            .parse::<cpal::DeviceId>()
+            .ok()
+            .and_then(|id| host.device_by_id(&id))
+        else {
+            return Some(2);
+        };
+        return Some(
+            open_device_sink_once(device, |_error| {})
+                .map(|mut sink| sink.log_on_drop(false))
+                .map(|_| 0)
+                .unwrap_or(1),
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = device_id;
+        Some(2)
     }
 }
 
@@ -1207,6 +1242,8 @@ pub struct NowPlayingMetadata {
     pub duration_ms: Option<u64>,
     #[serde(default)]
     pub artwork_url: Option<String>,
+    #[serde(default)]
+    pub playback_request_id: Option<u64>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1916,6 +1953,41 @@ where
 }
 
 #[cfg(target_os = "macos")]
+fn macos_probe_output_device(device_id: &str) -> Result<bool, String> {
+    use std::process::{Command, Stdio};
+
+    let executable =
+        std::env::current_exe().map_err(|error| format!("无法定位音频设备探测程序: {error}"))?;
+    let mut child = Command::new(executable)
+        .arg(AUDIO_OUTPUT_PROBE_ARG)
+        .arg(device_id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("无法启动隔离音频设备探测: {error}"))?;
+    let deadline = std::time::Instant::now() + MACOS_OUTPUT_OPEN_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status.success()),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(false);
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("读取隔离音频设备探测结果失败: {error}"));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn macos_default_system_output_uid() -> Option<String> {
     use objc2_core_audio::{
         kAudioDevicePropertyDeviceUID, kAudioHardwarePropertyDefaultSystemOutputDevice,
@@ -1967,13 +2039,12 @@ fn macos_default_system_output_uid() -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_should_skip_display_default() -> bool {
+fn macos_display_default_requires_probe() -> bool {
     use objc2_core_audio::{
         kAudioDevicePropertyTransportType, kAudioDeviceTransportTypeDisplayPort,
         kAudioDeviceTransportTypeHDMI, kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioHardwarePropertyDefaultSystemOutputDevice, kAudioObjectPropertyElementMain,
-        kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, AudioDeviceID,
-        AudioObjectGetPropertyData, AudioObjectPropertyAddress,
+        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+        AudioDeviceID, AudioObjectGetPropertyData, AudioObjectPropertyAddress,
     };
     use std::mem::size_of;
     use std::ptr::{null, NonNull};
@@ -2001,12 +2072,6 @@ fn macos_should_skip_display_default() -> bool {
     let Some(default_device) = read_device(kAudioHardwarePropertyDefaultOutputDevice) else {
         return false;
     };
-    let Some(system_device) = read_device(kAudioHardwarePropertyDefaultSystemOutputDevice) else {
-        return false;
-    };
-    if default_device == system_device {
-        return false;
-    }
 
     let address = AudioObjectPropertyAddress {
         mSelector: kAudioDevicePropertyTransportType,
@@ -2028,11 +2093,6 @@ fn macos_should_skip_display_default() -> bool {
     status == 0
         && (transport == kAudioDeviceTransportTypeDisplayPort
             || transport == kAudioDeviceTransportTypeHDMI)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_should_skip_display_default() -> bool {
-    false
 }
 
 #[cfg(target_os = "macos")]
@@ -2194,6 +2254,16 @@ where
             })
             .ok_or_else(|| anyhow::anyhow!("找不到所选输出设备"))?;
         let label = output_device_label(&device);
+        #[cfg(target_os = "macos")]
+        {
+            let probe_id = device
+                .id()
+                .map_err(|error| anyhow::anyhow!("读取所选输出设备标识失败: {error}"))?
+                .to_string();
+            if !macos_probe_output_device(&probe_id).map_err(|error| anyhow::anyhow!(error))? {
+                return Err(anyhow::anyhow!("所选输出设备未能通过隔离打开检查"));
+            }
+        }
         let sink = open_device_sink_bounded(device, error_callback, true)
             .map_err(|error| anyhow::anyhow!("打开所选输出设备失败: {error}"))?;
         crate::diagnostics::record("音频", format_args!("output_device=selected label={label}"));
@@ -2226,31 +2296,57 @@ where
         (system_id, devices)
     };
 
-    let skip_display_default = macos_should_skip_display_default();
     let mut first_error = None;
-    if skip_display_default {
+    #[cfg(target_os = "macos")]
+    let default_probe_passed = if macos_display_default_requires_probe() {
+        let passed = match default_id.as_deref() {
+            Some(device_id) => match macos_probe_output_device(device_id) {
+                Ok(passed) => passed,
+                Err(error) => {
+                    crate::diagnostics::record(
+                        "音频",
+                        format_args!("output_device_probe_failed error={error}"),
+                    );
+                    false
+                }
+            },
+            None => false,
+        };
         crate::diagnostics::record(
             "音频",
-            format_args!("output_device_default_skipped reason=display-route"),
+            format_args!(
+                "output_device_display_probe={}",
+                if passed { "passed" } else { "rejected" }
+            ),
         );
-    } else if let Some(device) = default_device {
-        let label = output_device_label(&device);
-        match open_device_sink_bounded(device, error_callback.clone(), false) {
-            Ok(sink) => {
-                crate::diagnostics::record(
-                    "音频",
-                    format_args!("output_device=default label={label}"),
-                );
-                return Ok(sink);
-            }
-            Err(error) => {
-                crate::diagnostics::record(
-                    "音频",
-                    format_args!("output_device_default_failed label={label} error={error}"),
-                );
-                first_error = Some(error.to_string());
+        passed
+    } else {
+        true
+    };
+    #[cfg(not(target_os = "macos"))]
+    let default_probe_passed = true;
+    if default_probe_passed {
+        if let Some(device) = default_device {
+            let label = output_device_label(&device);
+            match open_device_sink_bounded(device, error_callback.clone(), false) {
+                Ok(sink) => {
+                    crate::diagnostics::record(
+                        "音频",
+                        format_args!("output_device=default label={label}"),
+                    );
+                    return Ok(sink);
+                }
+                Err(error) => {
+                    crate::diagnostics::record(
+                        "音频",
+                        format_args!("output_device_default_failed label={label} error={error}"),
+                    );
+                    first_error = Some(error.to_string());
+                }
             }
         }
+    } else {
+        first_error = Some("默认显示器输出未能通过隔离打开检查".to_string());
     }
 
     #[cfg(target_os = "macos")]
@@ -3816,6 +3912,11 @@ impl NativeAudioEngine {
                 ) && !engine.playback_started.swap(true, Ordering::SeqCst)
                 {
                     let item = current_queue_identity(&engine.queue);
+                    let playback_request_id = engine
+                        .metadata
+                        .lock()
+                        .ok()
+                        .and_then(|metadata| metadata.as_ref()?.playback_request_id);
                     let _ = app_for_task.emit(
                         "native-audio://event",
                         serde_json::json!({
@@ -3823,6 +3924,7 @@ impl NativeAudioEngine {
                             "index": item.as_ref().map(|(index, _, _)| *index),
                             "ratingKey": item.as_ref().map(|(_, rating_key, _)| rating_key),
                             "occurrenceId": item.as_ref().map(|(_, _, occurrence_id)| occurrence_id),
+                            "playbackRequestId": playback_request_id,
                             "position": position,
                         }),
                     );
@@ -3995,15 +4097,7 @@ pub struct NativeOutputDevice {
     pub is_default: bool,
 }
 
-#[tauri::command]
-pub fn native_audio_output_devices() -> Result<Vec<NativeOutputDevice>, String> {
-    if cfg!(target_os = "macos") {
-        return Ok(vec![NativeOutputDevice {
-            device_id: String::new(),
-            label: "系统默认".to_string(),
-            is_default: true,
-        }]);
-    }
+fn collect_native_audio_output_devices() -> Result<Vec<NativeOutputDevice>, String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
     let mut devices = vec![NativeOutputDevice {
@@ -4028,15 +4122,18 @@ pub fn native_audio_output_devices() -> Result<Vec<NativeOutputDevice>, String> 
 }
 
 #[tauri::command]
+pub async fn native_audio_output_devices() -> Result<Vec<NativeOutputDevice>, String> {
+    tauri::async_runtime::spawn_blocking(collect_native_audio_output_devices)
+        .await
+        .map_err(|error| format!("枚举输出设备任务失败: {error}"))?
+}
+
+#[tauri::command]
 pub async fn native_audio_set_output_device(
     app: AppHandle,
     state: tauri::State<'_, NativeAudioEngineSlot>,
     device_id: String,
 ) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let _ = device_id;
-    #[cfg(target_os = "macos")]
-    let device_id = String::new();
     state.set_output_device(&app, device_id).await
 }
 
@@ -5235,13 +5332,14 @@ mod tests {
     }
 
     #[test]
-    fn now_playing_metadata_accepts_frontend_camel_case_artwork_url() {
+    fn now_playing_metadata_accepts_frontend_camel_case_fields() {
         let metadata: NowPlayingMetadata = serde_json::from_value(serde_json::json!({
             "title": "Track",
             "artist": "Artist",
             "album": "Album",
             "durationMs": 180000,
-            "artworkUrl": "http://127.0.0.1:1234/artwork/ticket"
+            "artworkUrl": "http://127.0.0.1:1234/artwork/ticket",
+            "playbackRequestId": 42
         }))
         .unwrap();
         assert_eq!(
@@ -5249,6 +5347,7 @@ mod tests {
             Some("http://127.0.0.1:1234/artwork/ticket")
         );
         assert_eq!(metadata.duration_ms, Some(180_000));
+        assert_eq!(metadata.playback_request_id, Some(42));
     }
 
     #[tokio::test]
@@ -6107,6 +6206,7 @@ mod tests {
                     album: Some("album b".into()),
                     duration_ms: Some(3_000),
                     artwork_url: None,
+                    playback_request_id: None,
                 }),
             )
             .await
@@ -6219,7 +6319,7 @@ mod tests {
             eprintln!("跳过：无默认输出设备");
             return;
         }
-        let devices = native_audio_output_devices().expect("枚举输出设备应成功");
+        let devices = collect_native_audio_output_devices().expect("枚举输出设备应成功");
         assert!(!devices.is_empty(), "至少应返回系统默认设备");
         assert_eq!(devices[0].device_id, "");
         assert_eq!(devices[0].label, "系统默认");
@@ -6521,6 +6621,7 @@ mod tests {
                     album: None,
                     duration_ms: Some(track_a.0),
                     artwork_url: None,
+                    playback_request_id: None,
                 }),
             )
             .await
@@ -6558,6 +6659,7 @@ mod tests {
                     album: None,
                     duration_ms: Some(track_b.0),
                     artwork_url: None,
+                    playback_request_id: None,
                 }),
             )
             .await
@@ -6666,6 +6768,7 @@ mod tests {
                             album: None,
                             duration_ms: Some(*duration_ms),
                             artwork_url: None,
+                            playback_request_id: None,
                         }),
                     )
                     .await

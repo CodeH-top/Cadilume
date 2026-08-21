@@ -136,7 +136,7 @@ fn write_cache(path: &Path, value: Value) -> Result<(), String> {
     Ok(())
 }
 
-fn clear_cache(path: &Path) -> Result<(), String> {
+pub(crate) fn clear_initial_library_cache_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
@@ -171,6 +171,7 @@ pub(crate) fn read_credential_blob(path: &Path) -> Result<Option<Vec<u8>>, Strin
     }
 }
 
+#[cfg(test)]
 pub(crate) fn write_credential_blob(path: &Path, payload: &[u8]) -> Result<(), String> {
     if payload.is_empty() || payload.len() > 16 * 1024 {
         return Err("Plex 鉴权缓存大小无效".to_string());
@@ -227,7 +228,7 @@ pub async fn write_initial_library_cache(
 #[tauri::command]
 pub async fn clear_initial_library_cache(state: State<'_, PlexState>) -> Result<(), String> {
     let path = state.catalog_cache_path();
-    tauri::async_runtime::spawn_blocking(move || clear_cache(&path))
+    tauri::async_runtime::spawn_blocking(move || clear_initial_library_cache_path(&path))
         .await
         .map_err(|error| format!("清理本地资料缓存任务失败: {error}"))?
 }
@@ -253,6 +254,24 @@ mod tests {
         );
         delete_credential_blob(&path).expect("credential blob should be deleted");
         assert_eq!(read_credential_blob(&path).unwrap(), None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn account_snapshot_can_be_revoked_without_deleting_the_credential_row() {
+        let (root, path) = test_database_path();
+        write_cache(&path, serde_json::json!({ "servers": [], "sections": [] }))
+            .expect("catalog snapshot should be stored");
+        write_credential_blob(&path, b"CADCRD01-encrypted-payload")
+            .expect("credential blob should be stored");
+
+        clear_initial_library_cache_path(&path).expect("catalog snapshot should be cleared");
+
+        assert_eq!(read_cache(&path).unwrap(), None);
+        assert_eq!(
+            read_credential_blob(&path).unwrap(),
+            Some(b"CADCRD01-encrypted-payload".to_vec())
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -25,6 +25,48 @@ export class NativeQueueCommandBarrier {
   }
 }
 
+export interface NativePlaybackConfirmation {
+  playbackRequestId: number;
+  index: number;
+  ratingKey: string;
+  queueInstanceId: string;
+  confirmed: boolean;
+}
+
+/**
+ * Bridges an independently delivered native event with its in-flight invoke.
+ * The event may arrive before the invoke Promise resolves, so confirmation is
+ * latched on the pre-registered request identity instead of React state order.
+ */
+export class NativePlaybackConfirmationGate {
+  private current?: NativePlaybackConfirmation;
+
+  begin(identity: Omit<NativePlaybackConfirmation, "confirmed">): NativePlaybackConfirmation {
+    const confirmation = { ...identity, confirmed: false };
+    this.current = confirmation;
+    return confirmation;
+  }
+
+  confirm(identity: Omit<NativePlaybackConfirmation, "confirmed">): boolean {
+    const current = this.current;
+    if (!current
+      || current.playbackRequestId !== identity.playbackRequestId
+      || current.index !== identity.index
+      || current.ratingKey !== identity.ratingKey
+      || current.queueInstanceId !== identity.queueInstanceId) return false;
+    current.confirmed = true;
+    return true;
+  }
+
+  isConfirmed(confirmation: NativePlaybackConfirmation): boolean {
+    return this.current === confirmation && confirmation.confirmed;
+  }
+
+  clear(confirmation?: NativePlaybackConfirmation): void {
+    if (!confirmation || this.current === confirmation) this.current = undefined;
+  }
+}
+
 const VOLUME_STORAGE_KEY = "cadilume-volume";
 const PREBUFFER_STORAGE_KEY = "cadilume-prebuffer-next";
 export const PLAYBACK_SESSION_STORAGE_KEY = "cadilume-playback-session";
@@ -717,9 +759,10 @@ const storedPrebufferNext = (): boolean => readStorage(PREBUFFER_STORAGE_KEY, "t
 const storedOutputSinkId = (): string => readOutputDevicePreference();
 
 function playbackArtworkTicket(serverId: string, track: PlexItem): Promise<string | undefined> {
-  if (track.imageUrl) return Promise.resolve(track.imageUrl);
-  if (!track.thumb) return Promise.resolve(undefined);
-  return requestCachedArtwork(serverId, track.thumb, 512, 512).catch(() => undefined);
+  if (track.thumb) {
+    return requestCachedArtwork(serverId, track.thumb, 512, 512).catch(() => undefined);
+  }
+  return Promise.resolve(track.imageUrl);
 }
 
 function withResolvedArtwork(serverId: string | undefined, track: PlexItem): PlexItem {
@@ -737,6 +780,7 @@ export interface PlaybackFailure {
 }
 
 interface NativePlaybackSource {
+  playbackRequestId: number;
   index: number;
   ratingKey: string;
   queueInstanceId: string;
@@ -844,6 +888,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const streamUrlInflightAtRef = useRef(new Map<string, number>());
   const loadRequestRef = useRef(0);
   const nextSourceRequestRef = useRef(0);
+  const nativePlaybackRequestIdRef = useRef(0);
   const activeNativeSourceRef = useRef<NativePlaybackSource | undefined>(undefined);
   const pendingNativeSourceRef = useRef<NativePlaybackSource | undefined>(undefined);
   const serverIdRef = useRef(serverId);
@@ -881,8 +926,12 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
   const repeatRef = useRef(repeat);
   const outputSinkIdRef = useRef(outputSinkId);
   const nativeQueueBarrierRef = useRef<NativeQueueCommandBarrier | null>(null);
+  const playbackConfirmationGateRef = useRef<NativePlaybackConfirmationGate | null>(null);
   if (nativeQueueBarrierRef.current === null) {
     nativeQueueBarrierRef.current = new NativeQueueCommandBarrier();
+  }
+  if (playbackConfirmationGateRef.current === null) {
+    playbackConfirmationGateRef.current = new NativePlaybackConfirmationGate();
   }
 
   serverIdRef.current = serverId;
@@ -1035,6 +1084,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const diagnostics: string[] = [...(recovery?.diagnostics ?? [])];
     let lastActiveQuality: StreamQuality = recovery?.initialQuality ?? quality;
     const artworkTicketPromise = playbackArtworkTicket(serverId, track);
+    const initialArtworkTicket = track.thumb
+      ? getResolvedArtwork(serverId, track.thumb, 512, 512)
+      : track.imageUrl;
     try {
       // Put stop + queue sync in the same frontend barrier. The prebuffer effect
       // cannot peek the old Rust queue while a track switch is being prepared.
@@ -1054,6 +1106,25 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         );
         if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
         playbackLog("info", `原生流地址已取得：index=${index} 质量=${activeQuality}`);
+        const playbackRequestId = ++nativePlaybackRequestIdRef.current;
+        const confirmation = playbackConfirmationGateRef.current!.begin({
+          playbackRequestId,
+          index,
+          ratingKey: track.ratingKey,
+          queueInstanceId: track.queueInstanceId || "",
+        });
+        const candidateSource: NativePlaybackSource = {
+          playbackRequestId,
+          index,
+          ratingKey: track.ratingKey,
+          queueInstanceId: track.queueInstanceId || "",
+          activeQuality,
+          source: url,
+          attemptedQualities: [...attemptedQualities],
+          diagnostics: [...diagnostics],
+          runtimeRetryUsed: recovery?.runtimeRetryUsed ?? false,
+        };
+        activeNativeSourceRef.current = candidateSource;
         try {
           await nativeAudioLoad(url, nativeAudioCacheIdentity(
             serverId,
@@ -1064,12 +1135,14 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             artist: trackArtist(track),
             album: trackAlbum(track),
             durationMs: track.duration,
-            artworkUrl: track.imageUrl,
+            artworkUrl: initialArtworkTicket,
+            playbackRequestId,
           }, autoplay);
           if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
           const successfulQualities = [...attemptedQualities];
           appendAttemptedQuality(successfulQualities, activeQuality, sourceStreamQuality(url));
           activeNativeSourceRef.current = {
+            playbackRequestId,
             index,
             ratingKey: track.ratingKey,
             queueInstanceId: track.queueInstanceId || "",
@@ -1080,21 +1153,24 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
             runtimeRetryUsed: recovery?.runtimeRetryUsed ?? false,
           };
           pendingNativeSourceRef.current = undefined;
-          if (!track.imageUrl) {
-            void artworkTicketPromise.then((artworkTicket) => {
-              if (!artworkTicket
-                || requestId !== loadRequestRef.current
-                || indexRef.current !== index) return;
-              return nativeAudioSetArtwork(
-                index,
-                track.ratingKey,
-                track.queueInstanceId || "",
-                artworkTicket,
-              ).catch(() => undefined);
-            });
-          }
+          void artworkTicketPromise.then((artworkTicket) => {
+            if (!artworkTicket
+              || artworkTicket === initialArtworkTicket
+              || requestId !== loadRequestRef.current
+              || indexRef.current !== index) return;
+            return nativeAudioSetArtwork(
+              index,
+              track.ratingKey,
+              track.queueInstanceId || "",
+              artworkTicket,
+            ).catch(() => undefined);
+          });
           break;
         } catch (reason) {
+          playbackConfirmationGateRef.current!.clear(confirmation);
+          if (activeNativeSourceRef.current === candidateSource) {
+            activeNativeSourceRef.current = undefined;
+          }
           if (requestId !== loadRequestRef.current || indexRef.current !== index) return;
           const diagnostic = reason instanceof Error ? reason.message : String(reason);
           diagnostics.push(`${activeQuality}: ${diagnostic}`);
@@ -1118,19 +1194,23 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           // 恢复位置失败不阻断播放。
         }
       }
-      if (!autoplay) await nativeAudioPause();
+      if (!autoplay) {
+        await nativeAudioPause();
+        playbackConfirmationGateRef.current!.clear();
+        setPlaying(false);
+        setBuffering(false);
+        setPlaybackLoading(false);
+      }
       // `nativeAudioLoad` only means the decoder accepted the source. The
       // playback UI must wait for Rust to confirm that the output callback
       // has consumed PCM from this specific queue item.
-      setPlaying(false);
-      setBuffering(false);
-      setPlaybackLoading(autoplay);
       playbackLog("info", autoplay
         ? `原生音源已就绪，等待实际 PCM 输出：index=${index}`
         : `原生音源已就绪并暂停：index=${index}`);
     } catch (reason) {
       if (requestId !== loadRequestRef.current) return;
       const diagnostic = reason instanceof Error ? reason.message : String(reason);
+      playbackConfirmationGateRef.current!.clear();
       activeNativeSourceRef.current = undefined;
       appendAttemptedQuality(attemptedQualities, lastActiveQuality);
       const attemptedLabel = playbackAttemptLabel(attemptedQualities);
@@ -1155,6 +1235,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const track = tracks[index];
     if (!track || !serverId) return;
     const requestId = ++loadRequestRef.current;
+    playbackConfirmationGateRef.current!.clear();
     activeNativeSourceRef.current = undefined;
     pendingNativeSourceRef.current = undefined;
     playbackLog("info", `加载请求：index=${index} 队列长度=${tracks.length} 自动播放=${autoplay} 质量=${quality} 强制新票据=${forceFreshTicket}`);
@@ -1319,6 +1400,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const stop = isDesktopRuntime()
       ? nativeAudioStop().catch(() => undefined)
       : Promise.resolve();
+    playbackConfirmationGateRef.current!.clear();
     resumeProgressRef.current = null;
     progressRef.current = 0;
     setProgress(0);
@@ -1335,6 +1417,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     resumeProgressRef.current = null;
     shuffleNavigationRef.current = createShuffleNavigationState(0, -1);
     scrobbledRef.current.clear();
+    playbackConfirmationGateRef.current!.clear();
     setQueue([]);
     setCurrentIndex(-1);
     setProgress(0);
@@ -1357,6 +1440,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     const pendingSource = pendingNativeSourceRef.current;
     loadRequestRef.current += 1;
     nextSourceRequestRef.current += 1;
+    playbackConfirmationGateRef.current!.clear();
     activeNativeSourceRef.current = undefined;
     pendingNativeSourceRef.current = undefined;
     const timer = persistedSessionTimerRef.current;
@@ -1383,6 +1467,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     // entry immediately after the user pressed Clear.
     loadRequestRef.current += 1;
     nextSourceRequestRef.current += 1;
+    playbackConfirmationGateRef.current!.clear();
     activeNativeSourceRef.current = undefined;
     pendingNativeSourceRef.current = undefined;
     const timer = persistedSessionTimerRef.current;
@@ -1477,27 +1562,37 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       return;
     }
     if (playing) {
+      playbackConfirmationGateRef.current!.clear();
       void nativeAudioPause().catch(() => undefined);
       setPlaying(false);
+      setPlaybackLoading(false);
     } else {
       void (async () => {
         try {
           const status = await nativeAudioStatus();
-          if (!status || status.item_count === 0) {
+          const active = activeNativeSourceRef.current;
+          if (!status || status.item_count === 0 || !active) {
             // 恢复会话/队列结束等引擎没有源的情况：先加载再播放。
             await loadAt(indexRef.current, true, resumeProgressRef.current ?? progressRef.current);
           } else {
-            await nativeAudioPlay();
-            // A resumed engine may have been rebuilt while paused after an
-            // output-device change. Wait for Rust's next PCM confirmation
-            // rather than claiming it is playing as soon as the command
-            // returns.
+            const confirmation = playbackConfirmationGateRef.current!.begin({
+              playbackRequestId: active.playbackRequestId,
+              index: active.index,
+              ratingKey: active.ratingKey,
+              queueInstanceId: active.queueInstanceId,
+            });
             setPlaying(false);
             setBuffering(false);
             setPlaybackLoading(true);
+            await nativeAudioPlay();
+            if (playbackConfirmationGateRef.current!.isConfirmed(confirmation)) {
+              playbackLog("info", "原生恢复命令返回前已收到实际 PCM 输出确认");
+            }
           }
         } catch {
+          playbackConfirmationGateRef.current!.clear();
           setPlaying(false);
+          setPlaybackLoading(false);
         }
       })();
     }
@@ -1598,6 +1693,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       flushPlaybackSession();
       loadRequestRef.current += 1;
       nextSourceRequestRef.current += 1;
+      playbackConfirmationGateRef.current!.clear();
       activeNativeSourceRef.current = undefined;
       pendingNativeSourceRef.current = undefined;
       if (isDesktopRuntime()) {
@@ -1719,21 +1815,27 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     let unlisten: (() => void) | undefined;
     void listen("native-audio://event", (event) => {
       const handlers = nativeEventHandlersRef.current;
-      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; ratingKey?: string; occurrenceId?: string; reason?: string; buffering?: boolean; deviceId?: string; playing?: boolean } | null;
+      const payload = event.payload as { type?: string; position?: number; duration?: number; command?: string; index?: number; ratingKey?: string; occurrenceId?: string; playbackRequestId?: number; reason?: string; buffering?: boolean; deviceId?: string; playing?: boolean } | null;
       if (!payload) return;
       if (payload.type === "playback-started") {
-        const active = activeNativeSourceRef.current;
         const eventIndex = payload.index;
         const currentTrack = Number.isInteger(eventIndex)
           ? queueRef.current[eventIndex as number]
           : undefined;
-        if (!active
-          || eventIndex !== active.index
-          || payload.ratingKey !== active.ratingKey
-          || payload.occurrenceId !== active.queueInstanceId
-          || currentTrack?.ratingKey !== active.ratingKey
-          || currentTrack.queueInstanceId !== active.queueInstanceId
-          || eventIndex !== indexRef.current) {
+        const identityIsValid = typeof payload.playbackRequestId === "number"
+          && Number.isSafeInteger(payload.playbackRequestId)
+          && typeof eventIndex === "number"
+          && typeof payload.ratingKey === "string"
+          && typeof payload.occurrenceId === "string"
+          && currentTrack?.ratingKey === payload.ratingKey
+          && currentTrack.queueInstanceId === payload.occurrenceId
+          && eventIndex === indexRef.current;
+        if (!identityIsValid || !playbackConfirmationGateRef.current!.confirm({
+          playbackRequestId: payload.playbackRequestId as number,
+          index: eventIndex as number,
+          ratingKey: payload.ratingKey as string,
+          queueInstanceId: payload.occurrenceId as string,
+        })) {
           playbackLog("warn", "已忽略过期的原生实际输出确认事件");
           return;
         }
@@ -1824,6 +1926,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           failedSource.source,
           attemptedQualities,
         )[0];
+        playbackConfirmationGateRef.current!.clear();
         activeNativeSourceRef.current = undefined;
         pendingNativeSourceRef.current = undefined;
         setPlaying(false);
@@ -1871,6 +1974,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       } else if (payload.type === "ended") {
         // Queue authority lives in Rust: it already decided the next item and
         // emits `queue-item` when one exists; here we only settle local state.
+        playbackConfirmationGateRef.current!.clear();
         activeNativeSourceRef.current = undefined;
         pendingNativeSourceRef.current = undefined;
         setPlaying(false);
@@ -1880,6 +1984,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
       } else if (payload.type === "playback-protected-stop") {
         // Rust 心跳看门狗判定前端卡死/崩溃后主动停播，前端同步状态。
         playbackLog("warn", `播放保护已停止：${String(payload.reason ?? "unknown")}`);
+        playbackConfirmationGateRef.current!.clear();
         activeNativeSourceRef.current = undefined;
         pendingNativeSourceRef.current = undefined;
         setPlaying(false);
@@ -1890,6 +1995,15 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         setBuffering(payload.buffering);
       } else if (payload.type === "output-device-recovering") {
         if (payload.playing) {
+          const active = activeNativeSourceRef.current;
+          if (active) {
+            playbackConfirmationGateRef.current!.begin({
+              playbackRequestId: active.playbackRequestId,
+              index: active.index,
+              ratingKey: active.ratingKey,
+              queueInstanceId: active.queueInstanceId,
+            });
+          }
           setPlaying(false);
           setPlaybackLoading(true);
         }
@@ -1903,6 +2017,15 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         setOutputSinkIdState(recoveredDeviceId);
         writeOutputDevicePreference(recoveredDeviceId);
         if (payload.playing) {
+          const active = activeNativeSourceRef.current;
+          if (active) {
+            playbackConfirmationGateRef.current!.begin({
+              playbackRequestId: active.playbackRequestId,
+              index: active.index,
+              ratingKey: active.ratingKey,
+              queueInstanceId: active.queueInstanceId,
+            });
+          }
           setPlaying(false);
           setPlaybackLoading(true);
         }
@@ -1927,6 +2050,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
           && pendingSource.queueInstanceId === handedOffTrack?.queueInstanceId
           ? pendingSource
           : undefined;
+        playbackConfirmationGateRef.current!.clear();
         pendingNativeSourceRef.current = undefined;
         indexRef.current = payload.index;
         setCurrentIndex(payload.index);
@@ -1989,6 +2113,9 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         // queues it after its bounded PCM buffer is ready; no complete-file
         // download is required before the gapless handoff can be prepared.
         const artworkTicketPromise = playbackArtworkTicket(serverId, nextTrack);
+        const initialArtworkTicket = nextTrack.thumb
+          ? getResolvedArtwork(serverId, nextTrack.thumb, 512, 512)
+          : nextTrack.imageUrl;
         const attemptedQualities: StreamQuality[] = [];
         const diagnostics: string[] = [];
         let activeQuality: StreamQuality | undefined = quality;
@@ -2007,17 +2134,20 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
               nextTrack,
               nativeAudioCacheQuality(activeQuality, url),
             );
+            const playbackRequestId = ++nativePlaybackRequestIdRef.current;
             await nativeAudioQueueNextSource(nextIndex, url, nextCacheIdentity, {
               title: nextTrack.title,
               artist: trackArtist(nextTrack),
               album: trackAlbum(nextTrack),
               durationMs: nextTrack.duration,
-              artworkUrl: nextTrack.imageUrl,
+              artworkUrl: initialArtworkTicket,
+              playbackRequestId,
             });
             if (nextSourceRequestRef.current !== requestId) return;
             const successfulQualities = [...attemptedQualities];
             appendAttemptedQuality(successfulQualities, activeQuality, sourceStreamQuality(url));
             pendingNativeSourceRef.current = {
+              playbackRequestId,
               index: nextIndex,
               ratingKey: nextTrack.ratingKey,
               queueInstanceId: nextTrack.queueInstanceId || "",
@@ -2027,17 +2157,17 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
               diagnostics: [...diagnostics],
               runtimeRetryUsed: false,
             };
-            if (!nextTrack.imageUrl) {
-              void artworkTicketPromise.then((artworkTicket) => {
-                if (!artworkTicket || nextSourceRequestRef.current !== requestId) return;
-                return nativeAudioSetArtwork(
-                  nextIndex,
-                  nextTrack.ratingKey,
-                  nextTrack.queueInstanceId || "",
-                  artworkTicket,
-                ).catch(() => undefined);
-              });
-            }
+            void artworkTicketPromise.then((artworkTicket) => {
+              if (!artworkTicket
+                || artworkTicket === initialArtworkTicket
+                || nextSourceRequestRef.current !== requestId) return;
+              return nativeAudioSetArtwork(
+                nextIndex,
+                nextTrack.ratingKey,
+                nextTrack.queueInstanceId || "",
+                artworkTicket,
+              ).catch(() => undefined);
+            });
             break;
           } catch (reason) {
             if (nextSourceRequestRef.current !== requestId) return;

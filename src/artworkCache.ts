@@ -1,22 +1,54 @@
 import { artworkUrl } from "./api";
 
-const exactArtworkRequests = new Map<string, Promise<string>>();
-const pathArtworkRequests = new Map<string, Promise<string>>();
-const resolvedArtworkPaths = new Map<string, string>();
-const MAX_ARTWORK_ENTRIES = 240;
-
-function pathKey(serverId: string, path: string): string {
-  return `${serverId}:${path}`;
+interface ArtworkRequestRecord {
+  width: number;
+  height: number;
+  promise: Promise<string>;
+  resolved?: string;
 }
 
-function exactKey(serverId: string, path: string, width: number, height: number): string {
-  return `${serverId}:${width}x${height}:${path}`;
+const artworkRequests = new Map<string, ArtworkRequestRecord>();
+const MAX_ARTWORK_ENTRIES = 240;
+const CANONICAL_SQUARE_SIZE = 420;
+const SHARED_SQUARE_MAX_SIZE = 512;
+
+function greatestCommonDivisor(left: number, right: number): number {
+  let a = Math.max(1, Math.round(Math.abs(left)));
+  let b = Math.max(1, Math.round(Math.abs(right)));
+  while (b !== 0) [a, b] = [b, a % b];
+  return a;
+}
+
+function normalizedDimensions(width: number, height: number): { width: number; height: number } {
+  if (width === height && width <= SHARED_SQUARE_MAX_SIZE) {
+    return { width: CANONICAL_SQUARE_SIZE, height: CANONICAL_SQUARE_SIZE };
+  }
+  return { width, height };
+}
+
+function artworkVariantKey(serverId: string, path: string, width: number, height: number): string {
+  const divisor = greatestCommonDivisor(width, height);
+  return `${serverId}:${Math.round(width) / divisor}x${Math.round(height) / divisor}:${path}`;
+}
+
+function touchRecord(key: string, record: ArtworkRequestRecord): void {
+  artworkRequests.delete(key);
+  artworkRequests.set(key, record);
+}
+
+function evictOldestRecords(): void {
+  while (artworkRequests.size > MAX_ARTWORK_ENTRIES) {
+    const oldest = artworkRequests.keys().next().value;
+    if (typeof oldest !== "string") break;
+    artworkRequests.delete(oldest);
+  }
 }
 
 /**
- * Request one short-lived loopback ticket per cached artwork path. Rust checks
- * the disk cache before contacting PMS, so callers can use this for both the
- * first visible card and the small player artwork without duplicate downloads.
+ * Share one bounded loopback ticket per artwork path/aspect ratio. Small square
+ * callers reuse the established 420px disk entry through 512px, while a truly
+ * larger request atomically upgrades the owner without letting the old Promise
+ * write back.
  */
 export function requestCachedArtwork(
   serverId: string,
@@ -24,52 +56,66 @@ export function requestCachedArtwork(
   width: number,
   height = width,
 ): Promise<string> {
-  const requestKey = exactKey(serverId, path, width, height);
-  const scopeKey = pathKey(serverId, path);
-  const existing = exactArtworkRequests.get(requestKey) || pathArtworkRequests.get(scopeKey);
-  if (existing) {
-    exactArtworkRequests.set(requestKey, existing);
-    return existing;
+  const dimensions = normalizedDimensions(width, height);
+  const key = artworkVariantKey(serverId, path, dimensions.width, dimensions.height);
+  const existing = artworkRequests.get(key);
+  if (existing
+    && existing.width >= dimensions.width
+    && existing.height >= dimensions.height) {
+    touchRecord(key, existing);
+    return existing.promise;
   }
 
-  const request = artworkUrl(serverId, path, width, height);
-  exactArtworkRequests.set(requestKey, request);
-  pathArtworkRequests.set(scopeKey, request);
-  request.then((url) => {
-    if (pathArtworkRequests.get(scopeKey) === request) resolvedArtworkPaths.set(scopeKey, url);
-  }).catch(() => undefined);
-  request.catch(() => {
-    if (exactArtworkRequests.get(requestKey) === request) exactArtworkRequests.delete(requestKey);
-    if (pathArtworkRequests.get(scopeKey) === request) {
-      pathArtworkRequests.delete(scopeKey);
-      resolvedArtworkPaths.delete(scopeKey);
-    }
+  const promise = artworkUrl(serverId, path, dimensions.width, dimensions.height);
+  const record: ArtworkRequestRecord = {
+    width: dimensions.width,
+    height: dimensions.height,
+    promise,
+  };
+  artworkRequests.set(key, record);
+  evictOldestRecords();
+  promise.then((url) => {
+    if (artworkRequests.get(key) === record) record.resolved = url;
+  }).catch(() => {
+    if (artworkRequests.get(key) === record) artworkRequests.delete(key);
   });
-  while (exactArtworkRequests.size > MAX_ARTWORK_ENTRIES) {
-    const oldest = exactArtworkRequests.keys().next().value;
-    if (typeof oldest !== "string") break;
-    exactArtworkRequests.delete(oldest);
+  return promise;
+}
+
+export function getResolvedArtwork(
+  serverId: string,
+  path: string,
+  width = SHARED_SQUARE_MAX_SIZE,
+  height = width,
+): string | undefined {
+  const dimensions = normalizedDimensions(width, height);
+  const key = artworkVariantKey(serverId, path, dimensions.width, dimensions.height);
+  const record = artworkRequests.get(key);
+  if (!record?.resolved
+    || record.width < dimensions.width
+    || record.height < dimensions.height) return undefined;
+  touchRecord(key, record);
+  return record.resolved;
+}
+
+export function invalidateCachedArtwork(
+  serverId: string,
+  path: string,
+  width?: number,
+  height = width,
+): void {
+  if (width !== undefined) {
+    const dimensions = normalizedDimensions(width, height ?? width);
+    artworkRequests.delete(artworkVariantKey(serverId, path, dimensions.width, dimensions.height));
+    return;
   }
-  return request;
-}
-
-export function getResolvedArtwork(serverId: string, path: string): string | undefined {
-  return resolvedArtworkPaths.get(pathKey(serverId, path));
-}
-
-export function invalidateCachedArtwork(serverId: string, path: string, width?: number, height = width): void {
-  pathArtworkRequests.delete(pathKey(serverId, path));
-  resolvedArtworkPaths.delete(pathKey(serverId, path));
-  if (width !== undefined) exactArtworkRequests.delete(exactKey(serverId, path, width, height ?? width));
   const prefix = `${serverId}:`;
   const suffix = `:${path}`;
-  for (const key of exactArtworkRequests.keys()) {
-    if (key.startsWith(prefix) && key.endsWith(suffix)) exactArtworkRequests.delete(key);
+  for (const key of artworkRequests.keys()) {
+    if (key.startsWith(prefix) && key.endsWith(suffix)) artworkRequests.delete(key);
   }
 }
 
 export function clearArtworkTicketCache(): void {
-  exactArtworkRequests.clear();
-  pathArtworkRequests.clear();
-  resolvedArtworkPaths.clear();
+  artworkRequests.clear();
 }

@@ -133,6 +133,22 @@ describe("initial library loading", () => {
     expect(getSections.mock.calls.map(([serverId]) => serverId)).toEqual(["server-offline", "server-online"]);
   });
 
+  it("continues past a server without a music section", async () => {
+    const getSections = vi.fn(async (serverId: string) => (
+      serverId === "server-empty" ? [] : [section("music-online")]
+    ));
+    const librarySource = source({
+      discoverServers: vi.fn(async () => [server("server-online"), server("server-empty")]),
+      getSections,
+    });
+
+    await expect(loadInitialLibraryData("server-empty", librarySource)).resolves.toMatchObject({
+      serverId: "server-online",
+      sectionKey: "music-online",
+    });
+    expect(getSections.mock.calls.map(([serverId]) => serverId)).toEqual(["server-empty", "server-online"]);
+  });
+
   it("keeps the initialization error when every discovered server fails", async () => {
     const librarySource = source({
       discoverServers: vi.fn(async () => [server("server-a"), server("server-b")]),

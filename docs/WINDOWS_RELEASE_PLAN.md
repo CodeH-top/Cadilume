@@ -7,7 +7,7 @@
 - 安装版已接入统一 `.github/workflows/build-desktop.yml`：Windows job 与 macOS job 独立并行构建，汇总 job 只在两端成功后生成跨平台 `latest.json` 并发布。
 - NSIS 已启用 `English` / `SimpChinese` 与语言选择器；NSIS `.exe` 本身就是 Tauri updater 载荷，并通过同名 `.exe.sig` 使用与 macOS 相同的 minisign 信任链。
 - 便携版目标仍为包含 `Cadilume.exe`、便携标记和说明文件的 ZIP，目前未接入发布。
-- GitHub Actions、`cargo-xwin` 与 PE 链接只能证明构建路径成立；WASAPI、SMTC、应用数据凭据文件 ACL、通知区域、WebView2、安装器和便携更新仍必须在真实 Windows 10 / 11 x64 会话验收。
+- GitHub Actions、`cargo-xwin` 与 PE 链接只能证明构建路径成立；WASAPI、SMTC、Credential Manager、通知区域、WebView2、安装器和便携更新仍必须在真实 Windows 10 / 11 x64 会话验收。
 - NSIS 工作流与更新元数据已实现，但完成 Authenticode 和真实 Windows 验收之前，不能把 CI 成功等同于面向普通用户的 Windows 发布就绪。
 
 ## 安装版
@@ -16,7 +16,7 @@
 2. 已完成：`windows-latest` 先执行完整门禁，再构建兼作 updater 载荷的 release NSIS `.exe` 及同名 `.exe.sig`。
 3. 已完成：发布汇总 job 生成同时覆盖 `darwin-aarch64`、`darwin-aarch64-app`、`windows-x86_64` 与 `windows-x86_64-nsis` 的唯一 `latest.json`。
 4. 待完成：配置 Windows Authenticode 证书与时间戳；updater minisign 只保护更新包来源，不能替代安装器下载信誉和系统开发者身份。
-5. 待完成：真机覆盖自定义标题栏 / DPI / Snap、中文和英文系统语言、语言选择器、全新安装、覆盖升级、卸载、播放中更新、安装完成后的恢复与加密凭据文件（`credentials.bin` / `credentials.key`）保留行为。
+5. 待完成：真机覆盖自定义标题栏 / DPI / Snap、中文和英文系统语言、语言选择器、全新安装、覆盖升级、卸载、播放中更新、安装完成后的恢复与 Credential Manager 登录态保留行为。
 
 ## 便携版
 

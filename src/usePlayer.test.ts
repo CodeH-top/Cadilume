@@ -3,6 +3,7 @@ import {
   PLAYBACK_SESSION_MAX_AGE_MS,
   PLAYBACK_SESSION_MAX_QUEUE,
   PLAYBACK_SESSION_STORAGE_KEY,
+  NativePlaybackConfirmationGate,
   NativeQueueCommandBarrier,
   clearPersistedPlaybackSession,
   commitShuffleNext,
@@ -128,6 +129,45 @@ describe("native queue command barrier", () => {
       throw new Error("stale queue");
     })).rejects.toThrow("stale queue");
     await expect(barrier.enqueue(async () => 3)).resolves.toBe(3);
+  });
+});
+
+describe("native playback confirmation gate", () => {
+  const first = {
+    playbackRequestId: 41,
+    index: 2,
+    ratingKey: "track-2",
+    queueInstanceId: "queue-instance-2",
+  };
+
+  it("latches a confirmation that arrives before the invoke resolves", () => {
+    const gate = new NativePlaybackConfirmationGate();
+    const pending = gate.begin(first);
+
+    expect(gate.confirm(first)).toBe(true);
+    expect(gate.isConfirmed(pending)).toBe(true);
+  });
+
+  it("rejects stale generations even when the queue item identity is reused", () => {
+    const gate = new NativePlaybackConfirmationGate();
+    const old = gate.begin(first);
+    const current = gate.begin({ ...first, playbackRequestId: 42 });
+
+    expect(gate.confirm(first)).toBe(false);
+    expect(gate.isConfirmed(old)).toBe(false);
+    expect(gate.confirm({ ...first, playbackRequestId: 42 })).toBe(true);
+    expect(gate.isConfirmed(current)).toBe(true);
+  });
+
+  it("does not let clearing an old handle erase the current request", () => {
+    const gate = new NativePlaybackConfirmationGate();
+    const old = gate.begin(first);
+    const currentIdentity = { ...first, playbackRequestId: 42 };
+    const current = gate.begin(currentIdentity);
+
+    gate.clear(old);
+    expect(gate.confirm(currentIdentity)).toBe(true);
+    expect(gate.isConfirmed(current)).toBe(true);
   });
 });
 

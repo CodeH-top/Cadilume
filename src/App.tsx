@@ -1206,6 +1206,8 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
         : [];
       const refreshedPlaylistSnapshot = orderPlaylistsByRecency(refreshedPlaylists);
       if (refreshedSection) {
+        const sameCachedHomeScope = initialLibrary.serverId === refreshedServer.id
+          && initialLibrary.sectionKey === refreshedSection.key;
         void writeInitialLibraryCache({
           ...initialLibrary,
           servers: refreshedServers,
@@ -1216,6 +1218,10 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
           playlistsComplete: true,
           libraryArtists: refreshedArtists,
           libraryArtistsComplete: true,
+          home: sameCachedHomeScope
+            ? initialLibrary.home
+            : { recentAlbums: [], hubs: [] },
+          homeComplete: sameCachedHomeScope && initialLibrary.homeComplete !== false,
         });
       }
 

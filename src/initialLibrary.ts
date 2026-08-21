@@ -139,6 +139,7 @@ export async function loadInitialLibraryData(
     ? [preferredServer, ...servers.filter((server) => server.id !== preferredServer.id)]
     : servers;
   let lastError: unknown;
+  let emptyServerSnapshot: InitialLibraryData | undefined;
 
   for (const selectedServer of orderedServers) {
     try {
@@ -149,7 +150,7 @@ export async function loadInitialLibraryData(
       );
       const selectedSection = sections[0];
       if (!selectedSection) {
-        return {
+        emptyServerSnapshot ??= {
           servers,
           serverId: selectedServer.id,
           sections,
@@ -158,6 +159,7 @@ export async function loadInitialLibraryData(
           libraryArtistsComplete: true,
           home: { recentAlbums: [], hubs: [] },
         };
+        continue;
       }
 
       // The server and section are required to identify the startup scope.
@@ -242,6 +244,7 @@ export async function loadInitialLibraryData(
     }
   }
 
+  if (!lastError && emptyServerSnapshot) return emptyServerSnapshot;
   throw lastError instanceof Error
     ? lastError
     : new Error(lastError ? String(lastError) : "无法加载 Plex 资料库。");

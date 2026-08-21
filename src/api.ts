@@ -850,6 +850,7 @@ export interface NativeNowPlayingMetadata {
   album?: string;
   durationMs?: number;
   artworkUrl?: string;
+  playbackRequestId?: number;
 }
 
 export async function nativeAudioWarmup(): Promise<void> {

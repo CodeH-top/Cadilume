@@ -15,6 +15,12 @@ use plex::PlexState;
 use stream_proxy::StreamProxy;
 use tauri::{Listener, Manager};
 
+/// The macOS parent process uses a short-lived copy of this executable to
+/// probe CoreAudio routes that can otherwise block an in-process HAL thread.
+pub fn audio_output_probe_exit_code() -> Option<i32> {
+    audio_engine::audio_output_probe_exit_code()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -46,9 +52,9 @@ pub fn run() {
             let config_dir = app.path().app_config_dir()?;
             let cache_dir = app.path().app_cache_dir()?;
             // Construct only the in-memory shell on the setup thread. Config,
-            // encrypted credentials, artwork-cache recovery, and the macOS
-            // computer name are loaded by the worker below so opening the
-            // window never waits on filesystem or subprocess I/O.
+            // credential restore/migration, artwork-cache recovery, and the
+            // macOS computer name are loaded by the worker below so opening
+            // the window never waits on filesystem or subprocess I/O.
             let plex_state = PlexState::new(config_dir, cache_dir)?;
             app.manage(plex_state);
             let native_cache = app.path().app_cache_dir()?.join("native-audio");
