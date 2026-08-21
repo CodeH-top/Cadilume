@@ -1,9 +1,9 @@
 //! Native persistent cache for the bounded startup catalog snapshot.
 //!
-//! The cache contains catalog metadata only. Credentials, server access
-//! tokens, stream tickets, and playback sources never enter this database.
-//! SQLite is opened lazily on a blocking worker so WebView startup does not
-//! inherit filesystem or database latency.
+//! The cache contains catalog metadata and one encrypted account credential
+//! blob. Server access tokens, stream tickets, and playback sources never
+//! enter this database. SQLite is opened lazily on a blocking worker so
+//! WebView startup does not inherit filesystem or database latency.
 
 use std::{
     fs,
@@ -171,7 +171,6 @@ pub(crate) fn read_credential_blob(path: &Path) -> Result<Option<Vec<u8>>, Strin
     }
 }
 
-#[cfg(test)]
 pub(crate) fn write_credential_blob(path: &Path, payload: &[u8]) -> Result<(), String> {
     if payload.is_empty() || payload.len() > 16 * 1024 {
         return Err("Plex 鉴权缓存大小无效".to_string());

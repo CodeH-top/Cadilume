@@ -12,9 +12,9 @@
   该实现闭源且带授权/动态库边界，Cadilume 不复制也不采用。
 - 前端只负责 UI、音量偏好和队列镜像；播放、下载、解码、队列自然推进、gapless、
   输出设备、Now Playing/SMTC 的权威均在 Rust。
-- 开发态仍只允许一条 `pnpm tauri dev` 链；凭证只读
-  `~/.cadilume-dev-token`；Release 应用登录态保存在 macOS Keychain / Windows Credential Manager，
-  过渡版本的应用数据凭据只用于一次性迁移后删除。
+- 开发态仍只允许一条 `pnpm tauri dev` 链；应用登录态统一以加密 blob 保存在应用数据目录
+  SQLite 的 `secure_credentials` 表。不读取 Keychain、Credential Manager 或旧凭据文件，也不做迁移；
+  SQLite 中没有凭据时重新授权。真实 PMS 回归测试可单独使用 `~/.cadilume-dev-token`。
 
 ## 2. 本轮已解决
 

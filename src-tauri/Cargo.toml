@@ -50,7 +50,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
-keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
 libc = "0.2"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSImage"] }
@@ -60,12 +59,9 @@ objc2-core-audio = { version = "0.3.2", features = ["AudioHardware", "AudioHardw
 objc2-media-player = { version = "0.3.2", features = ["block2", "objc2-app-kit", "objc2-core-foundation"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 windows = { version = "0.58", features = ["Media", "Media_Playback", "Foundation", "Foundation_Collections", "Storage_Streams", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_WinRT"] }
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["linux-native"] }
-
 # The 256-tap sinc path must stay comfortably ahead of realtime in local
 # playback builds. Unoptimized rubato spends almost a full core in its NEON
 # interpolation loop when converting common 44.1 kHz media to a 48 kHz device.

@@ -1,6 +1,6 @@
 # Windows 开发与调试
 
-Cadilume 的 Windows 首要目标是 `x86_64-pc-windows-msvc`。Windows 端与 macOS 共用 React/Plex 业务层，播放、缓存、解码、输出设备和系统媒体控制仍由 Rust 负责。当前仓库能在 macOS 上做静态检查和 `cargo-xwin` 交叉链接；WASAPI、SMTC、Credential Manager、通知区域和安装器必须在 Windows runner 或真实 Windows 机器上验收。
+Cadilume 的 Windows 首要目标是 `x86_64-pc-windows-msvc`。Windows 端与 macOS 共用 React/Plex 业务层，播放、缓存、解码、输出设备和系统媒体控制仍由 Rust 负责。当前仓库能在 macOS 上做静态检查和 `cargo-xwin` 交叉链接；WASAPI、SMTC、通知区域和安装器必须在 Windows runner 或真实 Windows 机器上验收。
 
 ## 1. 开发机要求
 
@@ -53,7 +53,7 @@ Windows debug 构建会显示主窗口，并在任务栏保留恢复入口；这
 %USERPROFILE%\.cadilume-dev-token
 ```
 
-Debug 应用与被忽略的真实 PMS 回归测试都只读取该开发凭据文件；不应复制到仓库、提交或写入日志，可通过 `CADILUME_DEV_TOKEN_FILE` 临时指定路径。Release 登录态只进入 Windows Credential Manager。过渡版本遗留的 `credentials.bin`、`credentials.key` 或 SQLite 凭据行会在首次成功迁移后删除；切换账号或退出账号时还会撤销资料快照、媒体票据和 Rust 内存中的服务器 token。
+被忽略的真实 PMS 回归测试只读取该开发凭据文件；不应复制到仓库、提交或写入日志，可通过 `CADILUME_DEV_TOKEN_FILE` 临时指定路径。桌面应用的登录态统一以加密 blob 写入 SQLite `secure_credentials` 表，不读取 Keychain、Credential Manager 或旧凭据文件，也不执行迁移；SQLite 没有凭据时重新授权。切换账号或退出账号时还会撤销资料快照、媒体票据和 Rust 内存中的服务器 token。
 
 调试时优先看运行 `pnpm tauri dev` 的终端输出。播放日志只包含经过清理的状态，不包含 PMS 地址、媒体路径、票据或 token。需要更完整的 Rust 堆栈时，在同一个 PowerShell 会话设置 `RUST_BACKTRACE=1`；不要把 token 放进 `RUST_LOG`、命令行参数或 issue 文字中。
 
@@ -76,7 +76,7 @@ pnpm verify:windows:bundle
 1. Windows 工具链和仓库表面检查
 2. `pnpm install --frozen-lockfile`（除非传入 `-SkipInstall`）
 3. TypeScript 检查、前端测试和构建
-4. `cargo fmt --check`、单线程 Rust 测试与 release 检查（覆盖 Windows Credential Manager 编译路径及开发凭据文件 ACL；单线程避免多个真实 WASAPI 流在测试退出时并发销毁）
+4. `cargo fmt --check`、单线程 Rust 测试与 release 检查（覆盖 Windows cfg 路径及开发凭据文件 ACL；单线程避免多个真实 WASAPI 流在测试退出时并发销毁）
 5. Tauri Windows debug 构建
 6. 可选的 NSIS 生成和 `git diff --check`
 
@@ -88,7 +88,7 @@ macOS 上可用已安装的 `cargo-xwin` 做交叉检查：
 pnpm verify:windows:cross
 ```
 
-该命令串行执行 `check:windows:cross`、`test:windows:cross` 与 `build:windows:cross`，依次覆盖 Windows `cfg` 和 WinRT API、测试二进制构建以及 Tauri Windows PE 链接。它不会运行 Windows 测试二进制，也不能证明 WASAPI、SMTC UI、Credential Manager、通知区域或 NSIS 安装器在真实 Windows 会话中工作。裸 `cargo check --target x86_64-pc-windows-msvc` 不够，它会在需要原生 C/Windows SDK 的依赖上失败；使用 `cargo-xwin` 或 Windows runner。
+该命令串行执行 `check:windows:cross`、`test:windows:cross` 与 `build:windows:cross`，依次覆盖 Windows `cfg` 和 WinRT API、测试二进制构建以及 Tauri Windows PE 链接。它不会运行 Windows 测试二进制，也不能证明 WASAPI、SMTC UI、通知区域或 NSIS 安装器在真实 Windows 会话中工作。裸 `cargo check --target x86_64-pc-windows-msvc` 不够，它会在需要原生 C/Windows SDK 的依赖上失败；使用 `cargo-xwin` 或 Windows runner。
 
 ## 5. Windows 实机验收清单
 
@@ -120,7 +120,7 @@ pnpm verify:windows:cross
 ### 账号、网络与缓存
 
 - [ ] PIN 登录通过系统浏览器完成，WebView 和日志中没有账号 token。
-- [ ] Release 构建的 token 只存在于当前 Windows 用户的 Credential Manager；应用配置目录和 SQLite 中不残留 token 或解密密钥。
+- [ ] Release 构建的 token 只以加密 blob 存在于应用数据目录的 SQLite `secure_credentials` 表；WebView、日志、Keychain 和 Credential Manager 中均无 token。
 - [ ] 共享服务器请求使用该服务器专属 token；不能因 Windows 路径或编码变化丢失 ACL。
 - [ ] 本地 loopback 音频/封面代理可工作，Windows Defender 不要求开放非 loopback 端口。
 - [ ] `%LOCALAPPDATA%` 下缓存、配置和临时文件可创建；账号切换后票据和旧授权缓存被撤销。

@@ -42,9 +42,9 @@ Rust / Tauri      │
 
 ## 账号、权限与连接
 
-- Plex PIN token 仅在 Rust 中解析；发行构建写入 macOS Keychain / Windows Credential Manager，
-  开发构建只写权限受限的 `~/.cadilume-dev-token`。过渡版本的 `credentials.bin`、
-  `credentials.key` 与 SQLite 凭据行只用于一次性迁移，成功后立即删除。WebView 不接收账号 token，服务器
+- Plex PIN token 仅在 Rust 中解析；所有构建都以加密 blob 写入应用数据目录 SQLite 的
+  `secure_credentials` 表。Cadilume 不读取 macOS Keychain、Windows Credential Manager 或旧凭据文件，
+  不执行凭据迁移；SQLite 中没有凭据时必须重新授权。WebView 不接收账号 token，服务器
   `accessToken` 只保存在 Rust 运行时缓存中，不长期落盘。
 - 每台服务器使用 `/api/v2/resources` 返回的专属 `accessToken`，包括 `owned:false`
   的共享服务器；不会错误复用 plex.tv 账号 token。

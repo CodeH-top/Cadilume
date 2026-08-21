@@ -10,14 +10,12 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-#[cfg(all(target_os = "windows", any(debug_assertions, test)))]
+#[cfg(target_os = "windows")]
 use std::fs::File;
 
 use anyhow::{anyhow, Context, Result};
-#[cfg(test)]
-use chacha20poly1305::aead::Generate;
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, Generate, KeyInit},
     XChaCha20Poly1305, XNonce,
 };
 use quick_xml::de::from_str as from_xml_str;
@@ -39,13 +37,7 @@ use crate::{audio_engine::NativeAudioEngineSlot, catalog_cache, stream_proxy::St
 const PRODUCT_NAME: &str = "Cadilume";
 const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PLEX_TV: &str = "https://plex.tv";
-#[cfg(not(debug_assertions))]
-const KEYRING_SERVICE: &str = "top.codeh.cadilume";
-#[cfg(not(debug_assertions))]
-const KEYRING_ACCOUNT: &str = "cadilume-account-token";
-const CREDENTIALS_FILE_NAME: &str = "credentials.bin";
 const CREDENTIALS_KEY_FILE_NAME: &str = "credentials.key";
-const LEGACY_CREDENTIALS_FILE_NAME: &str = "credentials.json";
 const CREDENTIALS_FILE_MAGIC: &[u8; 8] = b"CADCRD01";
 const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ARTWORK_CACHE_BYTES: u64 = 512 * 1024 * 1024;
@@ -158,12 +150,6 @@ impl CredentialStatus {
 struct StoredCredential {
     token: Option<String>,
     status: CredentialStatus,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PersistedCredential {
-    account_token: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -322,9 +308,7 @@ pub(crate) struct StreamServerSnapshot {
 pub struct PlexState {
     protected_client: OnceLock<Result<Client, String>>,
     config_path: PathBuf,
-    credential_path: PathBuf,
     credential_key_path: PathBuf,
-    legacy_credential_path: PathBuf,
     cache_root: PathBuf,
     cache_dir: PathBuf,
     cache_lock: RwLock<()>,
@@ -346,9 +330,7 @@ pub struct PlexState {
 impl PlexState {
     pub fn new(config_dir: PathBuf, app_cache_dir: PathBuf) -> Result<Self> {
         let config_path = config_dir.join("config.json");
-        let credential_path = config_dir.join(CREDENTIALS_FILE_NAME);
         let credential_key_path = config_dir.join(CREDENTIALS_KEY_FILE_NAME);
-        let legacy_credential_path = config_dir.join(LEGACY_CREDENTIALS_FILE_NAME);
         let cache_root = app_cache_dir;
         let cache_dir = cache_root.join(CACHE_NAMESPACE_DIR).join(ARTWORK_CACHE_DIR);
         let config = PersistedConfig {
@@ -364,9 +346,7 @@ impl PlexState {
         Ok(Self {
             protected_client: OnceLock::new(),
             config_path,
-            credential_path,
             credential_key_path,
-            legacy_credential_path,
             cache_root,
             cache_dir,
             cache_lock: RwLock::new(()),
@@ -414,16 +394,11 @@ impl PlexState {
             write_persisted_config(&self.config_path, &config)?;
         }
 
-        // Release builds keep the account token in Keychain/Credential Manager;
-        // debug builds use only the dedicated local development token file.
-        // The app-data/SQLite formats are read once solely to migrate builds
-        // released during the storage transition, then removed.
-        let stored_credential = read_runtime_account_token(
-            &self.catalog_cache_path(),
-            &self.credential_path,
-            &self.credential_key_path,
-            &self.legacy_credential_path,
-        );
+        // The account token is read only from the encrypted SQLite credential
+        // row. Missing or invalid credentials return to the authorization UI;
+        // no system credential store or legacy migration path is consulted.
+        let stored_credential =
+            read_runtime_account_token(&self.catalog_cache_path(), &self.credential_key_path);
         crate::diagnostics::record(
             "账号",
             format_args!("credential_store={}", stored_credential.status.log_label()),
@@ -1421,18 +1396,10 @@ pub async fn poll_pin(
         // old account's startup snapshot to the new login.
         clear_account_catalog_snapshot(&state).await?;
         let catalog_path = state.catalog_cache_path();
-        let credential_path = state.credential_path.clone();
         let credential_key_path = state.credential_key_path.clone();
-        let legacy_credential_path = state.legacy_credential_path.clone();
         let token_to_store = token.to_string();
         tauri::async_runtime::spawn_blocking(move || {
-            store_runtime_account_token(
-                &catalog_path,
-                &credential_path,
-                &credential_key_path,
-                &legacy_credential_path,
-                &token_to_store,
-            )
+            store_runtime_account_token(&catalog_path, &credential_key_path, &token_to_store)
         })
         .await
         .map_err(|error| format!("保存账号凭据任务失败: {error}"))??;
@@ -1461,16 +1428,9 @@ pub async fn logout(
     // available to a future account.
     clear_account_catalog_snapshot(&state).await?;
     let catalog_path = state.catalog_cache_path();
-    let credential_path = state.credential_path.clone();
     let credential_key_path = state.credential_key_path.clone();
-    let legacy_credential_path = state.legacy_credential_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        delete_runtime_account_token(
-            &catalog_path,
-            &credential_path,
-            &credential_key_path,
-            &legacy_credential_path,
-        )
+        delete_runtime_account_token(&catalog_path, &credential_key_path)
     })
     .await
     .map_err(|error| format!("删除账号凭据任务失败: {error}"))??;
@@ -3206,46 +3166,7 @@ fn string_field(value: &Value, key: &str) -> String {
         .to_string()
 }
 
-fn read_file_account_token(path: &Path, key_path: &Path, legacy_path: &Path) -> StoredCredential {
-    match fs::read(path) {
-        Ok(encoded) => match decrypt_account_token(&encoded, key_path) {
-            Ok(token) => StoredCredential {
-                token: Some(token),
-                status: CredentialStatus::Available,
-            },
-            Err(error) => {
-                crate::diagnostics::record(
-                    "账号",
-                    format_args!("credential_store_error=decrypt kind={error}"),
-                );
-                StoredCredential {
-                    token: None,
-                    status: CredentialStatus::Unavailable,
-                }
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            read_legacy_json_account_token(legacy_path)
-        }
-        Err(error) => {
-            crate::diagnostics::record(
-                "账号",
-                format_args!("credential_store_error=read kind={:?}", error.kind()),
-            );
-            StoredCredential {
-                token: None,
-                status: CredentialStatus::Unavailable,
-            }
-        }
-    }
-}
-
-fn read_legacy_local_account_token(
-    catalog_path: &Path,
-    path: &Path,
-    key_path: &Path,
-    legacy_path: &Path,
-) -> StoredCredential {
+fn read_runtime_account_token(catalog_path: &Path, key_path: &Path) -> StoredCredential {
     match catalog_cache::read_credential_blob(catalog_path) {
         Ok(Some(encoded)) => match decrypt_account_token(&encoded, key_path) {
             Ok(token) => StoredCredential {
@@ -3257,123 +3178,21 @@ fn read_legacy_local_account_token(
                     "账号",
                     format_args!("credential_store_error=sqlite_decrypt kind={error}"),
                 );
-                let fallback = read_file_account_token(path, key_path, legacy_path);
-                if fallback.status == CredentialStatus::Available {
-                    fallback
-                } else {
-                    StoredCredential {
-                        token: None,
-                        status: CredentialStatus::Unavailable,
-                    }
+                StoredCredential {
+                    token: None,
+                    status: CredentialStatus::Unavailable,
                 }
             }
         },
-        Ok(None) => read_file_account_token(path, key_path, legacy_path),
+        Ok(None) => StoredCredential {
+            token: None,
+            status: CredentialStatus::Missing,
+        },
         Err(error) => {
             crate::diagnostics::record(
                 "账号",
                 format_args!("credential_store_error=sqlite_read kind={error}"),
             );
-            let fallback = read_file_account_token(path, key_path, legacy_path);
-            if fallback.status == CredentialStatus::Available {
-                fallback
-            } else {
-                StoredCredential {
-                    token: None,
-                    status: CredentialStatus::Unavailable,
-                }
-            }
-        }
-    }
-}
-
-fn read_legacy_json_account_token(legacy_path: &Path) -> StoredCredential {
-    let legacy = match fs::read_to_string(legacy_path) {
-        Ok(raw) => match serde_json::from_str::<PersistedCredential>(&raw) {
-            Ok(credentials) if !credentials.account_token.trim().is_empty() => {
-                credentials.account_token.trim().to_string()
-            }
-            Ok(_) => {
-                return StoredCredential {
-                    token: None,
-                    status: CredentialStatus::Missing,
-                }
-            }
-            Err(error) => {
-                crate::diagnostics::record(
-                    "账号",
-                    format_args!("credential_store_error=legacy_parse kind={error}"),
-                );
-                return StoredCredential {
-                    token: None,
-                    status: CredentialStatus::Unavailable,
-                };
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return StoredCredential {
-                token: None,
-                status: CredentialStatus::Missing,
-            };
-        }
-        Err(error) => {
-            crate::diagnostics::record(
-                "账号",
-                format_args!("credential_store_error=legacy_read kind={:?}", error.kind()),
-            );
-            return StoredCredential {
-                token: None,
-                status: CredentialStatus::Unavailable,
-            };
-        }
-    };
-
-    StoredCredential {
-        token: Some(legacy),
-        status: CredentialStatus::Available,
-    }
-}
-
-#[cfg(debug_assertions)]
-fn dev_token_fallback_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CADILUME_DEV_TOKEN_FILE") {
-        return PathBuf::from(path);
-    }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .unwrap_or_else(|| std::env::temp_dir().into_os_string());
-    PathBuf::from(home).join(".cadilume-dev-token")
-}
-
-#[cfg(debug_assertions)]
-fn read_primary_account_token() -> StoredCredential {
-    match fs::read_to_string(dev_token_fallback_path()) {
-        Ok(value) => {
-            let token = value.trim().to_string();
-            if token.is_empty() {
-                StoredCredential {
-                    token: None,
-                    status: CredentialStatus::Missing,
-                }
-            } else {
-                StoredCredential {
-                    token: Some(token),
-                    status: CredentialStatus::Available,
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoredCredential {
-            token: None,
-            status: CredentialStatus::Missing,
-        },
-        Err(error) => {
-            crate::diagnostics::record(
-                "账号",
-                format_args!(
-                    "credential_store_error=development_file kind={:?}",
-                    error.kind()
-                ),
-            );
             StoredCredential {
                 token: None,
                 status: CredentialStatus::Unavailable,
@@ -3381,172 +3200,7 @@ fn read_primary_account_token() -> StoredCredential {
         }
     }
 }
-
-#[cfg(debug_assertions)]
-fn store_primary_account_token(token: &str) -> Result<(), String> {
-    let token = token.trim();
-    if token.is_empty() {
-        return Err("Plex 登录 token 不能为空".to_string());
-    }
-    write_restricted_file(&dev_token_fallback_path(), token.as_bytes())
-}
-
-#[cfg(debug_assertions)]
-fn delete_primary_account_token() -> Result<(), String> {
-    remove_credential_file(&dev_token_fallback_path())
-}
-
-#[cfg(not(debug_assertions))]
-fn keyring_entry() -> std::result::Result<keyring::Entry, keyring::Error> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-}
-
-#[cfg(not(debug_assertions))]
-fn keyring_error_category(error: &keyring::Error) -> &'static str {
-    match error {
-        keyring::Error::PlatformFailure(_) => "platform_failure",
-        keyring::Error::NoStorageAccess(_) => "no_storage_access",
-        keyring::Error::NoEntry => "no_entry",
-        keyring::Error::BadEncoding(_) => "bad_encoding",
-        keyring::Error::TooLong(_, _) => "attribute_too_long",
-        keyring::Error::Invalid(_, _) => "invalid_attribute",
-        keyring::Error::Ambiguous(_) => "ambiguous",
-        _ => "unknown",
-    }
-}
-
-#[cfg(not(debug_assertions))]
-fn read_primary_account_token() -> StoredCredential {
-    let entry = match keyring_entry() {
-        Ok(entry) => entry,
-        Err(error) => {
-            crate::diagnostics::record(
-                "账号",
-                format_args!(
-                    "credential_store_error=entry category={}",
-                    keyring_error_category(&error)
-                ),
-            );
-            return StoredCredential {
-                token: None,
-                status: CredentialStatus::Unavailable,
-            };
-        }
-    };
-    match entry.get_password() {
-        Ok(token) if !token.trim().is_empty() => StoredCredential {
-            token: Some(token.trim().to_string()),
-            status: CredentialStatus::Available,
-        },
-        Ok(_) | Err(keyring::Error::NoEntry) => StoredCredential {
-            token: None,
-            status: CredentialStatus::Missing,
-        },
-        Err(error) => {
-            crate::diagnostics::record(
-                "账号",
-                format_args!(
-                    "credential_store_error=read category={}",
-                    keyring_error_category(&error)
-                ),
-            );
-            StoredCredential {
-                token: None,
-                status: CredentialStatus::Unavailable,
-            }
-        }
-    }
-}
-
-#[cfg(not(debug_assertions))]
-fn store_primary_account_token(token: &str) -> Result<(), String> {
-    let token = token.trim();
-    if token.is_empty() {
-        return Err("Plex 登录 token 不能为空".to_string());
-    }
-    keyring_entry()
-        .map_err(|error| format!("无法打开系统凭据存储（{}）", keyring_error_category(&error)))?
-        .set_password(token)
-        .map_err(|error| format!("无法写入系统凭据（{}）", keyring_error_category(&error)))
-}
-
-#[cfg(not(debug_assertions))]
-fn delete_primary_account_token() -> Result<(), String> {
-    let entry = keyring_entry()
-        .map_err(|error| format!("无法打开系统凭据存储（{}）", keyring_error_category(&error)))?;
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(format!(
-            "无法删除系统凭据（{}）",
-            keyring_error_category(&error)
-        )),
-    }
-}
-
-fn cleanup_legacy_account_token_storage(
-    catalog_path: &Path,
-    path: &Path,
-    key_path: &Path,
-    legacy_path: &Path,
-) -> Result<(), String> {
-    catalog_cache::delete_credential_blob(catalog_path)?;
-    remove_credential_file(path)?;
-    remove_credential_file(key_path)?;
-    remove_credential_file(legacy_path)
-}
-
-fn read_runtime_account_token(
-    catalog_path: &Path,
-    path: &Path,
-    key_path: &Path,
-    legacy_path: &Path,
-) -> StoredCredential {
-    let primary = read_primary_account_token();
-    if primary.status == CredentialStatus::Available {
-        if let Err(error) =
-            cleanup_legacy_account_token_storage(catalog_path, path, key_path, legacy_path)
-        {
-            crate::diagnostics::record(
-                "账号",
-                format_args!("credential_store_error=legacy_cleanup kind={error}"),
-            );
-        }
-        return primary;
-    }
-    if primary.status == CredentialStatus::Unavailable {
-        return primary;
-    }
-
-    let legacy = read_legacy_local_account_token(catalog_path, path, key_path, legacy_path);
-    let Some(token) = legacy.token.as_deref() else {
-        return legacy;
-    };
-    if let Err(error) = store_primary_account_token(token) {
-        crate::diagnostics::record(
-            "账号",
-            format_args!("credential_store_error=primary_migrate kind={error}"),
-        );
-        return StoredCredential {
-            token: None,
-            status: CredentialStatus::Unavailable,
-        };
-    }
-    if let Err(error) =
-        cleanup_legacy_account_token_storage(catalog_path, path, key_path, legacy_path)
-    {
-        crate::diagnostics::record(
-            "账号",
-            format_args!("credential_store_error=legacy_cleanup kind={error}"),
-        );
-    }
-    crate::diagnostics::record("账号", format_args!("credential_store=migrated_to_primary"));
-    StoredCredential {
-        token: Some(token.to_string()),
-        status: CredentialStatus::Available,
-    }
-}
-
-#[cfg(all(unix, any(debug_assertions, test)))]
+#[cfg(unix)]
 fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), String> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut file = OpenOptions::new()
@@ -3563,7 +3217,7 @@ fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(all(target_os = "windows", any(debug_assertions, test)))]
+#[cfg(target_os = "windows")]
 fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
@@ -3610,12 +3264,11 @@ fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(all(not(any(unix, target_os = "windows")), any(debug_assertions, test)))]
+#[cfg(not(any(unix, target_os = "windows")))]
 fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), String> {
     fs::write(path, content).map_err(|error| format!("写入 Plex 凭据文件失败: {error}"))
 }
 
-#[cfg(test)]
 fn load_or_create_credential_key(path: &Path) -> Result<[u8; 32], String> {
     match fs::read(path) {
         Ok(bytes) => bytes
@@ -3658,7 +3311,6 @@ fn decrypt_account_token(encoded: &[u8], key_path: &Path) -> Result<String, Stri
     Ok(token.to_string())
 }
 
-#[cfg(test)]
 fn encode_account_token(key_path: &Path, token: &str) -> Result<Vec<u8>, String> {
     let token = token.trim();
     if token.is_empty() {
@@ -3678,21 +3330,13 @@ fn encode_account_token(key_path: &Path, token: &str) -> Result<Vec<u8>, String>
     Ok(encoded)
 }
 
-#[cfg(test)]
-fn store_file_account_token(path: &Path, key_path: &Path, token: &str) -> Result<(), String> {
-    let encoded = encode_account_token(key_path, token)?;
-    write_restricted_file(path, &encoded)
-}
-
 fn store_runtime_account_token(
     catalog_path: &Path,
-    path: &Path,
     key_path: &Path,
-    legacy_path: &Path,
     token: &str,
 ) -> Result<(), String> {
-    cleanup_legacy_account_token_storage(catalog_path, path, key_path, legacy_path)?;
-    store_primary_account_token(token)
+    let encoded = encode_account_token(key_path, token)?;
+    catalog_cache::write_credential_blob(catalog_path, &encoded)
 }
 
 fn remove_credential_file(path: &Path) -> Result<(), String> {
@@ -3703,14 +3347,9 @@ fn remove_credential_file(path: &Path) -> Result<(), String> {
     }
 }
 
-fn delete_runtime_account_token(
-    catalog_path: &Path,
-    path: &Path,
-    key_path: &Path,
-    legacy_path: &Path,
-) -> Result<(), String> {
-    cleanup_legacy_account_token_storage(catalog_path, path, key_path, legacy_path)?;
-    delete_primary_account_token()
+fn delete_runtime_account_token(catalog_path: &Path, key_path: &Path) -> Result<(), String> {
+    catalog_cache::delete_credential_blob(catalog_path)?;
+    remove_credential_file(key_path)
 }
 
 async fn ensure_success(response: Response, context: &str) -> Result<Response> {
@@ -3754,116 +3393,60 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn rewriting_existing_credential_tightens_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn account_credential_round_trips_through_sqlite() {
         let cache = TestCache::new();
-        let path = cache.root.join(CREDENTIALS_FILE_NAME);
-        let key = cache.root.join(CREDENTIALS_KEY_FILE_NAME);
-        let legacy = cache.root.join(LEGACY_CREDENTIALS_FILE_NAME);
-        fs::write(&path, r#"{"accountToken":"old-token"}"#)
-            .expect("existing credential should be created");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
-            .expect("test credential permissions should be relaxed");
-
-        store_file_account_token(&path, &key, "new-token")
-            .expect("credential rewrite should succeed");
-
-        assert_eq!(
-            read_file_account_token(&path, &key, &legacy)
-                .token
-                .as_deref(),
-            Some("new-token")
-        );
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
-    #[test]
-    fn deleting_credential_is_idempotent_and_reports_non_file_targets() {
-        let cache = TestCache::new();
-        let token = cache.root.join(CREDENTIALS_FILE_NAME);
-        let key = cache.root.join(CREDENTIALS_KEY_FILE_NAME);
-        let legacy = cache.root.join(LEGACY_CREDENTIALS_FILE_NAME);
         let catalog = cache.root.join("catalog.sqlite3");
-        store_file_account_token(&token, &key, "token").expect("test credential should be created");
-
-        cleanup_legacy_account_token_storage(&catalog, &token, &key, &legacy)
-            .expect("existing credential should be removed");
-        cleanup_legacy_account_token_storage(&catalog, &token, &key, &legacy)
-            .expect("missing credential should count as logged out");
-        assert!(!token.exists());
-        assert!(!key.exists());
-
-        let directory = cache.root.join("credential-directory");
-        fs::create_dir(&directory).expect("non-file target should be created");
-        let error = cleanup_legacy_account_token_storage(&catalog, &directory, &key, &legacy)
-            .expect_err("a non-file target must not be reported as deleted");
-        assert!(error.starts_with("删除 Plex 凭据文件失败:"));
-        assert!(directory.is_dir());
-    }
-
-    #[test]
-    fn account_credential_round_trips_as_encrypted_binary() {
-        let cache = TestCache::new();
-        let path = cache.root.join(CREDENTIALS_FILE_NAME);
         let key = cache.root.join(CREDENTIALS_KEY_FILE_NAME);
-        let legacy = cache.root.join(LEGACY_CREDENTIALS_FILE_NAME);
 
-        store_file_account_token(&path, &key, "  account-token  ")
-            .expect("credential should be stored in app data");
+        store_runtime_account_token(&catalog, &key, "  account-token  ")
+            .expect("credential should be stored in SQLite");
 
-        assert_eq!(
-            read_file_account_token(&path, &key, &legacy)
-                .token
-                .as_deref(),
-            Some("account-token")
-        );
-        let encoded = fs::read(&path).expect("encrypted credential should exist");
+        let stored = read_runtime_account_token(&catalog, &key);
+        assert_eq!(stored.token.as_deref(), Some("account-token"));
+        assert_eq!(stored.status, CredentialStatus::Available);
+        let encoded = catalog_cache::read_credential_blob(&catalog)
+            .expect("SQLite credential should be readable")
+            .expect("SQLite credential should exist");
         assert!(encoded.starts_with(CREDENTIALS_FILE_MAGIC));
         assert!(!encoded
             .windows("account-token".len())
             .any(|window| window == b"account-token"));
+
+        delete_runtime_account_token(&catalog, &key).expect("credential should be deleted");
+        let logged_out = read_runtime_account_token(&catalog, &key);
+        assert_eq!(logged_out.token, None);
+        assert_eq!(logged_out.status, CredentialStatus::Missing);
+        assert!(!key.exists());
     }
 
     #[test]
-    fn legacy_json_credential_is_read_for_one_time_primary_migration() {
+    fn missing_sqlite_credential_does_not_read_legacy_files() {
         let cache = TestCache::new();
-        let path = cache.root.join(CREDENTIALS_FILE_NAME);
+        let catalog = cache.root.join("catalog.sqlite3");
         let key = cache.root.join(CREDENTIALS_KEY_FILE_NAME);
-        let legacy = cache.root.join(LEGACY_CREDENTIALS_FILE_NAME);
+        let legacy = cache.root.join("credentials.json");
         fs::write(&legacy, r#"{"accountToken":"legacy-token"}"#)
             .expect("legacy credential should be created");
 
-        let stored = read_file_account_token(&path, &key, &legacy);
-        assert_eq!(stored.token.as_deref(), Some("legacy-token"));
-        assert!(!path.exists());
-        assert!(!key.exists());
+        let stored = read_runtime_account_token(&catalog, &key);
+        assert_eq!(stored.token, None);
+        assert_eq!(stored.status, CredentialStatus::Missing);
         assert!(legacy.exists());
-
-        cleanup_legacy_account_token_storage(
-            &cache.root.join("catalog.sqlite3"),
-            &path,
-            &key,
-            &legacy,
-        )
-        .expect("successful primary migration should remove legacy storage");
-        assert!(!legacy.exists());
+        assert!(!key.exists());
     }
 
     #[test]
-    fn decrypting_a_legacy_blob_never_creates_a_missing_key() {
+    fn invalid_sqlite_credential_does_not_create_a_key() {
         let cache = TestCache::new();
-        let path = cache.root.join(CREDENTIALS_FILE_NAME);
+        let catalog = cache.root.join("catalog.sqlite3");
         let key = cache.root.join(CREDENTIALS_KEY_FILE_NAME);
-        fs::write(&path, b"CADCRD01-invalid-encrypted-payload")
-            .expect("legacy blob should be created");
+        catalog_cache::write_credential_blob(&catalog, b"CADCRD01-invalid-encrypted-payload")
+            .expect("invalid credential blob should be stored for the test");
 
-        assert!(decrypt_account_token(&fs::read(&path).unwrap(), &key).is_err());
+        let stored = read_runtime_account_token(&catalog, &key);
+        assert_eq!(stored.token, None);
+        assert_eq!(stored.status, CredentialStatus::Unavailable);
         assert!(!key.exists());
     }
 

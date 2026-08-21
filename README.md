@@ -65,10 +65,10 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 
 ### Account and privacy
 
-- Release builds store the Plex account token in macOS Keychain or Windows Credential Manager.
-  Debug builds use only the restricted `~/.cadilume-dev-token` development file. Transitional
-  app-data credentials are migrated once and removed; tokens are never exposed to the WebView
-  or written to logs.
+- All builds store the Plex account token as an encrypted blob in the app-data SQLite
+  `secure_credentials` table. Cadilume never reads macOS Keychain, Windows Credential Manager,
+  or legacy credential files, and performs no credential migration. A missing SQLite credential
+  requires a new authorization; tokens are never exposed to the WebView or written to logs.
 - Server tokens, upstream media addresses, and artwork addresses are not exposed directly to the interface layer or written to logs.
 - Every request continues to follow Plex Media Server access controls and subscription boundaries.
 - Playback, decoding, and caching ship with the application. Users do not need FFmpeg, libmpv, BASS, Homebrew, or a separate background service.
