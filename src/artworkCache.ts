@@ -3,6 +3,7 @@ import { artworkUrl } from "./api";
 interface ArtworkRequestRecord {
   width: number;
   height: number;
+  sourcePath: string;
   promise: Promise<string>;
   resolved?: string;
 }
@@ -74,6 +75,7 @@ export function requestCachedArtwork(
   const key = artworkVariantKey(serverId, path, dimensions.width, dimensions.height, cacheIdentity);
   const existing = artworkRequests.get(key);
   if (existing
+    && existing.sourcePath === path
     && existing.width >= dimensions.width
     && existing.height >= dimensions.height) {
     return existing.promise;
@@ -85,6 +87,7 @@ export function requestCachedArtwork(
   const record: ArtworkRequestRecord = {
     width: dimensions.width,
     height: dimensions.height,
+    sourcePath: path,
     promise,
   };
   artworkRequests.set(key, record);
@@ -149,6 +152,7 @@ export function getResolvedArtwork(
   const key = artworkVariantKey(serverId, path, dimensions.width, dimensions.height, cacheIdentity);
   const record = artworkRequests.get(key);
   if (!record?.resolved
+    || record.sourcePath !== path
     || record.width < dimensions.width
     || record.height < dimensions.height) return undefined;
   return record.resolved;

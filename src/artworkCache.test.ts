@@ -49,9 +49,9 @@ describe("shared artwork ticket cache", () => {
       `http://127.0.0.1:4000/artwork/${path.slice(1)}-${width}x${height}`
     ));
 
-    const firstAlbum = Array.from({ length: 500 }, (_, index) => ({
+    const firstAlbum = Array.from({ length: 500 }, () => ({
       parentRatingKey: "album-1",
-      thumb: `/thumb/album-1-track-${index}`,
+      thumb: "/thumb/album-1",
     }));
     await prewarmArtwork("server-a", [
       ...firstAlbum,
@@ -61,7 +61,7 @@ describe("shared artwork ticket cache", () => {
     expect(artworkUrl).toHaveBeenCalledTimes(2);
     expect(artworkUrl).toHaveBeenCalledWith(
       "server-a",
-      "/thumb/album-1-track-0",
+      "/thumb/album-1",
       420,
       420,
       "album:album-1",
@@ -75,20 +75,36 @@ describe("shared artwork ticket cache", () => {
     );
     expect(getResolvedArtwork(
       "server-a",
-      "/thumb/album-1-track-499",
+      "/thumb/album-1",
       512,
       512,
       artworkCacheIdentity({ parentRatingKey: "album-1" }),
     ))
-      .toContain("/artwork/thumb/album-1-track-0-420x420");
+      .toContain("/artwork/thumb/album-1-420x420");
     await requestCachedArtwork(
       "server-a",
-      "/thumb/album-1-track-499",
+      "/thumb/album-1",
       96,
       96,
       artworkCacheIdentity({ parentRatingKey: "album-1" }),
     );
     expect(artworkUrl).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces one album record when its PMS artwork revision path changes", async () => {
+    artworkUrl
+      .mockResolvedValueOnce("http://127.0.0.1:4000/artwork/album-old")
+      .mockResolvedValueOnce("http://127.0.0.1:4000/artwork/album-new");
+    const cacheIdentity = artworkCacheIdentity({ parentRatingKey: "album-1" });
+
+    await requestCachedArtwork("server-a", "/thumb/album-1/old", 96, 96, cacheIdentity);
+    await requestCachedArtwork("server-a", "/thumb/album-1/new", 96, 96, cacheIdentity);
+
+    expect(artworkUrl).toHaveBeenCalledTimes(2);
+    expect(getResolvedArtwork("server-a", "/thumb/album-1/old", 96, 96, cacheIdentity))
+      .toBeUndefined();
+    expect(getResolvedArtwork("server-a", "/thumb/album-1/new", 96, 96, cacheIdentity))
+      .toBe("http://127.0.0.1:4000/artwork/album-new");
   });
 
   it("upgrades a path owner when a larger square is actually required", async () => {

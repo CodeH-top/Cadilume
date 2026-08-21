@@ -44,7 +44,8 @@ const MAX_ARTWORK_CACHE_BYTES: u64 = 512 * 1024 * 1024;
 const CACHE_NAMESPACE_DIR: &str = "cadilume";
 const ARTWORK_CACHE_DIR: &str = "artwork";
 const ARTWORK_CACHE_EXTENSION: &str = "cadart";
-const ARTWORK_CACHE_MAGIC: &[u8; 8] = b"CADART01";
+const ARTWORK_CACHE_MAGIC: &[u8; 8] = b"CADART02";
+const ARTWORK_SOURCE_FINGERPRINT_BYTES: usize = 32;
 const MAX_CACHE_MIME_BYTES: usize = 127;
 const MAX_DEVICE_NAME_CHARACTERS: usize = 80;
 const MAX_PLAYLIST_BATCH_TRACKS: usize = 10_000;
@@ -1230,6 +1231,7 @@ pub struct CacheStatus {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CachedArtwork {
+    source_fingerprint: [u8; ARTWORK_SOURCE_FINGERPRINT_BYTES],
     pub(crate) mime: String,
     pub(crate) bytes: Vec<u8>,
 }
@@ -1860,9 +1862,10 @@ async fn ensure_artwork_cached(
         &server.token,
         cache_identity.as_deref(),
     );
+    let source_fingerprint = artwork_source_fingerprint(&path);
     if let Ok(_cache_guard) = state.cache_lock.read() {
         match read_artwork_cache(&state.cache_dir, &cache_key) {
-            Ok(Some(_)) => {
+            Ok(Some(artwork)) if artwork.source_fingerprint == source_fingerprint => {
                 crate::diagnostics::record(
                     "封面",
                     format_args!(
@@ -1872,6 +1875,12 @@ async fn ensure_artwork_cached(
                     ),
                 );
                 return Ok(cache_key);
+            }
+            Ok(Some(_)) => {
+                crate::diagnostics::record(
+                    "封面",
+                    format_args!("cache=stale source_revision=changed"),
+                );
             }
             Ok(None) => {}
             Err(_) => discard_artwork_cache_entry(&state.cache_dir, &cache_key),
@@ -1984,7 +1993,14 @@ async fn ensure_artwork_cached(
             .cache_lock
             .write()
             .map_err(|_| "图片缓存写入锁定失败".to_string())?;
-        write_artwork_cache(&state.cache_dir, &cache_key, &mime, &bytes).map_err(display_error)?;
+        write_artwork_cache(
+            &state.cache_dir,
+            &cache_key,
+            source_fingerprint,
+            &mime,
+            &bytes,
+        )
+        .map_err(display_error)?;
         return Ok(cache_key);
     }
 
@@ -2653,6 +2669,10 @@ fn update_hash_dimension(hasher: &mut Sha256, value: Option<u32>) {
     }
 }
 
+fn artwork_source_fingerprint(path: &str) -> [u8; ARTWORK_SOURCE_FINGERPRINT_BYTES] {
+    Sha256::digest(path.as_bytes()).into()
+}
+
 fn artwork_cache_path(cache_dir: &Path, key: &str) -> Result<PathBuf> {
     if key.len() != 64
         || !key
@@ -2664,7 +2684,11 @@ fn artwork_cache_path(cache_dir: &Path, key: &str) -> Result<PathBuf> {
     Ok(cache_dir.join(format!("{key}.{ARTWORK_CACHE_EXTENSION}")))
 }
 
-fn encode_artwork_cache(mime: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+fn encode_artwork_cache(
+    source_fingerprint: [u8; ARTWORK_SOURCE_FINGERPRINT_BYTES],
+    mime: &str,
+    bytes: &[u8],
+) -> Result<Vec<u8>> {
     if bytes.is_empty() {
         return Err(anyhow!("拒绝缓存空图片"));
     }
@@ -2673,8 +2697,11 @@ fn encode_artwork_cache(mime: &str, bytes: &[u8]) -> Result<Vec<u8>> {
         return Err(anyhow!("图片 MIME 类型过长"));
     }
 
-    let mut encoded = Vec::with_capacity(ARTWORK_CACHE_MAGIC.len() + 2 + mime.len() + bytes.len());
+    let mut encoded = Vec::with_capacity(
+        ARTWORK_CACHE_MAGIC.len() + ARTWORK_SOURCE_FINGERPRINT_BYTES + 2 + mime.len() + bytes.len(),
+    );
     encoded.extend_from_slice(ARTWORK_CACHE_MAGIC);
+    encoded.extend_from_slice(&source_fingerprint);
     encoded.extend_from_slice(&(mime.len() as u16).to_be_bytes());
     encoded.extend_from_slice(mime.as_bytes());
     encoded.extend_from_slice(bytes);
@@ -2682,15 +2709,15 @@ fn encode_artwork_cache(mime: &str, bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn decode_artwork_cache(encoded: &[u8]) -> Result<CachedArtwork> {
-    let header_length = ARTWORK_CACHE_MAGIC.len() + 2;
+    let fingerprint_start = ARTWORK_CACHE_MAGIC.len();
+    let mime_length_start = fingerprint_start + ARTWORK_SOURCE_FINGERPRINT_BYTES;
+    let header_length = mime_length_start + 2;
     if encoded.len() < header_length || &encoded[..ARTWORK_CACHE_MAGIC.len()] != ARTWORK_CACHE_MAGIC
     {
         return Err(anyhow!("图片缓存格式无效"));
     }
-    let mime_length = u16::from_be_bytes([
-        encoded[ARTWORK_CACHE_MAGIC.len()],
-        encoded[ARTWORK_CACHE_MAGIC.len() + 1],
-    ]) as usize;
+    let mime_length =
+        u16::from_be_bytes([encoded[mime_length_start], encoded[mime_length_start + 1]]) as usize;
     if mime_length == 0 || mime_length > MAX_CACHE_MIME_BYTES {
         return Err(anyhow!("图片缓存 MIME 长度无效"));
     }
@@ -2702,7 +2729,11 @@ fn decode_artwork_cache(encoded: &[u8]) -> Result<CachedArtwork> {
         .context("图片缓存 MIME 编码无效")?;
     let bytes = &encoded[data_offset..];
     let mime = validate_image_metadata(Some(mime), Some(bytes.len() as u64))?;
+    let source_fingerprint = encoded[fingerprint_start..mime_length_start]
+        .try_into()
+        .map_err(|_| anyhow!("图片缓存源路径指纹无效"))?;
     Ok(CachedArtwork {
+        source_fingerprint,
         mime,
         bytes: bytes.to_vec(),
     })
@@ -2719,8 +2750,9 @@ fn read_artwork_cache(cache_dir: &Path, key: &str) -> Result<Option<CachedArtwor
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(anyhow!("图片缓存条目不是普通文件"));
     }
-    let maximum_file_size = (ARTWORK_CACHE_MAGIC.len() + 2 + MAX_CACHE_MIME_BYTES)
-        .saturating_add(MAX_IMAGE_BYTES) as u64;
+    let maximum_file_size =
+        (ARTWORK_CACHE_MAGIC.len() + ARTWORK_SOURCE_FINGERPRINT_BYTES + 2 + MAX_CACHE_MIME_BYTES)
+            .saturating_add(MAX_IMAGE_BYTES) as u64;
     if metadata.len() > maximum_file_size {
         return Err(anyhow!("图片缓存条目超过大小限制"));
     }
@@ -2731,15 +2763,22 @@ fn read_artwork_cache(cache_dir: &Path, key: &str) -> Result<Option<CachedArtwor
     Ok(Some(artwork))
 }
 
-fn write_artwork_cache(cache_dir: &Path, key: &str, mime: &str, bytes: &[u8]) -> Result<()> {
+fn write_artwork_cache(
+    cache_dir: &Path,
+    key: &str,
+    source_fingerprint: [u8; ARTWORK_SOURCE_FINGERPRINT_BYTES],
+    mime: &str,
+    bytes: &[u8],
+) -> Result<()> {
     ensure_artwork_cache_boundary(cache_dir)?;
     match read_artwork_cache(cache_dir, key) {
-        Ok(Some(_)) => return Ok(()),
+        Ok(Some(artwork)) if artwork.source_fingerprint == source_fingerprint => return Ok(()),
+        Ok(Some(_)) => discard_artwork_cache_entry(cache_dir, key),
         Ok(None) => {}
         Err(_) => discard_artwork_cache_entry(cache_dir, key),
     }
 
-    let encoded = encode_artwork_cache(mime, bytes)?;
+    let encoded = encode_artwork_cache(source_fingerprint, mime, bytes)?;
     prune_artwork_cache_to_fit(cache_dir, encoded.len() as u64, MAX_ARTWORK_CACHE_BYTES)?;
     let destination = artwork_cache_path(cache_dir, key)?;
     let temporary = cache_dir.join(format!(".{key}.{}.tmp", Uuid::new_v4()));
@@ -4104,12 +4143,14 @@ mod tests {
             None,
         );
         let bytes = b"fake-image-payload";
+        let source_fingerprint = artwork_source_fingerprint("/library/metadata/42/thumb/7");
 
-        write_artwork_cache(&cache.artwork, &key, "image/png", bytes)
+        write_artwork_cache(&cache.artwork, &key, source_fingerprint, "image/png", bytes)
             .expect("artwork should be cached");
         let cached = read_artwork_cache(&cache.artwork, &key)
             .expect("cache read should succeed")
             .expect("cache should hit");
+        assert_eq!(cached.source_fingerprint, source_fingerprint);
         assert_eq!(cached.mime, "image/png");
         assert_eq!(cached.bytes, bytes);
 
@@ -4125,6 +4166,45 @@ mod tests {
                 file_count: 1,
             }
         );
+    }
+
+    #[test]
+    fn artwork_cache_replaces_one_album_file_when_source_revision_changes() {
+        let cache = TestCache::new();
+        let key = artwork_cache_key(
+            "server-a",
+            "/library/metadata/42/thumb/old",
+            Some(420),
+            Some(420),
+            "token-a",
+            Some("album:42"),
+        );
+        let old_fingerprint = artwork_source_fingerprint("/library/metadata/42/thumb/old");
+        let new_fingerprint = artwork_source_fingerprint("/library/metadata/42/thumb/new");
+
+        write_artwork_cache(
+            &cache.artwork,
+            &key,
+            old_fingerprint,
+            "image/png",
+            b"old-cover",
+        )
+        .expect("old album artwork should be cached");
+        write_artwork_cache(
+            &cache.artwork,
+            &key,
+            new_fingerprint,
+            "image/png",
+            b"new-cover",
+        )
+        .expect("new artwork revision should replace the same album file");
+
+        let cached = read_artwork_cache(&cache.artwork, &key)
+            .expect("cache read should succeed")
+            .expect("album cache should exist");
+        assert_eq!(cached.source_fingerprint, new_fingerprint);
+        assert_eq!(cached.bytes, b"new-cover");
+        assert_eq!(artwork_cache_status(&cache.artwork).unwrap().file_count, 1);
     }
 
     #[test]
@@ -4146,10 +4226,22 @@ mod tests {
             "token-a",
             None,
         );
-        write_artwork_cache(&cache.artwork, &oldest_key, "image/png", b"oldest")
-            .expect("oldest artwork should be cached");
-        write_artwork_cache(&cache.artwork, &newest_key, "image/png", b"newest")
-            .expect("newest artwork should be cached");
+        write_artwork_cache(
+            &cache.artwork,
+            &oldest_key,
+            artwork_source_fingerprint("/library/metadata/1/thumb"),
+            "image/png",
+            b"oldest",
+        )
+        .expect("oldest artwork should be cached");
+        write_artwork_cache(
+            &cache.artwork,
+            &newest_key,
+            artwork_source_fingerprint("/library/metadata/2/thumb"),
+            "image/png",
+            b"newest",
+        )
+        .expect("newest artwork should be cached");
         let oldest_path = artwork_cache_path(&cache.artwork, &oldest_key).unwrap();
         let newest_path = artwork_cache_path(&cache.artwork, &newest_key).unwrap();
         OpenOptions::new()
@@ -4189,8 +4281,14 @@ mod tests {
             "token-a",
             None,
         );
-        write_artwork_cache(&cache.artwork, &key, "image/jpeg", b"cached-image")
-            .expect("artwork should be cached");
+        write_artwork_cache(
+            &cache.artwork,
+            &key,
+            artwork_source_fingerprint("/library/metadata/42/thumb/7"),
+            "image/jpeg",
+            b"cached-image",
+        )
+        .expect("artwork should be cached");
         fs::write(cache.artwork.join("stale.tmp"), b"temporary")
             .expect("stale cache file should be created");
         let nested = cache.artwork.join("stale");
