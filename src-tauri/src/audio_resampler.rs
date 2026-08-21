@@ -319,6 +319,35 @@ mod tests {
     }
 
     #[test]
+    fn sinc_resampling_stays_comfortably_ahead_of_realtime() {
+        const INPUT_SECONDS: usize = 4;
+        const MAX_PROCESSING_TIME: Duration = Duration::from_secs(2);
+        let input_frames = 44_100 * INPUT_SECONDS;
+        let source = FiniteSource {
+            samples: vec![0.25; input_frames * 2],
+            cursor: 0,
+            channels: NonZeroU16::new(2).unwrap(),
+            sample_rate: NonZeroU32::new(44_100).unwrap(),
+        };
+        let prepared = preprocess_source_for_output(
+            source,
+            NonZeroU16::new(2).unwrap(),
+            NonZeroU32::new(48_000).unwrap(),
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let output_samples = prepared.count();
+        let elapsed = started.elapsed();
+
+        assert!(output_samples.abs_diff(48_000 * INPUT_SECONDS * 2) <= 512 * 2);
+        assert!(
+            elapsed < MAX_PROCESSING_TIME,
+            "4 秒采样率转换耗时 {elapsed:?}，无法为实时播放保留足够余量"
+        );
+    }
+
+    #[test]
     fn downmixes_stereo_before_playback_without_losing_frame_alignment() {
         let source = FiniteSource {
             samples: vec![1.0, -1.0, 0.5, 0.5],

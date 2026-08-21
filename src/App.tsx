@@ -113,6 +113,7 @@ import { SharedVolumeControl } from "./VolumeControl";
 import { rasterizeAppearanceSnapshotImages, shouldAnimateAppearanceReveal } from "./appearanceTransition";
 import { useAppUpdater, type AppUpdaterController } from "./useAppUpdater";
 import { clearArtworkTicketCache, getResolvedArtwork, invalidateCachedArtwork, requestCachedArtwork } from "./artworkCache";
+import { playbackLog } from "./playbackLog";
 import {
   ConnectionIndicator,
   DeviceNameDialog,
@@ -3049,46 +3050,83 @@ export function Artwork({ item, size, className = "", preferArt = false, stableT
 function PlayerArtwork({ item }: { item?: ArtworkItem }) {
   const serverId = useContext(ArtworkServerContext);
   const path = item?.thumb || item?.composite || item?.art;
-  const resolved = (item?.imageUrl && !isLoopbackArtworkSource(item.imageUrl) ? item.imageUrl : undefined)
+  const initialSource = (item?.imageUrl && !isLoopbackArtworkSource(item.imageUrl) ? item.imageUrl : undefined)
     || (serverId && path ? getResolvedArtwork(serverId, path) : undefined)
     || item?.imageUrl;
-  const [source, setSource] = useState(resolved);
-  const [retryCount, setRetryCount] = useState(0);
-
-  useEffect(() => setRetryCount(0), [item?.ratingKey]);
+  const artworkIdentity = `${item?.ratingKey || "none"}:${path || item?.imageUrl || "none"}`;
+  const artworkIdentityRef = useRef(artworkIdentity);
+  const [source, setSource] = useState(initialSource);
+  const [domRetryCount, setDomRetryCount] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    if (resolved) {
-      setSource(resolved);
-      setRetryCount(0);
+    if (artworkIdentityRef.current !== artworkIdentity) {
+      artworkIdentityRef.current = artworkIdentity;
+      setSource(undefined);
+      setDomRetryCount(0);
+    }
+    if (!path && !item?.imageUrl) {
+      setSource(undefined);
       return;
     }
-    if (!path || !serverId || !isDesktopRuntime()) {
-      setSource(path);
+    if (!isDesktopRuntime()) {
+      setSource(item?.imageUrl || path);
       return;
     }
-    void requestCachedArtwork(serverId, path, 420, 420)
-      .then((url) => {
-        if (!cancelled) setSource(url);
-      })
-      .catch(() => {
-        if (!cancelled) setSource(undefined);
-      });
+
+    const load = async () => {
+      let candidate = (item?.imageUrl && !isLoopbackArtworkSource(item.imageUrl) ? item.imageUrl : undefined)
+        || (serverId && path ? getResolvedArtwork(serverId, path) : undefined)
+        || item?.imageUrl;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (!candidate && serverId && path) {
+          try {
+            candidate = await withStartupTimeout(
+              () => requestCachedArtwork(serverId, path, 420, 420),
+              STARTUP_ARTWORK_REQUEST_TIMEOUT_MS,
+              "底部播放器封面票据准备超时。",
+            );
+          } catch {
+            candidate = undefined;
+          }
+        }
+        if (cancelled) return;
+        const decoded = candidate
+          ? await withStartupTimeout(
+            () => decodeArtwork(candidate as string),
+            STARTUP_ARTWORK_REQUEST_TIMEOUT_MS,
+            "底部播放器封面解码超时。",
+          ).catch(() => false)
+          : false;
+        if (cancelled) return;
+        if (candidate && decoded) {
+          setSource(candidate);
+          playbackLog("info", "mini_artwork=ready");
+          return;
+        }
+        if (serverId && path) invalidateCachedArtwork(serverId, path, 420, 420);
+        candidate = undefined;
+      }
+      if (!cancelled) {
+        setSource(undefined);
+        playbackLog("warn", "mini_artwork=unavailable_after_retry");
+      }
+    };
+    void load();
     return () => {
       cancelled = true;
     };
-  }, [item?.ratingKey, path, resolved, serverId]);
+  }, [artworkIdentity, domRetryCount, item?.imageUrl, path, serverId]);
 
   return (
     <span className="player-artwork" aria-hidden="true">
       {source
-        ? <img src={source} alt="" decoding="async" loading="eager" onError={() => {
-          if (serverId && path && retryCount < 1) {
+        ? <img key={source} src={source} alt="" decoding="async" loading="eager" onError={() => {
+          playbackLog("warn", "mini_artwork=dom_error");
+          if (serverId && path && domRetryCount < 1) {
             invalidateCachedArtwork(serverId, path, 420, 420);
             setSource(undefined);
-            setRetryCount((count) => count + 1);
-            void requestCachedArtwork(serverId, path, 420, 420).then(setSource).catch(() => undefined);
+            setDomRetryCount((count) => count + 1);
           } else {
             setSource(undefined);
           }

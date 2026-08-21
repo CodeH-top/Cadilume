@@ -35,11 +35,15 @@ export function requestCachedArtwork(
   const request = artworkUrl(serverId, path, width, height);
   exactArtworkRequests.set(requestKey, request);
   pathArtworkRequests.set(scopeKey, request);
-  request.then((url) => resolvedArtworkPaths.set(scopeKey, url)).catch(() => undefined);
+  request.then((url) => {
+    if (pathArtworkRequests.get(scopeKey) === request) resolvedArtworkPaths.set(scopeKey, url);
+  }).catch(() => undefined);
   request.catch(() => {
     if (exactArtworkRequests.get(requestKey) === request) exactArtworkRequests.delete(requestKey);
-    if (pathArtworkRequests.get(scopeKey) === request) pathArtworkRequests.delete(scopeKey);
-    resolvedArtworkPaths.delete(scopeKey);
+    if (pathArtworkRequests.get(scopeKey) === request) {
+      pathArtworkRequests.delete(scopeKey);
+      resolvedArtworkPaths.delete(scopeKey);
+    }
   });
   while (exactArtworkRequests.size > MAX_ARTWORK_ENTRIES) {
     const oldest = exactArtworkRequests.keys().next().value;
