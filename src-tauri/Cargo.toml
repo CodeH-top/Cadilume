@@ -1,6 +1,6 @@
 [package]
 name = "cadilume"
-version = "0.4.1"
+version = "0.4.2"
 description = "A lightweight desktop music player for Plex libraries"
 authors = ["hoganchou"]
 edition = "2021"
