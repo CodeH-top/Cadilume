@@ -113,7 +113,7 @@ import { applyThemeMode, readInitialThemeMode } from "./theme";
 import { SharedVolumeControl } from "./VolumeControl";
 import { rasterizeAppearanceSnapshotImages, shouldAnimateAppearanceReveal } from "./appearanceTransition";
 import { useAppUpdater, type AppUpdaterController } from "./useAppUpdater";
-import { clearArtworkTicketCache, getResolvedArtwork, invalidateCachedArtwork, requestCachedArtwork } from "./artworkCache";
+import { clearArtworkTicketCache, getResolvedArtwork, invalidateCachedArtwork, prewarmArtwork, requestCachedArtwork } from "./artworkCache";
 import { playbackLog } from "./playbackLog";
 import {
   ConnectionIndicator,
@@ -875,6 +875,16 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   const deferredQueueOpenTimerRef = useRef<number | undefined>(undefined);
   const preferredPlaybackServerId = initialPlaybackSession?.serverId;
   const player = usePlayer(serverId, quality);
+
+  useEffect(() => {
+    if (!isDesktopRuntime() || !serverId || !player.queue.length) return;
+    let cancelled = false;
+    void prewarmArtwork(serverId, player.queue, STARTUP_ARTWORK_CONCURRENCY, () => !cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [player.queue, serverId]);
+
   const outputDevices = useOutputDevices(player.setOutputSinkId, player.outputSinkId);
   const lyrics = useLyrics(serverId, player.current, player.progress, player.duration);
   const previewLyricsCountParam = import.meta.env.DEV
@@ -1633,25 +1643,24 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
   }), [account, appUpdater, brandPreset, cacheStatus, cacheStatusError, changeBrandPreset, changeCloseBehavior, changeDeviceName, changeQuality, changeServerId, changeSectionKey, clearArtworkDiskCache, clearAudioDiskCache, closeBehavior, connectionAvailable, deletePlaylistCallback, deviceName, initialLibrary, initialSession, initialSectionSnapshotActive, loadPlaylistList, libraryArtists, nativeCacheStatus, notify, onBrandPreset, onThemeMode, openDeviceNameDialog, openPlaylistCreation, openPlaylistPicker, outputDevices, playbackSettingsRequest, playRecommendationItem, playRecommendationPlaylist, playlists, playlistListError, playlistListLoading, playlistMutationRevision, player.prebufferNext, player.setPrebufferNext, quality, refreshCacheStatus, routeAliveRef, sectionKey, selectedSection, selectedServer, serverId, setSidePanel, setNowPlayingOpen, setPlaybackSettingsRequest, signOut, sourcesSyncing, statusIconEnabled, statusIconSaving, syncSources, themeMode, updatePlaylistCallback, resolvedTheme, sourceRevision, bumpPlaylistMutation]);
 
   const libraryContent = useMemo(() => (
-    <ArtworkServerContext.Provider value={serverId}>
-      <MusicShellContext.Provider value={runtime}>
-          <MusicPlayerActionsContext.Provider value={playerActions}>
-            <MusicPlayerStateContext.Provider value={playerState}>
-            <Suspense fallback={<RouteChunkFallback />}>
-              <RouterProvider key={`route-cache-${routeCacheEpoch}`} router={router} />
-            </Suspense>
-            </MusicPlayerStateContext.Provider>
-        </MusicPlayerActionsContext.Provider>
-      </MusicShellContext.Provider>
-    </ArtworkServerContext.Provider>
-  ), [playerActions, playerState, routeCacheEpoch, router, runtime, serverId]);
+    <MusicShellContext.Provider value={runtime}>
+      <MusicPlayerActionsContext.Provider value={playerActions}>
+        <MusicPlayerStateContext.Provider value={playerState}>
+          <Suspense fallback={<RouteChunkFallback />}>
+            <RouterProvider key={`route-cache-${routeCacheEpoch}`} router={router} />
+          </Suspense>
+        </MusicPlayerStateContext.Provider>
+      </MusicPlayerActionsContext.Provider>
+    </MusicShellContext.Provider>
+  ), [playerActions, playerState, routeCacheEpoch, router, runtime]);
 
   return (
-    <div
-      className="app-shell"
-      data-playback-active={player.playing || playbackLoading || player.buffering ? "true" : undefined}
-    >
-      {libraryContent}
+    <ArtworkServerContext.Provider value={serverId}>
+      <div
+        className="app-shell"
+        data-playback-active={player.playing || playbackLoading || player.buffering ? "true" : undefined}
+      >
+        {libraryContent}
 
       {queuePanelMounted && (
         <div className={`queue-panel-layer ${queuePanelOpen ? "is-open" : "is-closing"}`} aria-hidden={!queuePanelOpen || undefined}>
@@ -1808,7 +1817,8 @@ function MusicShell({ initialSession, initialLibrary, themeMode, resolvedTheme, 
       />
 
       {sourcesSyncing && <SourceSyncOverlay />}
-    </div>
+      </div>
+    </ArtworkServerContext.Provider>
   );
 }
 

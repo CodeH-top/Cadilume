@@ -10,6 +10,7 @@ import {
   clearArtworkTicketCache,
   getResolvedArtwork,
   invalidateCachedArtwork,
+  prewarmArtwork,
   requestCachedArtwork,
 } from "./artworkCache";
 
@@ -34,6 +35,25 @@ describe("shared artwork ticket cache", () => {
     expect(artworkUrl).toHaveBeenCalledTimes(1);
     expect(artworkUrl).toHaveBeenCalledWith("server-a", "/thumb/a", 420, 420);
     expect(getResolvedArtwork("server-a", "/thumb/a")).toBe("http://127.0.0.1:4000/artwork/ticket");
+  });
+
+  it("prewarms every distinct restored-queue artwork path with bounded workers", async () => {
+    artworkUrl.mockImplementation(async (_serverId, path, width, height) => (
+      `http://127.0.0.1:4000/artwork/${path.slice(1)}-${width}x${height}`
+    ));
+
+    await prewarmArtwork("server-a", [
+      { thumb: "/thumb/current" },
+      { thumb: "/thumb/next" },
+      { thumb: "/thumb/current", art: "/art/ignored" },
+      { composite: "/composite/third" },
+    ], 2);
+
+    expect(artworkUrl).toHaveBeenCalledTimes(3);
+    expect(artworkUrl).toHaveBeenCalledWith("server-a", "/thumb/current", 420, 420);
+    expect(artworkUrl).toHaveBeenCalledWith("server-a", "/thumb/next", 420, 420);
+    expect(artworkUrl).toHaveBeenCalledWith("server-a", "/composite/third", 420, 420);
+    expect(getResolvedArtwork("server-a", "/thumb/next")).toContain("/artwork/thumb/next-420x420");
   });
 
   it("upgrades a path owner when a larger square is actually required", async () => {
@@ -116,14 +136,14 @@ describe("shared artwork ticket cache", () => {
       `http://127.0.0.1:4000/artwork/${path.split("/").pop()}`
     ));
 
-    await Promise.all(Array.from({ length: 241 }, (_, index) => (
+    await Promise.all(Array.from({ length: 641 }, (_, index) => (
       requestCachedArtwork("server-a", `/thumb/${index}`, 96, 96)
     )));
 
     expect(getResolvedArtwork("server-a", "/thumb/0")).toBeUndefined();
-    expect(getResolvedArtwork("server-a", "/thumb/240"))
-      .toBe("http://127.0.0.1:4000/artwork/240");
+    expect(getResolvedArtwork("server-a", "/thumb/640"))
+      .toBe("http://127.0.0.1:4000/artwork/640");
     await requestCachedArtwork("server-a", "/thumb/0", 96, 96);
-    expect(artworkUrl).toHaveBeenCalledTimes(242);
+    expect(artworkUrl).toHaveBeenCalledTimes(642);
   });
 });

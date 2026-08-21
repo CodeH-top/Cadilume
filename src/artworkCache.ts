@@ -8,9 +8,17 @@ interface ArtworkRequestRecord {
 }
 
 const artworkRequests = new Map<string, ArtworkRequestRecord>();
-const MAX_ARTWORK_ENTRIES = 240;
+// Keep the full persisted playback queue (up to 500 tracks) plus the small
+// startup artwork set resident so queue prewarming does not evict itself.
+const MAX_ARTWORK_ENTRIES = 640;
 const CANONICAL_SQUARE_SIZE = 420;
 const SHARED_SQUARE_MAX_SIZE = 512;
+
+interface ArtworkPathItem {
+  thumb?: string;
+  art?: string;
+  composite?: string;
+}
 
 function greatestCommonDivisor(left: number, right: number): number {
   let a = Math.max(1, Math.round(Math.abs(left)));
@@ -80,6 +88,37 @@ export function requestCachedArtwork(
     if (artworkRequests.get(key) === record) artworkRequests.delete(key);
   });
   return promise;
+}
+
+/**
+ * Warm every distinct artwork path in a restored queue without blocking the
+ * startup frame. The caller can stop scheduling new requests when the queue
+ * owner changes; in-flight requests remain shared by the normal ticket cache.
+ */
+export async function prewarmArtwork(
+  serverId: string,
+  items: readonly ArtworkPathItem[],
+  concurrency = 4,
+  shouldContinue: () => boolean = () => true,
+): Promise<void> {
+  const paths = Array.from(new Set(
+    items
+      .map((item) => item.thumb || item.composite || item.art)
+      .filter((path): path is string => Boolean(path)),
+  ));
+  if (!paths.length || !shouldContinue()) return;
+
+  let cursor = 0;
+  const worker = async () => {
+    while (shouldContinue()) {
+      const path = paths[cursor++];
+      if (!path) return;
+      await requestCachedArtwork(serverId, path, CANONICAL_SQUARE_SIZE, CANONICAL_SQUARE_SIZE)
+        .catch(() => undefined);
+    }
+  };
+  const workerCount = Math.min(paths.length, Math.max(1, Math.floor(concurrency)));
+  await Promise.all(Array.from({ length: workerCount }, worker));
 }
 
 export function getResolvedArtwork(
