@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, checkAppUpdate, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, installAppUpdate, movePlaylistItem, nativeAudioClearQueue, nativeAudioSetArtwork, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setAutoUpdateEnabled, setBrandPreset, setCloseBehavior, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
+import { addTrackToPlaylist, addTracksToPlaylist, artworkUrl, canWritePlaylist, checkAppUpdate, createPin, createPlaylist, deletePlaylist, getArtistTracksPage, getLibraryItems, getLibraryMetadata, getPlaylistItems, getPlaylists, getRecommendationHubs, getTrackMetadata, getTracksPage, installAppUpdate, movePlaylistItem, nativeAudioClearQueue, nativeAudioSetArtwork, nativeAudioWarmup, normalizePlexContributors, normalizePlexTrackArtists, pollPin, removeTracksFromPlaylist, setAutoUpdateEnabled, setBrandPreset, setCloseBehavior, setDeviceName, setStatusIconEnabled, updatePlaylist } from "./api";
 import { formatDuration, trackAlbum, trackArtist, type PlexItem } from "./types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -924,6 +924,15 @@ describe("artworkUrl dimensions and runtime boundary", () => {
 });
 
 describe("native playback queue boundary", () => {
+  it("prewarms the native output engine before the main UI is revealed", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await nativeAudioWarmup();
+
+    expect(invokeMock).toHaveBeenCalledOnce();
+    expect(invokeMock).toHaveBeenCalledWith("native_audio_warmup");
+  });
+
   it("clears the playback queue without touching the audio cache command", async () => {
     invokeMock.mockResolvedValueOnce(undefined);
 

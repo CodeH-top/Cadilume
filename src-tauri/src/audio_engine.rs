@@ -35,6 +35,10 @@ const DECODE_BUFFER_SECONDS: usize = 4;
 /// rapid pause/resume oscillation on an unstable connection.
 const DECODE_RESUME_BUFFER_MS: usize = 250;
 const DECODE_INITIAL_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const MACOS_OUTPUT_OPEN_TIMEOUT: Duration = Duration::from_millis(750);
+#[cfg(target_os = "macos")]
+const MACOS_FALLBACK_OPEN_TIMEOUT: Duration = Duration::from_millis(1_500);
 /// Segment-backed containers may need more ranges while probing metadata.
 /// Bound the probe + first-PCM preparation so the frontend can try a compatible
 /// PMS quality when the original source cannot be prepared promptly.
@@ -255,6 +259,12 @@ impl DecodeBufferState {
         let buffered = self.buffered_chunks.load(Ordering::SeqCst);
         debug_assert!(buffered <= self.buffer_capacity);
         buffered >= self.resume_chunks || self.finished.load(Ordering::SeqCst)
+    }
+
+    fn ready_for_initial_playback(&self) -> bool {
+        let buffered = self.buffered_chunks.load(Ordering::SeqCst);
+        debug_assert!(buffered <= self.buffer_capacity);
+        buffered >= self.buffer_capacity || self.finished.load(Ordering::SeqCst)
     }
 
     fn reader_failure(&self) -> Option<String> {
@@ -1334,6 +1344,13 @@ impl NativeAudioEngineSlot {
             .and_then(|guard| guard.as_ref().map(Arc::clone))
     }
 
+    fn try_current(&self) -> Option<Arc<NativeAudioEngine>> {
+        self.inner
+            .try_lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(Arc::clone))
+    }
+
     fn peek_next(&self, natural_ended: bool) -> Result<Option<usize>, String> {
         let Some(engine) = self.current() else {
             return Ok(None);
@@ -1764,11 +1781,21 @@ fn output_device_label(device: &cpal::Device) -> String {
 
 fn is_usable_output_device(device: &cpal::Device) -> bool {
     use cpal::traits::DeviceTrait;
-    !device
-        .description()
-        .ok()
-        .and_then(|description| description.driver().map(str::to_owned))
+    let Ok(description) = device.description() else {
+        return false;
+    };
+    if description
+        .driver()
         .is_some_and(|driver| driver.eq_ignore_ascii_case("null"))
+        || matches!(description.interface_type(), cpal::InterfaceType::Virtual)
+        || matches!(description.device_type(), cpal::DeviceType::Virtual)
+    {
+        return false;
+    }
+    let label = description.name().to_ascii_lowercase();
+    !["blackhole", "virtual", "loopback"]
+        .iter()
+        .any(|marker| label.contains(marker))
 }
 
 fn current_default_output_device_id() -> Option<String> {
@@ -1875,6 +1902,274 @@ where
         .open_sink_or_fallback()
 }
 
+fn open_device_sink_once<E>(
+    device: cpal::Device,
+    error_callback: E,
+) -> Result<MixerDeviceSink, rodio::DeviceSinkError>
+where
+    E: FnMut(cpal::StreamError) + Send + Clone + 'static,
+{
+    DeviceSinkBuilder::from_device(device)?
+        .with_buffer_size(cpal::BufferSize::Default)
+        .with_error_callback(error_callback)
+        .open_stream()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_default_system_output_uid() -> Option<String> {
+    use objc2_core_audio::{
+        kAudioDevicePropertyDeviceUID, kAudioHardwarePropertyDefaultSystemOutputDevice,
+        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+        AudioDeviceID, AudioObjectGetPropertyData, AudioObjectPropertyAddress,
+    };
+    use objc2_core_foundation::{CFRetained, CFString};
+    use std::mem::size_of;
+    use std::ptr::{null, null_mut, NonNull};
+
+    let mut address = AudioObjectPropertyAddress {
+        mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut device_id: AudioDeviceID = 0;
+    let mut data_size = size_of::<AudioDeviceID>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            kAudioObjectSystemObject as u32,
+            NonNull::from(&address),
+            0,
+            null(),
+            NonNull::from(&mut data_size),
+            NonNull::from(&mut device_id).cast(),
+        )
+    };
+    if status != 0 || device_id == 0 {
+        return None;
+    }
+
+    address.mSelector = kAudioDevicePropertyDeviceUID;
+    let mut uid: *mut CFString = null_mut();
+    let mut data_size = size_of::<*mut CFString>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            NonNull::from(&address),
+            0,
+            null(),
+            NonNull::from(&mut data_size),
+            NonNull::from(&mut uid).cast(),
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    Some(unsafe { CFRetained::from_raw(NonNull::new(uid)?) }.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_should_skip_display_default() -> bool {
+    use objc2_core_audio::{
+        kAudioDevicePropertyTransportType, kAudioDeviceTransportTypeDisplayPort,
+        kAudioDeviceTransportTypeHDMI, kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioHardwarePropertyDefaultSystemOutputDevice, kAudioObjectPropertyElementMain,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, AudioDeviceID,
+        AudioObjectGetPropertyData, AudioObjectPropertyAddress,
+    };
+    use std::mem::size_of;
+    use std::ptr::{null, NonNull};
+
+    let read_device = |selector| {
+        let address = AudioObjectPropertyAddress {
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        let mut device_id: AudioDeviceID = 0;
+        let mut data_size = size_of::<AudioDeviceID>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                kAudioObjectSystemObject as u32,
+                NonNull::from(&address),
+                0,
+                null(),
+                NonNull::from(&mut data_size),
+                NonNull::from(&mut device_id).cast(),
+            )
+        };
+        (status == 0 && device_id != 0).then_some(device_id)
+    };
+    let Some(default_device) = read_device(kAudioHardwarePropertyDefaultOutputDevice) else {
+        return false;
+    };
+    let Some(system_device) = read_device(kAudioHardwarePropertyDefaultSystemOutputDevice) else {
+        return false;
+    };
+    if default_device == system_device {
+        return false;
+    }
+
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyTransportType,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut transport = 0u32;
+    let mut data_size = size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            default_device,
+            NonNull::from(&address),
+            0,
+            null(),
+            NonNull::from(&mut data_size),
+            NonNull::from(&mut transport).cast(),
+        )
+    };
+    status == 0
+        && (transport == kAudioDeviceTransportTypeDisplayPort
+            || transport == kAudioDeviceTransportTypeHDMI)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_should_skip_display_default() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn open_device_sink_bounded<E>(
+    device: cpal::Device,
+    mut error_callback: E,
+    exhaustive: bool,
+) -> Result<MixerDeviceSink, String>
+where
+    E: FnMut(cpal::StreamError) + Send + Clone + 'static,
+{
+    let selected = Arc::new(AtomicBool::new(false));
+    let selected_for_callback = Arc::clone(&selected);
+    let (sender, receiver) = sync_channel(1);
+    std::thread::Builder::new()
+        .name("cadilume-output-open".to_string())
+        .spawn(move || {
+            let guarded_callback = move |error| {
+                if selected_for_callback.load(Ordering::SeqCst) {
+                    error_callback(error);
+                }
+            };
+            let result = (if exhaustive {
+                open_device_sink(device, guarded_callback)
+            } else {
+                open_device_sink_once(device, guarded_callback)
+            })
+            .map(|mut sink| {
+                sink.log_on_drop(false);
+                sink
+            })
+            .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("无法启动音频设备打开线程: {error}"))?;
+    match receiver.recv_timeout(MACOS_OUTPUT_OPEN_TIMEOUT) {
+        Ok(Ok(sink)) => {
+            selected.store(true, Ordering::SeqCst);
+            Ok(sink)
+        }
+        Ok(Err(error)) => Err(error),
+        Err(RecvTimeoutError::Timeout) => Err(format!(
+            "打开设备超过 {}ms",
+            MACOS_OUTPUT_OPEN_TIMEOUT.as_millis()
+        )),
+        Err(RecvTimeoutError::Disconnected) => Err("音频设备打开线程提前退出".to_string()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_fallback_output_sink<E>(
+    devices: Vec<cpal::Device>,
+    error_callback: E,
+) -> Result<(MixerDeviceSink, String), String>
+where
+    E: FnMut(cpal::StreamError) + Send + Clone + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut pending = 0usize;
+    for device in devices {
+        if !is_usable_output_device(&device) {
+            continue;
+        }
+        let label = output_device_label(&device);
+        let selected = Arc::new(AtomicBool::new(false));
+        let selected_for_callback = Arc::clone(&selected);
+        let mut candidate_error_callback = error_callback.clone();
+        let candidate_sender = sender.clone();
+        let candidate_label = label.clone();
+        if std::thread::Builder::new()
+            .name("cadilume-output-fallback".to_string())
+            .spawn(move || {
+                let guarded_callback = move |error| {
+                    if selected_for_callback.load(Ordering::SeqCst) {
+                        candidate_error_callback(error);
+                    }
+                };
+                let result = open_device_sink(device, guarded_callback)
+                    .map(|mut sink| {
+                        sink.log_on_drop(false);
+                        sink
+                    })
+                    .map_err(|error| error.to_string());
+                let _ = candidate_sender.send((candidate_label, selected, result));
+            })
+            .is_ok()
+        {
+            pending += 1;
+        }
+    }
+    drop(sender);
+
+    let deadline = std::time::Instant::now() + MACOS_FALLBACK_OPEN_TIMEOUT;
+    while pending > 0 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok((label, selected, Ok(sink))) => {
+                selected.store(true, Ordering::SeqCst);
+                return Ok((sink, label));
+            }
+            Ok((label, _, Err(error))) => {
+                pending -= 1;
+                crate::diagnostics::record(
+                    "音频",
+                    format_args!("output_device_fallback_failed label={label} error={error}"),
+                );
+            }
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    Err(format!(
+        "没有候选设备在 {}ms 内完成打开",
+        MACOS_FALLBACK_OPEN_TIMEOUT.as_millis()
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_device_sink_bounded<E>(
+    device: cpal::Device,
+    error_callback: E,
+    exhaustive: bool,
+) -> Result<MixerDeviceSink, String>
+where
+    E: FnMut(cpal::StreamError) + Send + Clone + 'static,
+{
+    (if exhaustive {
+        open_device_sink(device, error_callback)
+    } else {
+        open_device_sink_once(device, error_callback)
+    })
+    .map_err(|error| error.to_string())
+}
+
 fn open_output_sink<E>(device_id: &str, error_callback: E) -> anyhow::Result<MixerDeviceSink>
 where
     E: FnMut(cpal::StreamError) + Send + Clone + 'static,
@@ -1899,7 +2194,7 @@ where
             })
             .ok_or_else(|| anyhow::anyhow!("找不到所选输出设备"))?;
         let label = output_device_label(&device);
-        let sink = open_device_sink(device, error_callback)
+        let sink = open_device_sink_bounded(device, error_callback, true)
             .map_err(|error| anyhow::anyhow!("打开所选输出设备失败: {error}"))?;
         crate::diagnostics::record("音频", format_args!("output_device=selected label={label}"));
         return Ok(sink);
@@ -1910,10 +2205,37 @@ where
         .as_ref()
         .and_then(|device| device.id().ok())
         .map(|id| id.to_string());
+
+    // Snapshot every fallback candidate before attempting to open the default
+    // route. A timed-out CoreAudio open can keep the HAL command gate busy long
+    // after our caller moves on; enumerating devices after that timeout can
+    // otherwise block the warmup worker for tens of seconds.
+    #[cfg(target_os = "macos")]
+    let (system_id, mut fallback_devices) = {
+        let system_uid = macos_default_system_output_uid();
+        let devices = host
+            .output_devices()
+            .map_err(|error| anyhow::anyhow!("枚举音频输出设备失败: {error}"))?
+            .collect::<Vec<_>>();
+        let system_id = system_uid.and_then(|uid| {
+            devices.iter().find_map(|device| {
+                let id = device.id().ok()?;
+                (id.1 == uid).then(|| id.to_string())
+            })
+        });
+        (system_id, devices)
+    };
+
+    let skip_display_default = macos_should_skip_display_default();
     let mut first_error = None;
-    if let Some(device) = default_device {
+    if skip_display_default {
+        crate::diagnostics::record(
+            "音频",
+            format_args!("output_device_default_skipped reason=display-route"),
+        );
+    } else if let Some(device) = default_device {
         let label = output_device_label(&device);
-        match open_device_sink(device, error_callback.clone()) {
+        match open_device_sink_bounded(device, error_callback.clone(), false) {
             Ok(sink) => {
                 crate::diagnostics::record(
                     "音频",
@@ -1931,40 +2253,79 @@ where
         }
     }
 
-    let devices = host
-        .output_devices()
-        .map_err(|error| anyhow::anyhow!("枚举音频输出设备失败: {error}"))?;
-    for device in devices {
-        let id = device.id().ok().map(|id| id.to_string());
-        if id.is_some() && id == default_id {
-            continue;
+    #[cfg(target_os = "macos")]
+    {
+        let mut candidates = Vec::new();
+        if system_id.is_some() && system_id != default_id {
+            if let Some(position) = fallback_devices
+                .iter()
+                .position(|device| device.id().ok().map(|id| id.to_string()) == system_id)
+            {
+                let device = fallback_devices.remove(position);
+                candidates.push(device);
+            }
         }
-        if !is_usable_output_device(&device) {
-            continue;
+        for device in fallback_devices {
+            let id = device.id().ok().map(|id| id.to_string());
+            if id.is_some() && (id == default_id || id == system_id) {
+                continue;
+            }
+            candidates.push(device);
         }
-        let label = output_device_label(&device);
-        match open_device_sink(device, error_callback.clone()) {
-            Ok(sink) => {
+        match open_fallback_output_sink(candidates, error_callback) {
+            Ok((sink, label)) => {
                 crate::diagnostics::record(
                     "音频",
                     format_args!("output_device=fallback label={label}"),
                 );
                 return Ok(sink);
             }
-            Err(error) => {
-                crate::diagnostics::record(
-                    "音频",
-                    format_args!("output_device_fallback_failed label={label} error={error}"),
-                );
-                first_error.get_or_insert_with(|| error.to_string());
-            }
-        }
+            Err(error) => first_error.get_or_insert(error),
+        };
+        return Err(anyhow::anyhow!(
+            "没有可打开的音频输出设备: {}",
+            first_error.unwrap_or_else(|| "系统未报告可用输出设备".to_string())
+        ));
     }
 
-    Err(anyhow::anyhow!(
-        "没有可打开的音频输出设备: {}",
-        first_error.unwrap_or_else(|| "系统未报告可用输出设备".to_string())
-    ))
+    #[cfg(not(target_os = "macos"))]
+    {
+        let system_id: Option<String> = None;
+        let devices = host
+            .output_devices()
+            .map_err(|error| anyhow::anyhow!("枚举音频输出设备失败: {error}"))?;
+        for device in devices {
+            let id = device.id().ok().map(|id| id.to_string());
+            if id.is_some() && (id == default_id || id == system_id) {
+                continue;
+            }
+            if !is_usable_output_device(&device) {
+                continue;
+            }
+            let label = output_device_label(&device);
+            match open_device_sink_bounded(device, error_callback.clone(), true) {
+                Ok(sink) => {
+                    crate::diagnostics::record(
+                        "音频",
+                        format_args!("output_device=fallback label={label}"),
+                    );
+                    return Ok(sink);
+                }
+                Err(error) => {
+                    crate::diagnostics::record(
+                        "音频",
+                        format_args!("output_device_fallback_failed label={label} error={error}"),
+                    );
+                    first_error.get_or_insert_with(|| error.to_string());
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "没有可打开的音频输出设备: {}",
+            first_error.unwrap_or_else(|| "系统未报告可用输出设备".to_string())
+        ))
+    }
 }
 
 impl NativeAudioEngine {
@@ -2588,6 +2949,44 @@ impl NativeAudioEngine {
         .await
     }
 
+    async fn wait_for_decode_buffer_ready(
+        &self,
+        state: &Arc<DecodeBufferState>,
+        generation: u64,
+        deadline: tokio::time::Instant,
+        context: &str,
+    ) -> Result<(), String> {
+        while !state.ready_for_initial_playback()
+            && !state.worker_exited.load(Ordering::SeqCst)
+            && self.playback_is_current(generation)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !self.playback_is_current(generation) {
+            state.cancel_worker();
+            return Err("当前播放已切换".to_string());
+        }
+        if let Some(failure) = state.reader_failure() {
+            state.cancel_worker();
+            return Err(format!("{context}分段媒体读取失败: {failure}"));
+        }
+        if !state.ready_for_initial_playback() {
+            state.cancel_worker();
+            return Err(format!("{context}未能形成足够的解码缓冲"));
+        }
+        crate::diagnostics::record(
+            "音频",
+            format_args!(
+                "decoder_buffer_ready=true context={} buffered_chunks={} required_chunks={}",
+                context,
+                state.buffered_chunks.load(Ordering::SeqCst),
+                state.buffer_capacity,
+            ),
+        );
+        Ok(())
+    }
+
     async fn load_cached_with_prepare_timeout(
         &self,
         source: &str,
@@ -2634,6 +3033,7 @@ impl NativeAudioEngine {
         let target_channels = self.output_channels;
         let target_sample_rate = self.output_sample_rate;
         let health = Arc::clone(&self.health);
+        let prepare_deadline = tokio::time::Instant::now() + prepare_timeout;
         let mut prepare_task = tauri::async_runtime::spawn_blocking(move || {
             prepare_segment_decoder(
                 reader,
@@ -2671,7 +3071,16 @@ impl NativeAudioEngine {
                 ));
             }
         };
+        let buffer_result = self
+            .wait_for_decode_buffer_ready(
+                &prepared.decode_state,
+                generation,
+                prepare_deadline,
+                "当前曲目",
+            )
+            .await;
         self.clear_segment_prepare(&control);
+        buffer_result?;
         let total = prepared.total_seconds;
         let decoder = prepared.decoder;
         let decode_state = prepared.decode_state;
@@ -2814,28 +3223,16 @@ impl NativeAudioEngine {
                         return Err("预排分段解码准备超时".to_string());
                     }
                 };
-            let deadline = tokio::time::Instant::now() + SEGMENT_DECODE_PREPARE_TIMEOUT;
-            while !prepared.decode_state.ready_to_resume()
-                && !prepared.decode_state.finished.load(Ordering::SeqCst)
-                && !prepared.decode_state.worker_exited.load(Ordering::SeqCst)
-                && self.playback_is_current(generation)
-                && tokio::time::Instant::now() < deadline
-            {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
+            let buffer_result = self
+                .wait_for_decode_buffer_ready(
+                    &prepared.decode_state,
+                    generation,
+                    tokio::time::Instant::now() + SEGMENT_DECODE_PREPARE_TIMEOUT,
+                    "下一首",
+                )
+                .await;
             self.clear_segment_prepare(&control);
-            if !self.playback_is_current(generation) {
-                prepared.decode_state.cancel_worker();
-                return Err("当前播放已切换".to_string());
-            }
-            if let Some(failure) = prepared.decode_state.reader_failure() {
-                prepared.decode_state.cancel_worker();
-                return Err(format!("下一首分段媒体读取失败: {failure}"));
-            }
-            if !prepared.decode_state.ready_to_resume() {
-                prepared.decode_state.cancel_worker();
-                return Err("下一首未能形成足够的解码缓冲".to_string());
-            }
+            buffer_result?;
             (
                 prepared.decoder,
                 prepared.decode_state,
@@ -3832,6 +4229,32 @@ pub async fn native_audio_load(
 }
 
 #[tauri::command]
+pub async fn native_audio_warmup(
+    app: AppHandle,
+    state: tauri::State<'_, NativeAudioEngineSlot>,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let _operation = state.output_switch_lock.lock().await;
+    if state.current().is_none() {
+        let worker_app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = worker_app.state::<NativeAudioEngineSlot>();
+            state.ensure(&worker_app).map(|_| ())
+        })
+        .await
+        .map_err(|error| format!("播放器预热任务失败: {error}"))??;
+    }
+    crate::diagnostics::record(
+        "启动",
+        format_args!(
+            "native_audio=ready elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    );
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn native_audio_queue_next_source(
     app: AppHandle,
     audio_state: tauri::State<'_, NativeAudioEngineSlot>,
@@ -3909,7 +4332,10 @@ pub async fn native_audio_stop(
 #[tauri::command]
 pub fn native_audio_heartbeat(app: AppHandle, state: tauri::State<'_, NativeAudioEngineSlot>) {
     let _ = app;
-    if let Some(engine) = state.current() {
+    // This command is emitted once per second from the visible WebView and can
+    // execute on the AppKit message path. Never wait for a background warmup
+    // or device replacement that currently owns the engine slot mutex.
+    if let Some(engine) = state.try_current() {
         if let Ok(mut heartbeat) = engine.last_heartbeat.lock() {
             *heartbeat = Some(std::time::Instant::now());
         }
@@ -4563,6 +4989,64 @@ mod tests {
         assert!(state.worker_exited.load(Ordering::SeqCst));
     }
 
+    #[tokio::test]
+    async fn current_source_waits_for_full_prefill_before_append() {
+        let cache_root = unique_temp_path("initial-pcm-watermark-cache");
+        let engine = NativeAudioEngine::new(cache_root.clone()).unwrap();
+        let state = Arc::new(DecodeBufferState::new(
+            std::num::NonZeroU32::new(48_000).unwrap(),
+            32,
+            None,
+            Arc::new(NativeAudioHealth::default()),
+        ));
+        let generation = engine.playback_generation.load(Ordering::SeqCst);
+
+        let early = tokio::time::timeout(
+            Duration::from_millis(60),
+            engine.wait_for_decode_buffer_ready(
+                &state,
+                generation,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                "当前曲目",
+            ),
+        )
+        .await;
+        assert!(early.is_err(), "单个短 PCM chunk 不能提前放行当前曲目");
+
+        state
+            .buffered_chunks
+            .store(state.resume_chunks, Ordering::SeqCst);
+        let resume_only = tokio::time::timeout(
+            Duration::from_millis(60),
+            engine.wait_for_decode_buffer_ready(
+                &state,
+                generation,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                "当前曲目",
+            ),
+        )
+        .await;
+        assert!(
+            resume_only.is_err(),
+            "运行中恢复水位不能作为首次播放预填充水位"
+        );
+
+        state
+            .buffered_chunks
+            .store(state.buffer_capacity, Ordering::SeqCst);
+        engine
+            .wait_for_decode_buffer_ready(
+                &state,
+                generation,
+                tokio::time::Instant::now() + Duration::from_millis(100),
+                "当前曲目",
+            )
+            .await
+            .expect("达到恢复水位后应允许 append");
+
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
     #[test]
     fn decoder_worker_reuses_the_bounded_chunk_pool_across_seek_storms() {
         let (mut source, state) = spawn_threaded_decoder(SeekableLowRateSource).unwrap();
@@ -5167,6 +5651,22 @@ mod tests {
         assert!(
             slot.current().is_none(),
             "只读预览队列不能隐式创建 CoreAudio 输出引擎"
+        );
+
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn heartbeat_engine_lookup_never_waits_for_warmup_lock() {
+        let cache_root = unique_temp_path("warmup-heartbeat-lock-cache");
+        let slot = NativeAudioEngineSlot::new(cache_root.clone());
+        let _warmup_guard = slot.inner.lock().unwrap();
+
+        let started = std::time::Instant::now();
+        assert!(slot.try_current().is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(20),
+            "可见 WebView 心跳不能等待播放器初始化锁"
         );
 
         let _ = std::fs::remove_dir_all(cache_root);

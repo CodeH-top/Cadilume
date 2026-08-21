@@ -106,6 +106,7 @@ pub fn run() {
             catalog_cache::clear_initial_library_cache,
             plex::report_timeline,
             plex::scrobble,
+            audio_engine::native_audio_warmup,
             audio_engine::native_audio_load,
             audio_engine::native_audio_queue_next_source,
             audio_engine::native_audio_play,

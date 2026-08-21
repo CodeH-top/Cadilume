@@ -852,6 +852,11 @@ export interface NativeNowPlayingMetadata {
   artworkUrl?: string;
 }
 
+export async function nativeAudioWarmup(): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await invoke("native_audio_warmup");
+}
+
 export async function nativeAudioLoad(
   source: string,
   cacheKey?: string,

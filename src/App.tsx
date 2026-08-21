@@ -58,6 +58,7 @@ import {
   logout,
   markMainUiReady,
   nativeAudioCacheStatus,
+  nativeAudioWarmup,
   refreshAccount,
   setCloseBehavior as saveCloseBehavior,
   setStatusIconEnabled as saveStatusIconEnabled,
@@ -470,7 +471,12 @@ function MainApplication({
         return;
       }
       setSession(nextSession);
-      setStartupStage("正在加载服务器与音乐资料库");
+      setStartupStage("正在初始化播放器与音乐资料库");
+      const nativeAudioReady = withStartupTimeout(
+        () => nativeAudioWarmup(),
+        15_000,
+        "播放器初始化超时，请检查系统音频输出设备。",
+      );
       const refreshedAccount = withStartupTimeout(
         () => refreshAccount(),
         8_000,
@@ -486,11 +492,12 @@ function MainApplication({
         "读取本地资料缓存超时。",
       ).catch(() => undefined);
       if (cachedLibrary && hasUsableInitialLibrary(cachedLibrary)) {
-        setStartupStage("正在准备首屏封面缓存");
+        setStartupStage("正在准备首屏封面与播放器");
         const [preparedCachedLibrary, account] = await Promise.all([
           prepareInitialLibraryArtwork(cachedLibrary, restoredTrack),
           refreshedAccount,
           loadHomeRouteModule(),
+          nativeAudioReady,
         ]);
         if (startupRequestRef.current !== startupRequestId) return;
         if (account && accountRequestId === accountRefreshRequestRef.current) {
@@ -558,11 +565,12 @@ function MainApplication({
         if (!hasUsableInitialLibrary(nextLibrary)) {
           throw new Error("当前账号没有可访问的 Plex 音乐资料库。");
         }
-        setStartupStage("正在准备首页与首屏封面缓存");
+        setStartupStage("正在准备首页、封面与播放器");
         const [preparedLibrary, account] = await Promise.all([
           prepareInitialLibraryArtwork(nextLibrary, restoredTrack),
           refreshedAccount,
           loadHomeRouteModule(),
+          nativeAudioReady,
         ]);
         if (startupRequestRef.current !== startupRequestId) return;
         if (account && accountRequestId === accountRefreshRequestRef.current) {
