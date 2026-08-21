@@ -1091,12 +1091,24 @@ export async function getLyrics(serverId: string, ratingKey: string): Promise<Pl
   return invoke("lyrics", { serverId, ratingKey });
 }
 
-export async function artworkUrl(serverId: string, path: string, width: number, height = width): Promise<string> {
+export async function artworkUrl(
+  serverId: string,
+  path: string,
+  width: number,
+  height = width,
+  cacheIdentity?: string,
+): Promise<string> {
   if (!isDesktopRuntime()) return path;
   return new Promise<string>((resolve, reject) => {
     artworkQueue.push(() => {
       let timeoutHandle: ReturnType<typeof globalThis.setTimeout> | undefined;
-      const request = invoke<string>("artwork_url", { serverId, path, width, height });
+      const request = invoke<string>("artwork_url", {
+        serverId,
+        path,
+        width,
+        height,
+        ...(cacheIdentity ? { cacheIdentity } : {}),
+      });
       const timeout = new Promise<never>((_, timeoutReject) => {
         timeoutHandle = globalThis.setTimeout(
           () => timeoutReject(new Error("封面请求超时，请稍后重试。")),

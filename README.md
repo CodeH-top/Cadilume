@@ -60,7 +60,7 @@ After connecting to a Plex Media Server that you own or are authorized to share,
 - macOS Now Playing / Remote Commands and Windows system media control integration.
 - Light and dark themes with Amber Gold, Rainforest Green, and Ocean Blue visual styles.
 - In-app output-device selection on macOS and Windows, with automatic system-default recovery.
-- Artwork caching, a fixed 1 GiB audio cache, and next-track prebuffering, with separate cache status and clear actions in Settings.
+- Album-deduplicated artwork caching capped by total size at 512 MiB without a file-count limit, a fixed 1 GiB audio cache, and next-track prebuffering, with separate cache status and clear actions in Settings.
 - Release builds can check GitHub Releases from Settings, download a signed update, and restart into the new version. Automatic checks are configurable and disabled in development builds.
 
 ### Account and privacy

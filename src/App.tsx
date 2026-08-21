@@ -113,7 +113,7 @@ import { applyThemeMode, readInitialThemeMode } from "./theme";
 import { SharedVolumeControl } from "./VolumeControl";
 import { rasterizeAppearanceSnapshotImages, shouldAnimateAppearanceReveal } from "./appearanceTransition";
 import { useAppUpdater, type AppUpdaterController } from "./useAppUpdater";
-import { clearArtworkTicketCache, getResolvedArtwork, invalidateCachedArtwork, prewarmArtwork, requestCachedArtwork } from "./artworkCache";
+import { artworkCacheIdentity, clearArtworkTicketCache, getResolvedArtwork, invalidateCachedArtwork, prewarmArtwork, requestCachedArtwork } from "./artworkCache";
 import { playbackLog } from "./playbackLog";
 import {
   ConnectionIndicator,
@@ -243,7 +243,13 @@ async function prepareInitialLibraryArtwork(
           ? item.imageUrl
           : undefined;
         const url = trustedImageUrl || await withStartupTimeout(
-          () => requestCachedArtwork(data.serverId as string, path, 420, 420),
+          () => requestCachedArtwork(
+            data.serverId as string,
+            path,
+            420,
+            420,
+            artworkCacheIdentity(item),
+          ),
           remaining,
           "首屏封面缓存准备超时。",
         );
@@ -2084,9 +2090,9 @@ function RouteKeepAliveHost({ location, aliveRef }: { location: ReturnType<typeo
     <div className="route-cache-host">
     <KeepAlive
       activeCacheKey={activeCacheKey}
-      // Keep history navigation fast without retaining an unbounded number
-      // of DOM subtrees that would amplify accidental context updates.
-      max={8}
+      // Every History entry retains its own complete page instance until the
+      // account/server/library context is explicitly reset.
+      max={Infinity}
       maxAliveTime={0}
       transition={false}
       enableActivity={false}
@@ -2902,6 +2908,7 @@ function LoginScreen({ brandPreset, clientIdentifier, onAuthenticated }: { brand
 interface ArtworkItem {
   ratingKey: string;
   title: string;
+  parentRatingKey?: string;
   thumb?: string;
   art?: string;
   composite?: string;
@@ -2921,6 +2928,7 @@ export function Artwork({ item, size, className = "", preferArt = false, stableT
   const path = preferArt
     ? item?.art || item?.thumb || item?.composite
     : item?.thumb || item?.composite || item?.art;
+  const cacheIdentity = artworkCacheIdentity(item);
   const dimensions = size === "small" || size === "player"
     ? { width: 96, height: 96 }
     : size === "hero"
@@ -2931,10 +2939,10 @@ export function Artwork({ item, size, className = "", preferArt = false, stableT
           ? { width: 640, height: 640 }
           : { width: 420, height: 420 };
   const artworkRequestKey = serverId && path
-    ? `${serverId}:${dimensions.width}x${dimensions.height}:${path}`
+    ? `${serverId}:${dimensions.width}x${dimensions.height}:${cacheIdentity || path}`
     : undefined;
   const resolvedStartupSource = item?.imageUrl
-    || (serverId && path ? getResolvedArtwork(serverId, path) : undefined);
+    || (serverId && path ? getResolvedArtwork(serverId, path, 512, 512, cacheIdentity) : undefined);
   const [visible, setVisible] = useState(!isDesktopRuntime() || Boolean(resolvedStartupSource));
   const [source, setSource] = useState(resolvedStartupSource);
   const [displayedSource, setDisplayedSource] = useState(resolvedStartupSource);
@@ -2943,12 +2951,12 @@ export function Artwork({ item, size, className = "", preferArt = false, stableT
 
   useEffect(() => {
     const nextSource = item?.imageUrl
-      || (serverId && path ? getResolvedArtwork(serverId, path) : undefined);
+      || (serverId && path ? getResolvedArtwork(serverId, path, 512, 512, cacheIdentity) : undefined);
     setSource(nextSource);
     if (!stableTransition || (!nextSource && !path)) setDisplayedSource(nextSource);
     setFailed(false);
     setTicketRetryCount(0);
-  }, [item?.imageUrl, item?.ratingKey, path, serverId, stableTransition]);
+  }, [cacheIdentity, item?.imageUrl, item?.ratingKey, path, serverId, stableTransition]);
 
   useEffect(() => {
     if (!isDesktopRuntime() || size === "player" || stableTransition || item?.imageUrl || !path || !serverId) {
@@ -2978,7 +2986,13 @@ export function Artwork({ item, size, className = "", preferArt = false, stableT
     let fallbackTimer: number | undefined;
     const startRequest = () => {
       if (cancelled) return;
-      const request = requestCachedArtwork(serverId, path, dimensions.width, dimensions.height);
+      const request = requestCachedArtwork(
+        serverId,
+        path,
+        dimensions.width,
+        dimensions.height,
+        cacheIdentity,
+      );
       void request
         .then((url) => {
           if (cancelled) return;
@@ -2986,7 +3000,13 @@ export function Artwork({ item, size, className = "", preferArt = false, stableT
           if (stableTransition) setDisplayedSource((current) => current || url);
         })
         .catch(() => {
-          invalidateCachedArtwork(serverId, path, dimensions.width, dimensions.height);
+          invalidateCachedArtwork(
+            serverId,
+            path,
+            dimensions.width,
+            dimensions.height,
+            cacheIdentity,
+          );
           if (!cancelled && ticketRetryCount < 2) {
             // A ticket can race server discovery or expire while a WebView
             // image is being promoted from the lazy queue. Reissue it a
@@ -3017,12 +3037,18 @@ export function Artwork({ item, size, className = "", preferArt = false, stableT
       if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle);
       if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
     };
-  }, [artworkRequestKey, dimensions.height, dimensions.width, failed, path, serverId, size, source, stableTransition, ticketRetryCount, visible]);
+  }, [artworkRequestKey, cacheIdentity, dimensions.height, dimensions.width, failed, path, serverId, size, source, stableTransition, ticketRetryCount, visible]);
 
   const handleImageError = () => {
     const canRefreshTicket = !item?.imageUrl || isLoopbackArtworkSource(item.imageUrl);
     if (canRefreshTicket && artworkRequestKey && isDesktopRuntime()) {
-      if (path && serverId) invalidateCachedArtwork(serverId, path, dimensions.width, dimensions.height);
+      if (path && serverId) invalidateCachedArtwork(
+        serverId,
+        path,
+        dimensions.width,
+        dimensions.height,
+        cacheIdentity,
+      );
       if (ticketRetryCount < 2) {
         setTicketRetryCount((count) => count + 1);
         setFailed(false);
@@ -3074,8 +3100,9 @@ export function Artwork({ item, size, className = "", preferArt = false, stableT
 function PlayerArtwork({ item }: { item?: ArtworkItem }) {
   const serverId = useContext(ArtworkServerContext);
   const path = item?.thumb || item?.composite || item?.art;
+  const cacheIdentity = artworkCacheIdentity(item);
   const initialSource = (item?.imageUrl && !isLoopbackArtworkSource(item.imageUrl) ? item.imageUrl : undefined)
-    || (serverId && path ? getResolvedArtwork(serverId, path) : undefined)
+    || (serverId && path ? getResolvedArtwork(serverId, path, 512, 512, cacheIdentity) : undefined)
     || item?.imageUrl;
   const artworkIdentity = `${item?.ratingKey || "none"}:${path || item?.imageUrl || "none"}`;
   const artworkIdentityRef = useRef(artworkIdentity);
@@ -3100,13 +3127,13 @@ function PlayerArtwork({ item }: { item?: ArtworkItem }) {
 
     const load = async () => {
       let candidate = (item?.imageUrl && !isLoopbackArtworkSource(item.imageUrl) ? item.imageUrl : undefined)
-        || (serverId && path ? getResolvedArtwork(serverId, path) : undefined)
+        || (serverId && path ? getResolvedArtwork(serverId, path, 512, 512, cacheIdentity) : undefined)
         || item?.imageUrl;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         if (!candidate && serverId && path) {
           try {
             candidate = await withStartupTimeout(
-              () => requestCachedArtwork(serverId, path, 420, 420),
+              () => requestCachedArtwork(serverId, path, 420, 420, cacheIdentity),
               STARTUP_ARTWORK_REQUEST_TIMEOUT_MS,
               "底部播放器封面票据准备超时。",
             );
@@ -3128,7 +3155,7 @@ function PlayerArtwork({ item }: { item?: ArtworkItem }) {
           playbackLog("info", "mini_artwork=ready");
           return;
         }
-        if (serverId && path) invalidateCachedArtwork(serverId, path, 420, 420);
+        if (serverId && path) invalidateCachedArtwork(serverId, path, 420, 420, cacheIdentity);
         candidate = undefined;
       }
       if (!cancelled) {
@@ -3140,7 +3167,7 @@ function PlayerArtwork({ item }: { item?: ArtworkItem }) {
     return () => {
       cancelled = true;
     };
-  }, [artworkIdentity, domRetryCount, item?.imageUrl, path, serverId]);
+  }, [artworkIdentity, cacheIdentity, domRetryCount, item?.imageUrl, path, serverId]);
 
   return (
     <span className="player-artwork" aria-hidden="true">
@@ -3148,7 +3175,7 @@ function PlayerArtwork({ item }: { item?: ArtworkItem }) {
         ? <img key={source} src={source} alt="" decoding="async" loading="eager" onError={() => {
           playbackLog("warn", "mini_artwork=dom_error");
           if (serverId && path && domRetryCount < 1) {
-            invalidateCachedArtwork(serverId, path, 420, 420);
+            invalidateCachedArtwork(serverId, path, 420, 420, cacheIdentity);
             setSource(undefined);
             setDomRetryCount((count) => count + 1);
           } else {

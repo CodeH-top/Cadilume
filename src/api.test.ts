@@ -895,6 +895,15 @@ describe("artworkUrl dimensions and runtime boundary", () => {
       width: 1440,
       height: 900,
     });
+
+    await artworkUrl("server-a", "/library/metadata/1/thumb", 420, 420, "album:1");
+    expect(invokeMock).toHaveBeenLastCalledWith("artwork_url", {
+      serverId: "server-a",
+      path: "/library/metadata/1/thumb",
+      width: 420,
+      height: 420,
+      cacheIdentity: "album:1",
+    });
   });
 
   it("returns the original path without invoking Tauri in the browser demo", async () => {

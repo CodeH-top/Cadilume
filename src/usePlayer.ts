@@ -5,7 +5,7 @@ import { acknowledgeQuit, isDesktopRuntime, nativeAudioClearCache, nativeAudioCl
 import { plexMusicGateway } from "./musicGateway";
 import { readOutputDevicePreference, writeOutputDevicePreference } from "./outputDevicePreference";
 import { playbackLog } from "./playbackLog";
-import { getResolvedArtwork, requestCachedArtwork } from "./artworkCache";
+import { artworkCacheIdentity, getResolvedArtwork, requestCachedArtwork } from "./artworkCache";
 import { trackAlbum, trackArtist, type PlexContributor, type PlexItem, type StreamQuality } from "./types";
 
 export type RepeatMode = "off" | "all" | "one";
@@ -760,14 +760,26 @@ const storedOutputSinkId = (): string => readOutputDevicePreference();
 
 function playbackArtworkTicket(serverId: string, track: PlexItem): Promise<string | undefined> {
   if (track.thumb) {
-    return requestCachedArtwork(serverId, track.thumb, 512, 512).catch(() => undefined);
+    return requestCachedArtwork(
+      serverId,
+      track.thumb,
+      512,
+      512,
+      artworkCacheIdentity(track),
+    ).catch(() => undefined);
   }
   return Promise.resolve(track.imageUrl);
 }
 
 function withResolvedArtwork(serverId: string | undefined, track: PlexItem): PlexItem {
   if (!serverId || track.imageUrl || !track.thumb) return track;
-  const imageUrl = getResolvedArtwork(serverId, track.thumb);
+  const imageUrl = getResolvedArtwork(
+    serverId,
+    track.thumb,
+    512,
+    512,
+    artworkCacheIdentity(track),
+  );
   return imageUrl ? { ...track, imageUrl } : track;
 }
 
@@ -1085,7 +1097,7 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
     let lastActiveQuality: StreamQuality = recovery?.initialQuality ?? quality;
     const artworkTicketPromise = playbackArtworkTicket(serverId, track);
     const initialArtworkTicket = track.thumb
-      ? getResolvedArtwork(serverId, track.thumb, 512, 512)
+      ? getResolvedArtwork(serverId, track.thumb, 512, 512, artworkCacheIdentity(track))
       : track.imageUrl;
     try {
       // Put stop + queue sync in the same frontend barrier. The prebuffer effect
@@ -2114,7 +2126,13 @@ export function usePlayer(serverId: string | undefined, quality: StreamQuality) 
         // download is required before the gapless handoff can be prepared.
         const artworkTicketPromise = playbackArtworkTicket(serverId, nextTrack);
         const initialArtworkTicket = nextTrack.thumb
-          ? getResolvedArtwork(serverId, nextTrack.thumb, 512, 512)
+          ? getResolvedArtwork(
+            serverId,
+            nextTrack.thumb,
+            512,
+            512,
+            artworkCacheIdentity(nextTrack),
+          )
           : nextTrack.imageUrl;
         const attemptedQualities: StreamQuality[] = [];
         const diagnostics: string[] = [];

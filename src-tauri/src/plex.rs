@@ -1816,10 +1816,12 @@ pub async fn artwork_url(
     path: String,
     width: Option<u32>,
     height: Option<u32>,
+    cache_identity: Option<String>,
     state: State<'_, PlexState>,
     stream_proxy: State<'_, StreamProxy>,
 ) -> Result<String, String> {
-    let cache_key = ensure_artwork_cached(server_id, path, width, height, &state).await?;
+    let cache_key =
+        ensure_artwork_cached(server_id, path, width, height, cache_identity, &state).await?;
     stream_proxy
         .wait_until_ready()
         .await
@@ -1832,6 +1834,7 @@ async fn ensure_artwork_cached(
     path: String,
     width: Option<u32>,
     height: Option<u32>,
+    cache_identity: Option<String>,
     state: &PlexState,
 ) -> Result<String, String> {
     if !valid_internal_image_path(&path) {
@@ -1840,13 +1843,23 @@ async fn ensure_artwork_cached(
     if !valid_artwork_dimension(width) || !valid_artwork_dimension(height) {
         return Err("图片尺寸必须在 1 到 4096 像素之间".to_string());
     }
+    if !valid_artwork_cache_identity(cache_identity.as_deref()) {
+        return Err("无效的封面缓存专辑标识".to_string());
+    }
     // Resolve the current account's authorized server before consulting disk.
     // A cache hit must never bypass the active PMS ACL boundary.
     let server = state
         .cached_server_ready(&server_id)
         .await
         .map_err(display_error)?;
-    let cache_key = artwork_cache_key(&server_id, &path, width, height, &server.token);
+    let cache_key = artwork_cache_key(
+        &server_id,
+        &path,
+        width,
+        height,
+        &server.token,
+        cache_identity.as_deref(),
+    );
     if let Ok(_cache_guard) = state.cache_lock.read() {
         match read_artwork_cache(&state.cache_dir, &cache_key) {
             Ok(Some(_)) => {
@@ -2605,14 +2618,21 @@ fn artwork_cache_key(
     width: Option<u32>,
     height: Option<u32>,
     authorization_token: &str,
+    cache_identity: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"cadilume-artwork-cache\0v1");
+    hasher.update(b"cadilume-artwork-cache\0v2");
     // Keep cached artwork isolated by the current per-server authorization
     // without ever writing the credential itself to disk.
     update_hash_string(&mut hasher, authorization_token);
     update_hash_string(&mut hasher, server_id);
-    update_hash_string(&mut hasher, path);
+    if let Some(cache_identity) = cache_identity {
+        update_hash_string(&mut hasher, "identity");
+        update_hash_string(&mut hasher, cache_identity);
+    } else {
+        update_hash_string(&mut hasher, "path");
+        update_hash_string(&mut hasher, path);
+    }
     update_hash_dimension(&mut hasher, width);
     update_hash_dimension(&mut hasher, height);
     format!("{:x}", hasher.finalize())
@@ -2858,6 +2878,14 @@ fn valid_internal_image_path(path: &str) -> bool {
 
 fn valid_artwork_dimension(value: Option<u32>) -> bool {
     value.is_none_or(|value| (1..=4096).contains(&value))
+}
+
+fn valid_artwork_cache_identity(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        value
+            .strip_prefix("album:")
+            .is_some_and(valid_plex_identifier)
+    })
 }
 
 fn validate_image_metadata(
@@ -3944,81 +3972,122 @@ mod tests {
         assert!(valid_artwork_dimension(Some(4096)));
         assert!(!valid_artwork_dimension(Some(0)));
         assert!(!valid_artwork_dimension(Some(4097)));
+        assert!(valid_artwork_cache_identity(None));
+        assert!(valid_artwork_cache_identity(Some("album:42")));
+        assert!(!valid_artwork_cache_identity(Some("album:")));
+        assert!(!valid_artwork_cache_identity(Some("track:42")));
+        assert!(!valid_artwork_cache_identity(Some("album:../42")));
     }
 
     #[test]
-    fn artwork_cache_key_is_stable_and_uses_all_request_fields() {
-        let key = artwork_cache_key(
+    fn artwork_cache_key_is_stable_and_groups_album_paths() {
+        let path_key = artwork_cache_key(
             "server-a",
             "/library/metadata/42/thumb/7",
             Some(512),
             None,
             "token-a",
+            None,
         );
         assert_eq!(
-            key,
+            path_key,
             artwork_cache_key(
                 "server-a",
                 "/library/metadata/42/thumb/7",
                 Some(512),
                 None,
-                "token-a"
+                "token-a",
+                None,
             )
         );
-        assert_eq!(
-            key,
-            "e9f2a62e10de143a1c4facaeec3bd471e35e66ee602fe6b210ec2360e40b59ad"
-        );
-        assert_eq!(key.len(), 64);
-        assert!(key.bytes().all(|character| character.is_ascii_hexdigit()));
+        assert_eq!(path_key.len(), 64);
+        assert!(path_key
+            .bytes()
+            .all(|character| character.is_ascii_hexdigit()));
         assert_ne!(
-            key,
+            path_key,
             artwork_cache_key(
                 "server-b",
                 "/library/metadata/42/thumb/7",
                 Some(512),
                 None,
-                "token-a"
+                "token-a",
+                None,
             )
         );
         assert_ne!(
-            key,
+            path_key,
             artwork_cache_key(
                 "server-a",
                 "/library/metadata/43/thumb/7",
                 Some(512),
                 None,
-                "token-a"
+                "token-a",
+                None,
             )
         );
         assert_ne!(
-            key,
+            path_key,
             artwork_cache_key(
                 "server-a",
                 "/library/metadata/42/thumb/7",
                 None,
                 None,
-                "token-a"
+                "token-a",
+                None,
             )
         );
         assert_ne!(
-            key,
+            path_key,
             artwork_cache_key(
                 "server-a",
                 "/library/metadata/42/thumb/7",
                 Some(512),
                 Some(512),
-                "token-a"
+                "token-a",
+                None,
             )
         );
         assert_ne!(
-            key,
+            path_key,
             artwork_cache_key(
                 "server-a",
                 "/library/metadata/42/thumb/7",
                 Some(512),
                 None,
-                "token-b"
+                "token-b",
+                None,
+            )
+        );
+
+        let album_key = artwork_cache_key(
+            "server-a",
+            "/library/metadata/42/thumb/7",
+            Some(512),
+            Some(512),
+            "token-a",
+            Some("album:42"),
+        );
+        assert_eq!(
+            album_key,
+            artwork_cache_key(
+                "server-a",
+                "/library/metadata/999/thumb/8",
+                Some(512),
+                Some(512),
+                "token-a",
+                Some("album:42"),
+            )
+        );
+        assert_ne!(
+            album_key,
+            artwork_cache_key(
+                "server-a",
+                "/library/metadata/42/thumb/7",
+                Some(512),
+                Some(512),
+                "token-a",
+                Some("album:43"),
             )
         );
     }
@@ -4032,6 +4101,7 @@ mod tests {
             Some(256),
             Some(256),
             "token-a",
+            None,
         );
         let bytes = b"fake-image-payload";
 
@@ -4058,7 +4128,7 @@ mod tests {
     }
 
     #[test]
-    fn artwork_cache_prunes_the_oldest_entries_to_its_disk_budget() {
+    fn artwork_cache_prunes_by_total_size_without_limiting_entry_count() {
         let cache = TestCache::new();
         let oldest_key = artwork_cache_key(
             "server-a",
@@ -4066,6 +4136,7 @@ mod tests {
             Some(256),
             Some(256),
             "token-a",
+            None,
         );
         let newest_key = artwork_cache_key(
             "server-a",
@@ -4073,6 +4144,7 @@ mod tests {
             Some(256),
             Some(256),
             "token-a",
+            None,
         );
         write_artwork_cache(&cache.artwork, &oldest_key, "image/png", b"oldest")
             .expect("oldest artwork should be cached");
@@ -4100,7 +4172,7 @@ mod tests {
         let maximum_size = fs::metadata(&newest_path).unwrap().len() + incoming_size;
 
         prune_artwork_cache_to_fit(&cache.artwork, incoming_size, maximum_size)
-            .expect("quota pruning should succeed");
+            .expect("size-based pruning should succeed");
 
         assert!(!oldest_path.exists());
         assert!(newest_path.exists());
@@ -4115,6 +4187,7 @@ mod tests {
             None,
             None,
             "token-a",
+            None,
         );
         write_artwork_cache(&cache.artwork, &key, "image/jpeg", b"cached-image")
             .expect("artwork should be cached");

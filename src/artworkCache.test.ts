@@ -1,12 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { artworkUrl } = vi.hoisted(() => ({
-  artworkUrl: vi.fn<(serverId: string, path: string, width: number, height?: number) => Promise<string>>(),
+  artworkUrl: vi.fn<(
+    serverId: string,
+    path: string,
+    width: number,
+    height?: number,
+    cacheIdentity?: string,
+  ) => Promise<string>>(),
 }));
 
 vi.mock("./api", () => ({ artworkUrl }));
 
 import {
+  artworkCacheIdentity,
   clearArtworkTicketCache,
   getResolvedArtwork,
   invalidateCachedArtwork,
@@ -37,23 +44,51 @@ describe("shared artwork ticket cache", () => {
     expect(getResolvedArtwork("server-a", "/thumb/a")).toBe("http://127.0.0.1:4000/artwork/ticket");
   });
 
-  it("prewarms every distinct restored-queue artwork path with bounded workers", async () => {
+  it("prewarms restored queue artwork once per album and aliases every track path", async () => {
     artworkUrl.mockImplementation(async (_serverId, path, width, height) => (
       `http://127.0.0.1:4000/artwork/${path.slice(1)}-${width}x${height}`
     ));
 
+    const firstAlbum = Array.from({ length: 500 }, (_, index) => ({
+      parentRatingKey: "album-1",
+      thumb: `/thumb/album-1-track-${index}`,
+    }));
     await prewarmArtwork("server-a", [
-      { thumb: "/thumb/current" },
-      { thumb: "/thumb/next" },
-      { thumb: "/thumb/current", art: "/art/ignored" },
-      { composite: "/composite/third" },
+      ...firstAlbum,
+      { parentRatingKey: "album-2", composite: "/composite/album-2" },
     ], 2);
 
-    expect(artworkUrl).toHaveBeenCalledTimes(3);
-    expect(artworkUrl).toHaveBeenCalledWith("server-a", "/thumb/current", 420, 420);
-    expect(artworkUrl).toHaveBeenCalledWith("server-a", "/thumb/next", 420, 420);
-    expect(artworkUrl).toHaveBeenCalledWith("server-a", "/composite/third", 420, 420);
-    expect(getResolvedArtwork("server-a", "/thumb/next")).toContain("/artwork/thumb/next-420x420");
+    expect(artworkUrl).toHaveBeenCalledTimes(2);
+    expect(artworkUrl).toHaveBeenCalledWith(
+      "server-a",
+      "/thumb/album-1-track-0",
+      420,
+      420,
+      "album:album-1",
+    );
+    expect(artworkUrl).toHaveBeenCalledWith(
+      "server-a",
+      "/composite/album-2",
+      420,
+      420,
+      "album:album-2",
+    );
+    expect(getResolvedArtwork(
+      "server-a",
+      "/thumb/album-1-track-499",
+      512,
+      512,
+      artworkCacheIdentity({ parentRatingKey: "album-1" }),
+    ))
+      .toContain("/artwork/thumb/album-1-track-0-420x420");
+    await requestCachedArtwork(
+      "server-a",
+      "/thumb/album-1-track-499",
+      96,
+      96,
+      artworkCacheIdentity({ parentRatingKey: "album-1" }),
+    );
+    expect(artworkUrl).toHaveBeenCalledTimes(2);
   });
 
   it("upgrades a path owner when a larger square is actually required", async () => {
@@ -131,7 +166,7 @@ describe("shared artwork ticket cache", () => {
       .toBe("http://127.0.0.1:4000/artwork/current");
   });
 
-  it("evicts path owners and resolved tickets together at the LRU limit", async () => {
+  it("retains all path owners and resolved tickets without a total entry limit", async () => {
     artworkUrl.mockImplementation(async (_serverId, path) => (
       `http://127.0.0.1:4000/artwork/${path.split("/").pop()}`
     ));
@@ -140,10 +175,11 @@ describe("shared artwork ticket cache", () => {
       requestCachedArtwork("server-a", `/thumb/${index}`, 96, 96)
     )));
 
-    expect(getResolvedArtwork("server-a", "/thumb/0")).toBeUndefined();
+    expect(getResolvedArtwork("server-a", "/thumb/0"))
+      .toBe("http://127.0.0.1:4000/artwork/0");
     expect(getResolvedArtwork("server-a", "/thumb/640"))
       .toBe("http://127.0.0.1:4000/artwork/640");
     await requestCachedArtwork("server-a", "/thumb/0", 96, 96);
-    expect(artworkUrl).toHaveBeenCalledTimes(642);
+    expect(artworkUrl).toHaveBeenCalledTimes(641);
   });
 });
